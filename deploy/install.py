@@ -40,16 +40,29 @@ SETTINGS = {
 def configured_ini(template: str) -> str:
     out = []
     section = None
+    written = set()
+
+    def add_missing(sec):
+        # Keys the shipped ini does not list (some are read but undocumented there) go at the end of
+        # their own section.
+        for k, v in SETTINGS.get(sec, {}).items():
+            if (sec, k) not in written:
+                out.append(f"{k}={v}")
+                written.add((sec, k))
+
     for line in template.splitlines():
         m = re.match(r"^\[(.+)\]\s*$", line)
         if m:
+            add_missing(section)
             section = m.group(1)
         else:
             kv = re.match(r"^([A-Za-z0-9_]+)=", line)
             if kv and section in SETTINGS and kv.group(1) in SETTINGS[section]:
                 line = f"{kv.group(1)}={SETTINGS[section][kv.group(1)]}"
+                written.add((section, kv.group(1)))
         out.append(line)
-    return "\r\n".join(out) + "\r\n"
+    add_missing(section)
+    return (chr(13) + chr(10)).join(out) + chr(13) + chr(10)
 
 
 def sha(path: str) -> str:
