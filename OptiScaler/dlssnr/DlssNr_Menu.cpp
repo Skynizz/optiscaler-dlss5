@@ -302,6 +302,79 @@ void RenderMenu(Config* config, float menuResScale)
             }
         }
 
+        ImGui::SeparatorText("Benchmark: your technique vs vanilla");
+
+        {
+            static bool includeOff = true;
+            const auto bs = DlssNr::GetBenchmarkStatus();
+
+            if (!bs.active)
+            {
+                if (ImGui::Button("Run the FPS comparison"))
+                    DlssNr::StartBenchmark(includeOff);
+
+                ImGui::SameLine();
+                ImGui::Checkbox("Include NR off", &includeOff);
+            }
+            else
+            {
+                ImGui::Text("Measuring: %s %s (%.0f%%)", DlssNr::BenchmarkPhaseName(bs.phase),
+                            bs.warmingUp ? "- warming up" : "", 100.0f * bs.phaseProgress);
+                ImGui::SameLine();
+
+                if (ImGui::SmallButton("Cancel##bench"))
+                    DlssNr::CancelBenchmark();
+            }
+
+            HelpMarker("Runs the same scene with Neural Rendering off, then as it ships (the model every"
+                       "\nframe), then with the edit cache on your current settings -- 3 s to settle and"
+                       "\n8 s measured each. Stand still, or walk the same path each time: what is on"
+                       "\nscreen changes the numbers more than anything."
+                       "\n\nFrames are the ones the game renders: frame generation multiplies what you see"
+                       "\nbut costs nothing here, so it is left out. Results also go to"
+                       "\ndlssnr-benchmark.txt beside OptiScaler.");
+
+            const auto& vanilla = bs.results[1];
+
+            if (ImGui::BeginTable("dlssnr-bench", 5, ImGuiTableFlags_Borders | ImGuiTableFlags_SizingFixedFit))
+            {
+                ImGui::TableSetupColumn("Mode");
+                ImGui::TableSetupColumn("FPS");
+                ImGui::TableSetupColumn("1% low");
+                ImGui::TableSetupColumn("NR pass");
+                ImGui::TableSetupColumn("vs vanilla");
+                ImGui::TableHeadersRow();
+
+                for (int p = 0; p < 3; ++p)
+                {
+                    const auto& r = bs.results[p];
+
+                    if (!r.valid)
+                        continue;
+
+                    ImGui::TableNextRow();
+                    ImGui::TableNextColumn();
+                    ImGui::TextUnformatted(DlssNr::BenchmarkPhaseName(p));
+                    ImGui::TableNextColumn();
+                    ImGui::Text("%.1f", r.fps);
+                    ImGui::TableNextColumn();
+                    ImGui::Text("%.1f", r.low1);
+                    ImGui::TableNextColumn();
+                    ImGui::Text(p == 0 ? "-" : "%.2f ms", r.nrMs);
+                    ImGui::TableNextColumn();
+
+                    if (vanilla.valid && p != 1 && vanilla.fps > 0.0)
+                        ImGui::TextColored(r.fps >= vanilla.fps ? ImVec4(0.4f, 0.9f, 0.5f, 1.0f)
+                                                                : ImVec4(1.0f, 0.5f, 0.4f, 1.0f),
+                                           "%+.0f%%", 100.0 * (r.fps / vanilla.fps - 1.0));
+                    else
+                        ImGui::TextDisabled(p == 1 ? "reference" : "-");
+                }
+
+                ImGui::EndTable();
+            }
+        }
+
         ImGui::SeparatorText("Edit cache (performance)");
 
         {
@@ -368,9 +441,9 @@ void RenderMenu(Config* config, float menuResScale)
                     config->DlssNrCacheHighDecay = decay;
                     config->DlssNrCacheDepthTolerance = depthTol;
                     config->DlssNrCacheColourTolerance = colourTol;
-                    // A band refreshing should settle in rather than snap; a whole-frame refresh is
-                    // taken whole, as the model gave it.
-                    config->DlssNrCacheRefreshBlend = config->DlssNrCacheSpread.value_or_default() ? 0.6f : 1.0f;
+                    // Taken whole: blending refreshes averages away the detail the model re-decides
+                    // each run, and faces lose exactly what Neural Rendering is for.
+                    config->DlssNrCacheRefreshBlend = 1.0f;
                     config->DlssNrCacheModelHistory = 1u;
                     config->DlssNrCacheBilateral = true;
                 };
@@ -503,7 +576,9 @@ void RenderMenu(Config* config, float menuResScale)
                            "\nat a similar depth and brightness, rather than from whatever is nearest. Keeps"
                            "\na character's edit off the wall behind them.");
 
-                if (ImGui::TreeNode("Multi-pass approximation"))
+                ImGui::SetNextItemOpen(true, ImGuiCond_Once);
+
+                if (ImGui::TreeNode("Multi-pass (amplify the model's edit)"))
                 {
                     float lowGain = config->DlssNrCacheLowGain.value_or_default();
 

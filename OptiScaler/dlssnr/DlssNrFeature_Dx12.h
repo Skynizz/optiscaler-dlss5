@@ -143,5 +143,31 @@ CacheStatus GetCacheStatus();
 // tools/dlssnr_cache/measure_reprojection.py. The model runs on every one of them.
 void RequestCacheDump();
 
+// The A/B benchmark: Neural Rendering off (optional), as it ships, and with the edit cache, on the same
+// scene one after the other. Rendered frames only -- frame generation is excluded on purpose.
+struct BenchmarkResult
+{
+    bool valid = false;
+    double fps = 0.0;
+    double low1 = 0.0;    // 1% low
+    double frameMs = 0.0;
+    double nrMs = 0.0;    // the Neural Rendering pass on the GPU, averaged
+    unsigned int frames = 0;
+};
+
+struct BenchmarkStatus
+{
+    bool active = false;
+    int phase = 0;
+    float phaseProgress = 0.0f;
+    bool warmingUp = false;
+    BenchmarkResult results[3]; // off, vanilla, cache
+};
+
+void StartBenchmark(bool includeOff);
+void CancelBenchmark();
+BenchmarkStatus GetBenchmarkStatus();
+const char* BenchmarkPhaseName(int phase);
+
 void Shutdown();
 } // namespace DlssNr

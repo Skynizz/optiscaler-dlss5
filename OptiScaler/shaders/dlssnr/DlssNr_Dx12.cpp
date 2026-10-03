@@ -2967,6 +2967,228 @@ void FinishPassTiming(ID3D12GraphicsCommandList* cmdList, ID3D12CommandQueue* ti
 }
 } // namespace
 
+// ---------------------------------------------------------------------------------------------
+// The A/B benchmark: the same scene with Neural Rendering off, as it ships (the model every frame),
+// and with the edit cache on, one after the other, measured the same way.
+//
+// Frame time is the interval between upscaler evaluates -- the frames the game actually renders. With
+// frame generation the screen shows more than that, but generated frames cost nothing here and would
+// only hide the difference being measured.
+// ---------------------------------------------------------------------------------------------
+namespace
+{
+struct BenchState
+{
+    bool active = false;
+    bool includeOff = true;
+    int phase = 0; // 0 off, 1 vanilla, 2 cache
+    LARGE_INTEGER phaseStart {};
+    LARGE_INTEGER last {};
+    std::vector<float> frames;
+    double gpuSum = 0.0;
+    unsigned int gpuCount = 0;
+
+    // What the user had, put back at the end whatever happens.
+    bool savedEnabled = false;
+    bool savedCache = false;
+
+    DlssNr::BenchmarkResult results[3];
+};
+
+BenchState g_bench;
+
+constexpr double kBenchWarmup = 3.0;  // seconds: model rebuilds, history settles
+constexpr double kBenchMeasure = 8.0; // seconds measured per phase
+
+double Seconds(LARGE_INTEGER a, LARGE_INTEGER b)
+{
+    LARGE_INTEGER f;
+    QueryPerformanceFrequency(&f);
+    return (double) (b.QuadPart - a.QuadPart) / (double) f.QuadPart;
+}
+
+void BenchApplyPhase()
+{
+    Config* cfg = Config::Instance();
+    cfg->DlssNrEnabled = g_bench.phase != 0;
+    cfg->DlssNrCacheEnabled = g_bench.phase == 2;
+    g_bench.frames.clear();
+    g_bench.gpuSum = 0.0;
+    g_bench.gpuCount = 0;
+    QueryPerformanceCounter(&g_bench.phaseStart);
+    g_bench.last = g_bench.phaseStart;
+}
+
+void BenchFinishPhase()
+{
+    auto& r = g_bench.results[g_bench.phase];
+    r = {};
+
+    if (g_bench.frames.size() >= 10)
+    {
+        std::vector<float> sorted = g_bench.frames;
+        std::sort(sorted.begin(), sorted.end());
+        double sum = 0.0;
+
+        for (float f : sorted)
+            sum += f;
+
+        const double avg = sum / sorted.size();
+
+        // 1% low: the frame rate of the slowest 1% of frames, the number that says whether it stutters.
+        const size_t from = (size_t) (sorted.size() * 0.99);
+        double slow = 0.0;
+
+        for (size_t i = from; i < sorted.size(); ++i)
+            slow += sorted[i];
+
+        slow /= std::max<size_t>(1, sorted.size() - from);
+
+        r.valid = true;
+        r.fps = avg > 0.0 ? 1000.0 / avg : 0.0;
+        r.low1 = slow > 0.0 ? 1000.0 / slow : 0.0;
+        r.frameMs = avg;
+        r.nrMs = g_bench.gpuCount > 0 ? g_bench.gpuSum / g_bench.gpuCount : 0.0;
+        r.frames = (unsigned int) sorted.size();
+    }
+
+    LOG_INFO("DLSS-NR benchmark: {} -> {:.1f} fps, 1% low {:.1f}, frame {:.2f} ms, NR pass {:.2f} ms ({} frames)",
+             DlssNr::BenchmarkPhaseName(g_bench.phase), r.fps, r.low1, r.frameMs, r.nrMs, r.frames);
+}
+
+void BenchEnd()
+{
+    Config* cfg = Config::Instance();
+    cfg->DlssNrEnabled = g_bench.savedEnabled;
+    cfg->DlssNrCacheEnabled = g_bench.savedCache;
+    g_bench.active = false;
+
+    // A copy on disk, so a result can be compared with the next build's.
+    std::error_code ec;
+    const auto path = Util::DllPath().remove_filename() / "dlssnr-benchmark.txt";
+    FILE* f = _wfopen(path.wstring().c_str(), L"a");
+
+    if (f != nullptr)
+    {
+        fprintf(f, "--- DLSS-NR benchmark (rendered frames, frame generation excluded)\n");
+
+        for (int p = 0; p < 3; ++p)
+        {
+            const auto& r = g_bench.results[p];
+
+            if (r.valid)
+                fprintf(f, "%-34s %7.1f fps  1%% low %7.1f  frame %6.2f ms  NR pass %6.2f ms\n",
+                        DlssNr::BenchmarkPhaseName(p), r.fps, r.low1, r.frameMs, r.nrMs);
+        }
+
+        fclose(f);
+    }
+}
+
+void BenchTick()
+{
+    if (!g_bench.active)
+        return;
+
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+
+    const double sincePhase = Seconds(g_bench.phaseStart, now);
+    const double frameMs = Seconds(g_bench.last, now) * 1000.0;
+    g_bench.last = now;
+
+    if (sincePhase > kBenchWarmup && frameMs > 0.0 && frameMs < 1000.0)
+    {
+        g_bench.frames.push_back((float) frameMs);
+
+        if (g_bench.phase != 0 && g_lastGpuTime.has_value())
+        {
+            g_bench.gpuSum += g_lastGpuTime.value();
+            g_bench.gpuCount++;
+        }
+    }
+
+    if (sincePhase >= kBenchWarmup + kBenchMeasure)
+    {
+        BenchFinishPhase();
+
+        if (g_bench.phase >= 2)
+        {
+            BenchEnd();
+            return;
+        }
+
+        g_bench.phase++;
+        BenchApplyPhase();
+    }
+}
+} // namespace
+
+namespace DlssNr
+{
+const char* BenchmarkPhaseName(int phase)
+{
+    switch (phase)
+    {
+    case 0: return "Neural Rendering off";
+    case 1: return "DLSS 5 vanilla (model every frame)";
+    case 2: return "DLSS 5 + edit cache (your settings)";
+    default: return "?";
+    }
+}
+
+void StartBenchmark(bool includeOff)
+{
+    if (g_bench.active)
+        return;
+
+    Config* cfg = Config::Instance();
+    g_bench.savedEnabled = cfg->DlssNrEnabled.value_or_default();
+    g_bench.savedCache = cfg->DlssNrCacheEnabled.value_or_default();
+    g_bench.includeOff = includeOff;
+
+    for (auto& r : g_bench.results)
+        r = {};
+
+    g_bench.phase = includeOff ? 0 : 1;
+    g_bench.active = true;
+    BenchApplyPhase();
+    LOG_INFO("DLSS-NR benchmark started");
+}
+
+void CancelBenchmark()
+{
+    if (g_bench.active)
+    {
+        Config* cfg = Config::Instance();
+        cfg->DlssNrEnabled = g_bench.savedEnabled;
+        cfg->DlssNrCacheEnabled = g_bench.savedCache;
+        g_bench.active = false;
+    }
+}
+
+BenchmarkStatus GetBenchmarkStatus()
+{
+    BenchmarkStatus s {};
+    s.active = g_bench.active;
+    s.phase = g_bench.phase;
+
+    if (g_bench.active)
+    {
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        const double total = kBenchWarmup + kBenchMeasure;
+        s.phaseProgress = (float) std::clamp(Seconds(g_bench.phaseStart, now) / total, 0.0, 1.0);
+        s.warmingUp = Seconds(g_bench.phaseStart, now) < kBenchWarmup;
+    }
+
+    for (int p = 0; p < 3; ++p)
+        s.results[p] = g_bench.results[p];
+
+    return s;
+}
+} // namespace DlssNr
+
 namespace DlssNr
 {
 void RetryAfterFailure()
@@ -2985,6 +3207,10 @@ void RetryAfterFailure()
 void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
                           ID3D12CommandQueue* timingQueue)
 {
+    // Every rendered frame reaches here, Neural Rendering on or off, which is what lets the benchmark
+    // time the off phase the same way as the others.
+    BenchTick();
+
     if (!Config::Instance()->DlssNrEnabled.value_or_default())
     {
         ReportSkipOnce("it is switched off");
