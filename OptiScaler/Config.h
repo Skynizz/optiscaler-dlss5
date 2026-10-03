@@ -494,9 +494,45 @@ class Config
     // Higher means highlights sit lower on the curve and the model treats them as less extreme.
     CustomOptional<float> DlssNrWhitePointScale { 1.0f };
 
+    // The temporal edit cache (shaders/dlssnr/DlssNr_EditCache_Dx12). Off by default, and off is the
+    // pass exactly as it was: the model runs every frame and none of the cache's code is reached.
+    //
+    // On, the model runs one frame in CacheInterval (or sooner, see CacheAdaptive) and its edit -- what
+    // it changed, as a ratio, never the picture -- is reprojected onto the frames in between. D3D12.
+    CustomOptional<bool> DlssNrCacheEnabled { false };
+    // At most this many frames between model runs. 1 runs it every frame (useful with the gains below).
+    CustomOptional<uint32_t> DlssNrCacheInterval { 3 };
+    // Run the model early once this fraction of the frame has been revealed since it last ran.
+    CustomOptional<bool> DlssNrCacheAdaptive { true };
+    CustomOptional<float> DlssNrCacheAdaptiveThreshold { 0.10f };
+    // Validation: relative depth (0.10 = 10%) and the frame's own luma change in stops.
+    CustomOptional<float> DlssNrCacheDepthTolerance { 0.10f };
+    CustomOptional<float> DlssNrCacheColourTolerance { 0.50f };
+    // How much of the high band's confidence survives each cached frame.
+    CustomOptional<float> DlssNrCacheHighDecay { 0.92f };
+    // On a refresh, the share of the model's new edit taken (1 = all; lower smooths the refresh).
+    CustomOptional<float> DlssNrCacheRefreshBlend { 1.0f };
+    // Multi-pass approximation: gains on the low and high bands of the edit, in log space.
+    CustomOptional<float> DlssNrCacheLowGain { 1.0f };
+    CustomOptional<float> DlssNrCacheHighGain { 1.0f };
+    // Fill rejected pixels from neighbours on the same surface (depth and luma) rather than nearest.
+    CustomOptional<bool> DlssNrCacheBilateral { true };
+    // What the model is told on a refresh: 0 the game's vectors, 1 motion accumulated since it last
+    // ran, 2 reset its history every refresh.
+    CustomOptional<uint32_t> DlssNrCacheModelHistory { 1 };
+    // Priority pixels (characters) from the depth buffer's stencil: (stencil & Mask) == Ref.
+    CustomOptional<bool> DlssNrCacheStencil { false };
+    CustomOptional<uint32_t> DlssNrCacheStencilMask { 0 };
+    CustomOptional<uint32_t> DlssNrCacheStencilRef { 0 };
+    // 0 off, 1 confidence, 2 low band, 3 high band, 4 stencil plane.
+    CustomOptional<uint32_t> DlssNrCacheDebugView { 0 };
+    // How many consecutive frames the measurement dump writes.
+    CustomOptional<uint32_t> DlssNrCacheDumpFrames { 12 };
 
-
-
+    // Joint bilateral enlargement of a below-size model's answer, guided by the full-size frame.
+    // Only acts when the model resolution is under 100%; off is the resolve exactly as it was.
+    CustomOptional<bool> DlssNrJbuUpsample { false };
+    CustomOptional<float> DlssNrJbuSigma { 0.08f };
 
     // --- end DLSS 5 Neural Rendering -------------------------------------------------------------
 

@@ -10,6 +10,7 @@
 #include <dlssnr/DlssNr_ExposureScan.h>
 
 #include "DlssNr_Dx12.h"
+#include "DlssNr_EditCache_Dx12.h"
 
 #include <Config.h>
 #include <State.h>
@@ -349,6 +350,14 @@ struct NrState
 NrState g_nr;
 std::unique_ptr<DlssNr_Dx12> g_compose;
 
+// The temporal edit cache, and the joint bilateral upsampler that shares its shader. Created on first
+// use only -- with both options off nothing of it exists.
+std::unique_ptr<DlssNrEditCache_Dx12> g_cache;
+
+// The pass's cost averaged over frames, because with the cache on consecutive frames cost very
+// different amounts and the last reading alone says little.
+double g_avgGpuTime = 0.0;
+
 // What the pass costs on the GPU, for the breakdown in the overlay.
 std::unique_ptr<GpuTime_Dx12> g_gpuTime;
 
@@ -419,6 +428,16 @@ void CheckCaptureTrigger()
         std::filesystem::remove(trigger, ec);
         DlssNr::RequestCapture(capture::kMaxFrames);
         LOG_INFO("DLSS-NR capture requested by trigger file");
+    }
+
+    // The edit cache's measurement dump, the same way.
+    const auto cacheTrigger = Util::DllPath().remove_filename() / "dlssnr-cachedump.trigger";
+
+    if (std::filesystem::exists(cacheTrigger, ec))
+    {
+        std::filesystem::remove(cacheTrigger, ec);
+        DlssNr::RequestCacheDump();
+        LOG_INFO("DLSS-NR edit cache dump requested by trigger file");
     }
 }
 
@@ -1356,6 +1375,9 @@ void ReportSkipOnce(const char* reason)
         LOG_INFO("DLSS-NR did not run: {}", reason);
 }
 
+// Defined after the pass; shared by its model path and the edit cache's cached frames.
+void FinishPassTiming(ID3D12GraphicsCommandList* cmdList, ID3D12CommandQueue* timingQueue);
+
 } // namespace
 
 // ---------------------------------------------------------------------------------------------
@@ -2032,6 +2054,98 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         }
     }
 
+    // The temporal edit cache. Off -- the default -- reaches none of this, and the pass below runs
+    // exactly as it always has.
+    //
+    // It stands aside whenever something else wants to see the model's own output on this frame: a
+    // held frame, a comparison, a debug view, the proxy path, a capture. Those are instruments, and an
+    // instrument reading a carried edit would be measuring the cache rather than the model.
+    const bool cacheWanted = cfg.DlssNrCacheEnabled.value_or_default() && !cfg.DlssNrHoldFrame.value_or_default() &&
+                             cfg.DlssNrCompare.value_or_default() == 0 && cfg.DlssNrDebugView.value_or_default() == 0 &&
+                             !cfg.DlssNrUseProxy.value_or_default() && !g_capture.isActive();
+    bool cacheActive = false;
+    bool cacheRefresh = true;
+
+    if (cacheWanted)
+    {
+        if (g_cache == nullptr)
+            g_cache = std::make_unique<DlssNrEditCache_Dx12>(device);
+
+        if (g_cache != nullptr && g_cache->IsInit())
+        {
+            cacheActive = true;
+            cacheRefresh = g_cache->BeginFrame(cfg, device, width, height, desc.Format, frame.Reset || g_nr.reset);
+        }
+        else
+        {
+            ReportSkipOnce("the edit cache could not be created, so the model runs every frame");
+        }
+    }
+    else if (g_cache != nullptr)
+    {
+        // Whatever it holds is from before it stood aside; switching back on starts from a refresh.
+        g_cache->Invalidate();
+    }
+
+    // What the cache needs to know about this frame's guides, once they have been made readable.
+    auto cacheInputs = [&](ID3D12Resource* depthReadable, ID3D12Resource* motionReadable)
+    {
+        DlssNrCacheInputs in {};
+        in.depth = depthReadable;
+        in.motion = motionReadable;
+        in.depthSource = depth;
+        in.depthWidth = guideWidth;
+        in.depthHeight = guideHeight;
+
+        // The motion texture may be at render or display resolution. Its own size is its valid region,
+        // unless it is the same allocation size as depth, in which case the game's subrect covers both.
+        const D3D12_RESOURCE_DESC md = motion->GetDesc();
+        in.motionWidth = (unsigned int) md.Width;
+        in.motionHeight = md.Height;
+
+        if (md.Width == guideDesc.Width && md.Height == guideDesc.Height)
+        {
+            in.motionWidth = guideWidth;
+            in.motionHeight = guideHeight;
+        }
+
+        in.mvScaleX = g_nr.guideMvScaleX;
+        in.mvScaleY = g_nr.guideMvScaleY;
+        in.depthInverted = g_nr.guideDepthInverted;
+        in.whitePoint = whitePoint;
+        in.passthrough = !isHdrBuffer;
+        return in;
+    };
+
+    if (cacheActive && !cacheRefresh)
+    {
+        // A cached frame: no encode, no model, no resolve. The carried edit is laid on the frame the
+        // upscaler just wrote, which stays the game's own.
+        DlssNr::ExposureScan::Tick(device, cmdList);
+
+        ID3D12Resource* depthIn = ReadableGuide(device, cmdList, depth, &g_nr.depthClone);
+        ID3D12Resource* motionIn = ReadableGuide(device, cmdList, motion, &g_nr.motionClone);
+
+        if (depthIn != nullptr && motionIn != nullptr)
+            g_cache->RunCached(cmdList, device, target, g_nr.hdrCopy, cacheInputs(depthIn, motionIn));
+
+        g_cache->EndFrame(cmdList);
+        FinishPassTiming(cmdList, timingQueue);
+
+        // The same hand-back as the end of the model path.
+        if (g_nr.depthClone != nullptr)
+            Barrier(cmdList, g_nr.depthClone, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_COPY_DEST);
+
+        if (g_nr.motionClone != nullptr)
+            Barrier(cmdList, g_nr.motionClone, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_COPY_DEST);
+
+        Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, outputArrival);
+        device->Release();
+        return;
+    }
+
     DlssNrConstants encodeParams {};
     encodeParams.Mode = DlssNrMode_Encode;
     // A frame that is already display-referred is handed over untouched: the encode becomes a copy and
@@ -2144,6 +2258,25 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, outputArrival);
         device->Release();
         return;
+    }
+
+    // On a refresh with the cache on, the model has not seen the frames since it last ran. Its own
+    // history is reprojected by the vectors it is handed, so it is handed the motion accumulated over
+    // all of them (same units, same scale) -- or told to reset, as configured. The cache itself keeps
+    // the game's own one-frame vectors.
+    DlssNrCacheInputs cacheIn {};
+
+    if (cacheActive)
+    {
+        cacheIn = cacheInputs(depthIn, motionIn);
+
+        bool resetModel = false;
+
+        if (ID3D12Resource* accumulated = g_cache->ModelMotion(cmdList, device, cacheIn, resetModel))
+            motionIn = accumulated;
+
+        if (resetModel)
+            g_nr.reset = true;
     }
 
     // The vectors were scaled to full-frame pixels; the image the model reprojects is the working size.
@@ -2359,14 +2492,44 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         ID3D12Resource* resolveProxy = superDownOk ? g_nr.colorCopy : modelInput;
         ID3D12Resource* resolveAnswer = superDownOk ? g_nr.outputNative : g_nr.output;
 
+        // Joint bilateral enlargement, when asked for and the model ran below the frame: the model's
+        // residual is brought to full size guided by the full-size proxy, and the resolve then sees
+        // two full-size pictures -- its classic path, with nothing left to enlarge. Off leaves the
+        // resolve exactly as it was.
+        bool jbuOk = false;
+
+        if (!superDownOk && reduced && workScale < 1.0f && cfg.DlssNrJbuUpsample.value_or_default())
+        {
+            if (g_cache == nullptr)
+                g_cache = std::make_unique<DlssNrEditCache_Dx12>(device);
+
+            if (g_cache != nullptr && g_cache->IsInit())
+            {
+                if (ID3D12Resource* up = g_cache->UpsampleModel(cmdList, device, g_nr.colorCopy, modelInput, g_nr.output,
+                                                                !isHdrBuffer, cfg.DlssNrJbuSigma.value_or_default()))
+                {
+                    resolveProxy = g_nr.colorCopy;
+                    resolveAnswer = up;
+                    jbuOk = true;
+                }
+            }
+        }
+
         DispatchPass(cmdList, resolveParams, resolveProxy, resolveAnswer, g_nr.hdrCopy, motionIn,
                             exposureTex, target, nullptr);
         Barrier(cmdList, g_nr.output, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
+        if (jbuOk)
+            g_cache->FinishUpsample(cmdList);
+
         if (superDownOk)
             Barrier(cmdList, g_nr.outputNative, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                     D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        // A refresh: store what the model just did, so the frames until the next one can carry it.
+        if (cacheActive)
+            g_cache->CaptureRefresh(cmdList, device, target, g_nr.hdrCopy, cacheIn);
 
         // On-demand capture works in this path too: the staging copy still holds the frame as the
         // upscaler produced it, and the edited frame is the output itself. The write happens a few
@@ -2393,43 +2556,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     Barrier(cmdList, g_nr.hdrCopy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
-    if (g_gpuTime != nullptr)
-    {
-        g_gpuTime->End(cmdList);
+    if (cacheActive)
+        g_cache->EndFrame(cmdList);
 
-        // This path records into the game's own list, so there is no queue of ours to read from.
-        // A caller that knows which queue the list goes to says so; otherwise the one the upscaler was
-        // invoked on serves. The bridges have to say, because they run on a queue of their own that
-        // State never learns about -- a Vulkan game creates no D3D12 swapchain, so nothing ever sets
-        // currentCommandQueue and the cost went unreported.
-        auto* queue = timingQueue != nullptr ? timingQueue
-                                             : (ID3D12CommandQueue*) State::Instance().currentCommandQueue;
-
-        if (queue != nullptr)
-        {
-            if (auto ms = g_gpuTime->ReadGpuTime(queue); ms.has_value())
-                g_lastGpuTime = ms;
-
-            if (g_ngxTime != nullptr)
-            {
-                if (auto ngx = g_ngxTime->ReadGpuTime(queue); ngx.has_value())
-                    g_lastNgxTime = ngx;
-            }
-
-            // The split, once every few hundred frames. What is worth reading is not the total but the
-            // remainder: the model's cost is NVIDIA's to set, and everything else is ours.
-            static unsigned long long lastSplitLog = 0;
-
-            if (g_lastGpuTime.has_value() && g_lastNgxTime.has_value() && g_frames - lastSplitLog > 600)
-            {
-                lastSplitLog = g_frames;
-                const double total = g_lastGpuTime.value();
-                const double ngx = g_lastNgxTime.value();
-                LOG_INFO("DLSS-NR cost: {:.2f} ms total = {:.2f} ms model + {:.2f} ms ours ({:.0f}% ours)",
-                         total, ngx, total - ngx, total > 0.0 ? 100.0 * (total - ngx) / total : 0.0);
-            }
-        }
-    }
+    FinishPassTiming(cmdList, timingQueue);
 
     // Put any guide clones back where the next frame's copy expects to find them.
     // A clone left in NON_PIXEL_SHADER_RESOURCE by a frozen frame was never transitioned back to
@@ -2457,6 +2587,54 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     device->Release();
 }
+
+namespace
+{
+// The end of the pass's GPU timing, shared by the model path and the edit cache's cached frames.
+void FinishPassTiming(ID3D12GraphicsCommandList* cmdList, ID3D12CommandQueue* timingQueue)
+{
+    if (g_gpuTime != nullptr)
+    {
+        g_gpuTime->End(cmdList);
+
+        // This path records into the game's own list, so there is no queue of ours to read from.
+        // A caller that knows which queue the list goes to says so; otherwise the one the upscaler was
+        // invoked on serves. The bridges have to say, because they run on a queue of their own that
+        // State never learns about -- a Vulkan game creates no D3D12 swapchain, so nothing ever sets
+        // currentCommandQueue and the cost went unreported.
+        auto* queue = timingQueue != nullptr ? timingQueue
+                                             : (ID3D12CommandQueue*) State::Instance().currentCommandQueue;
+
+        if (queue != nullptr)
+        {
+            if (auto ms = g_gpuTime->ReadGpuTime(queue); ms.has_value())
+            {
+                g_lastGpuTime = ms;
+                g_avgGpuTime = g_avgGpuTime <= 0.0 ? ms.value() : g_avgGpuTime * 0.95 + ms.value() * 0.05;
+            }
+
+            if (g_ngxTime != nullptr)
+            {
+                if (auto ngx = g_ngxTime->ReadGpuTime(queue); ngx.has_value())
+                    g_lastNgxTime = ngx;
+            }
+
+            // The split, once every few hundred frames. What is worth reading is not the total but the
+            // remainder: the model's cost is NVIDIA's to set, and everything else is ours.
+            static unsigned long long lastSplitLog = 0;
+
+            if (g_lastGpuTime.has_value() && g_lastNgxTime.has_value() && g_frames - lastSplitLog > 600)
+            {
+                lastSplitLog = g_frames;
+                const double total = g_lastGpuTime.value();
+                const double ngx = g_lastNgxTime.value();
+                LOG_INFO("DLSS-NR cost: {:.2f} ms total = {:.2f} ms model + {:.2f} ms ours ({:.0f}% ours)",
+                         total, ngx, total - ngx, total > 0.0 ? 100.0 * (total - ngx) / total : 0.0);
+            }
+        }
+    }
+}
+} // namespace
 
 namespace DlssNr
 {
@@ -2843,6 +3021,42 @@ void RequestCapture(unsigned int frames)
 
 bool CaptureInProgress() { return g_capture.isActive(); }
 
+CacheStatus GetCacheStatus()
+{
+    CacheStatus s {};
+    s.averageMs = g_avgGpuTime;
+
+    if (g_cache == nullptr)
+        return s;
+
+    const auto c = g_cache->GetStatus();
+    s.exists = true;
+    s.historyValid = c.active;
+    s.refreshes = c.refreshes;
+    s.cached = c.cached;
+    s.framesSinceRefresh = c.framesSinceRefresh;
+    s.lastRejected = c.lastRejected;
+    s.cumulativeRejected = c.cumulativeRejected;
+    s.stencilAvailable = c.stencilAvailable;
+    s.lastRefreshReason = c.lastRefreshReason;
+    s.dumpWritten = c.dumpWritten;
+    s.dumpActive = c.dumpActive;
+    return s;
+}
+
+void RequestCacheDump()
+{
+    // The dump lives in the cache, and the cache only exists once it has been on. Asking before then
+    // is answered in the log rather than silently dropped.
+    if (g_cache == nullptr || !Config::Instance()->DlssNrCacheEnabled.value_or_default())
+    {
+        LOG_WARN("DLSS-NR edit cache dump: turn the edit cache on first");
+        return;
+    }
+
+    g_cache->RequestDump(Config::Instance()->DlssNrCacheDumpFrames.value_or_default());
+}
+
 void Shutdown()
 {
     std::lock_guard<std::mutex> nrLock(g_nrMutex);
@@ -2983,6 +3197,8 @@ void Shutdown()
     }
 
     g_capture.release();
+    g_cache.reset();
+    g_avgGpuTime = 0.0;
     g_gpuTime.reset();
     g_ngxTime.reset();
     g_lastNgxTime.reset();

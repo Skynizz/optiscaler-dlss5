@@ -267,6 +267,286 @@ void RenderMenu(Config* config, float menuResScale)
                        "\n\nFrom hhkbble's multi-pass work on this fork.");
         }
 
+        // Joint bilateral enlargement. Like Enlargement above, meaningful only below 100%, and greyed
+        // otherwise; its one parameter shows only while it is on.
+        {
+            const bool reduced = config->DlssNrWorkingScale.value_or_default() < 0.999f;
+            bool jbu = config->DlssNrJbuUpsample.value_or_default();
+
+            if (!reduced)
+                ImGui::BeginDisabled();
+
+            if (ImGui::Checkbox("Edge-aware enlargement", &jbu))
+                config->DlssNrJbuUpsample = jbu;
+
+            if (!reduced)
+                ImGui::EndDisabled();
+
+            HelpMarker("Brings a below-100% model's work up to full size guided by the full-size frame"
+                       "\n(joint bilateral upsampling), instead of a plain bilinear stretch."
+                       "\n\nThe stretch reads the four nearest small pixels whatever is in them, so the"
+                       "\nmodel's edit smears across every edge the small picture could not resolve --"
+                       "\nleaves, hair, a sword against the sky. Here each small pixel only contributes"
+                       "\nwhere it looks like the full-size pixel it is landing on."
+                       "\n\nNo effect at 100% and above. Off is the resolve exactly as before.");
+
+            if (reduced && jbu)
+            {
+                float sigma = config->DlssNrJbuSigma.value_or_default();
+
+                if (ImGui::SliderFloat("Edge sensitivity", &sigma, 0.01f, 0.5f, "%.3f", ImGuiSliderFlags_Logarithmic))
+                    config->DlssNrJbuSigma = std::clamp(sigma, 0.005f, 1.0f);
+
+                HelpMarker("How different two pixels may look before they stop sharing the model's edit."
+                           "\nLower keeps edges crisper; too low and fine texture turns blocky.");
+            }
+        }
+
+        ImGui::SeparatorText("Edit cache (performance)");
+
+        {
+            bool cacheOn = config->DlssNrCacheEnabled.value_or_default();
+
+            if (ImGui::Checkbox("Reuse the model's edit between runs", &cacheOn))
+                config->DlssNrCacheEnabled = cacheOn;
+
+            HelpMarker("Runs the model only one frame in N and carries its edit onto the frames between."
+                       "\n\nWhat is carried is what the model CHANGED -- a per-pixel ratio -- never the"
+                       "\npicture: the game's own frame is rendered fresh every frame, grass and"
+                       "\ncharacters included, and the edit is moved along the game's motion vectors and"
+                       "\nchecked pixel by pixel (depth, colour) before it is laid on top."
+                       "\n\nThe model's broad lighting and tone (the low band) is carried everywhere and"
+                       "\nborrowed from neighbours where a pixel's own history fails. Its fine detail"
+                       "\n(the high band) is kept only where the checks pass, and fades with age."
+                       "\n\nThe cost alternates: frames where the model runs cost what they did, the"
+                       "\nothers very little. Off is Neural Rendering exactly as before."
+                       "\n\nStands aside while Hold frame, Compare or a Debug view is on. D3D12 only.");
+
+            if (cacheOn)
+            {
+                if (DlssNr::IsRunningVk())
+                {
+                    ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
+                                       "D3D12 only: this game runs the Vulkan path, where it does nothing.");
+                }
+                else
+                {
+                    const auto st = DlssNr::GetCacheStatus();
+                    const unsigned long long total = st.refreshes + st.cached;
+
+                    if (total > 0)
+                        ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f),
+                                           "Model on %.0f%% of frames - %.2f ms average per frame",
+                                           100.0 * (double) st.refreshes / (double) total, st.averageMs);
+                    else
+                        ImGui::TextUnformatted("Waiting for the model to run.");
+
+                    if (total > 0)
+                        ImGui::TextDisabled("Last run: %s. Revealed since: %.1f%% (last frame %.1f%%).",
+                                            st.lastRefreshReason, 100.0f * st.cumulativeRejected,
+                                            100.0f * st.lastRejected);
+                }
+
+                int interval = (int) config->DlssNrCacheInterval.value_or_default();
+
+                if (ImGui::SliderInt("Max frames between runs", &interval, 1, 8))
+                    config->DlssNrCacheInterval = (uint32_t) std::clamp(interval, 1, 16);
+
+                HelpMarker("The model runs at least once in this many frames. 2 halves its cost, 3 thirds"
+                           "\nit, and so on -- less the small cost of carrying the edit."
+                           "\n\n1 runs it every frame, which only makes sense with the multi-pass gains below.");
+
+                bool adaptive = config->DlssNrCacheAdaptive.value_or_default();
+
+                if (ImGui::Checkbox("Run early when the view changes", &adaptive))
+                    config->DlssNrCacheAdaptive = adaptive;
+
+                HelpMarker("Runs the model before the interval is up once enough of the picture has been"
+                           "\nrevealed since it last ran -- a fast turn, a door opening, someone walking out"
+                           "\nfrom behind a wall. The newly revealed pixels have no history of their own and"
+                           "\ncan only borrow their neighbours' edit until the model sees them.");
+
+                if (adaptive)
+                {
+                    float thr = config->DlssNrCacheAdaptiveThreshold.value_or_default();
+
+                    if (ImGui::SliderFloat("Revealed area", &thr, 0.01f, 0.5f, "%.2f", ImGuiSliderFlags_Logarithmic))
+                        config->DlssNrCacheAdaptiveThreshold = std::clamp(thr, 0.001f, 1.0f);
+
+                    HelpMarker("The fraction of the frame revealed since the model last ran that triggers an"
+                               "\nearly run. Lower runs it more often in motion.");
+                }
+
+                float depthTol = config->DlssNrCacheDepthTolerance.value_or_default();
+
+                if (ImGui::SliderFloat("Depth tolerance", &depthTol, 0.01f, 0.5f, "%.2f", ImGuiSliderFlags_Logarithmic))
+                    config->DlssNrCacheDepthTolerance = std::clamp(depthTol, 0.005f, 1.0f);
+
+                HelpMarker("How far a pixel's depth may move between frames and still count as the same"
+                           "\nsurface. Relative: 0.10 is ten percent. A pixel that fails takes the edit of"
+                           "\nits own surface from its neighbours instead of its own history."
+                           "\n\nToo low and everything close to the camera fails while you walk; too high"
+                           "\nand an edit can slide off a silhouette onto what is behind it.");
+
+                float colourTol = config->DlssNrCacheColourTolerance.value_or_default();
+
+                if (ImGui::SliderFloat("Colour tolerance", &colourTol, 0.1f, 4.0f, "%.2f stops",
+                                       ImGuiSliderFlags_Logarithmic))
+                    config->DlssNrCacheColourTolerance = std::clamp(colourTol, 0.05f, 8.0f);
+
+                HelpMarker("How much the frame under a pixel may change brightness and still keep the"
+                           "\nmodel's fine detail. Swaying grass, water, particles and hair fail this and"
+                           "\nkeep only the broad edit -- which is what keeps them from smearing.");
+
+                float decay = config->DlssNrCacheHighDecay.value_or_default();
+
+                if (ImGui::SliderFloat("Detail persistence", &decay, 0.5f, 1.0f, "%.2f"))
+                    config->DlssNrCacheHighDecay = std::clamp(decay, 0.0f, 1.0f);
+
+                HelpMarker("How much of the fine detail's confidence survives each frame without the"
+                           "\nmodel. Lower fades it toward the broad edit faster, which is steadier but"
+                           "\nsofter between runs.");
+
+                float blend = config->DlssNrCacheRefreshBlend.value_or_default();
+
+                if (ImGui::SliderFloat("Refresh blend", &blend, 0.1f, 1.0f, "%.2f"))
+                    config->DlssNrCacheRefreshBlend = std::clamp(blend, 0.05f, 1.0f);
+
+                HelpMarker("When the model runs, how much of its new edit replaces the carried one."
+                           "\n1 takes it whole. Lower softens the step you may see each time it runs, at"
+                           "\nthe cost of the edit lagging a little behind the picture.");
+
+                static const char* historyNames[] = { "The game's vectors", "Accumulated motion",
+                                                      "Reset every run" };
+                int history = (int) config->DlssNrCacheModelHistory.value_or_default();
+
+                if (history < 0 || history > 2)
+                    history = 1;
+
+                if (ImGui::Combo("Model history", &history, historyNames, IM_ARRAYSIZE(historyNames)))
+                    config->DlssNrCacheModelHistory = (uint32_t) history;
+
+                HelpMarker("The model keeps its own temporal history and moves it along the motion"
+                           "\nvectors it is handed. Run one frame in N, it has missed N-1 frames of motion."
+                           "\n\nAccumulated motion hands it the motion since it last ran, so its history"
+                           "\nlands where the scene went. The game's vectors tell it one frame's worth."
+                           "\nReset discards its history every run, which is stable but noisier.");
+
+                bool bilateral = config->DlssNrCacheBilateral.value_or_default();
+
+                if (ImGui::Checkbox("Borrow from the same surface", &bilateral))
+                    config->DlssNrCacheBilateral = bilateral;
+
+                HelpMarker("Where a pixel's own history was rejected, borrow the edit only from neighbours"
+                           "\nat a similar depth and brightness, rather than from whatever is nearest. Keeps"
+                           "\na character's edit off the wall behind them.");
+
+                if (ImGui::TreeNode("Multi-pass approximation"))
+                {
+                    float lowGain = config->DlssNrCacheLowGain.value_or_default();
+
+                    if (ImGui::SliderFloat("Lighting gain", &lowGain, 0.0f, 3.0f, "%.2f"))
+                        config->DlssNrCacheLowGain = std::clamp(lowGain, 0.0f, 4.0f);
+
+                    float highGain = config->DlssNrCacheHighGain.value_or_default();
+
+                    if (ImGui::SliderFloat("Detail gain", &highGain, 0.0f, 3.0f, "%.2f"))
+                        config->DlssNrCacheHighGain = std::clamp(highGain, 0.0f, 4.0f);
+
+                    if (ImGui::SmallButton("Reset##cachegains"))
+                    {
+                        config->DlssNrCacheLowGain = 1.0f;
+                        config->DlssNrCacheHighGain = 1.0f;
+                    }
+
+                    HelpMarker("Amplifies the model's single-pass edit instead of running it twice. The"
+                               "\nlighting (broad) and detail (fine) parts get separate gains, in log space,"
+                               "\nso 2 doubles the edit's effect in stops rather than its brightness."
+                               "\n\nThe right values come from comparing real one-pass and two-pass captures:"
+                               "\ntools/dlssnr_cache/calibrate_multipass.py fits them. 1 and 1 is one pass.");
+
+                    ImGui::TreePop();
+                }
+
+                if (ImGui::TreeNode("Character priority (stencil)"))
+                {
+                    bool stencil = config->DlssNrCacheStencil.value_or_default();
+
+                    if (ImGui::Checkbox("Prioritise stencil-marked pixels", &stencil))
+                        config->DlssNrCacheStencil = stencil;
+
+                    HelpMarker("Many engines mark characters in the depth buffer's stencil plane. Pixels where"
+                               "\n(stencil & mask) == value get stricter checks and count four times toward an"
+                               "\nearly model run."
+                               "\n\nWhich bits a game uses is not documented: pick cache debug view \"Stencil\""
+                               "\nbelow, look at what a character is coloured, and narrow it down.");
+
+                    if (stencil)
+                    {
+                        int mask = (int) config->DlssNrCacheStencilMask.value_or_default();
+
+                        if (ImGui::InputInt("Mask", &mask))
+                            config->DlssNrCacheStencilMask = (uint32_t) std::clamp(mask, 0, 255);
+
+                        int ref = (int) config->DlssNrCacheStencilRef.value_or_default();
+
+                        if (ImGui::InputInt("Value", &ref))
+                            config->DlssNrCacheStencilRef = (uint32_t) std::clamp(ref, 0, 255);
+
+                        const auto st = DlssNr::GetCacheStatus();
+
+                        if (st.exists && !st.stencilAvailable)
+                            ImGui::TextDisabled("No stencil plane found on this game's depth buffer (yet).");
+                    }
+
+                    ImGui::TreePop();
+                }
+
+                static const char* cacheDebugNames[] = { "Off", "Confidence", "Lighting band", "Detail band",
+                                                         "Stencil" };
+                int cacheDebug = (int) config->DlssNrCacheDebugView.value_or_default();
+
+                if (cacheDebug < 0 || cacheDebug > 4)
+                    cacheDebug = 0;
+
+                if (ImGui::Combo("Cache debug view", &cacheDebug, cacheDebugNames, IM_ARRAYSIZE(cacheDebugNames)))
+                    config->DlssNrCacheDebugView = (uint32_t) cacheDebug;
+
+                HelpMarker("Confidence: green where a pixel keeps its own carried detail, red where it was"
+                           "\nrejected and borrows its surface's broad edit. Lighting and Detail show the two"
+                           "\nbands of the edit, centred on grey. Stencil colours each stencil value"
+                           "\ndifferently, and magenta marks the pixels the priority settings select.");
+
+                int dumpFrames = (int) config->DlssNrCacheDumpFrames.value_or_default();
+
+                if (ImGui::SliderInt("Dump length", &dumpFrames, 2, 32))
+                    config->DlssNrCacheDumpFrames = (uint32_t) std::clamp(dumpFrames, 2, 32);
+
+                const auto st = DlssNr::GetCacheStatus();
+
+                if (st.dumpActive)
+                    ImGui::BeginDisabled();
+
+                if (ImGui::Button("Dump frames for measurement"))
+                    DlssNr::RequestCacheDump();
+
+                if (st.dumpActive)
+                    ImGui::EndDisabled();
+
+                HelpMarker("Writes this many consecutive frames to dlssnr-cachedump beside OptiScaler: the"
+                           "\nframe, the model's frame, motion and depth. The model runs on every one of them,"
+                           "\nso each has its own ground truth. tools/dlssnr_cache/measure_reprojection.py then"
+                           "\nmeasures how well a carried edit matches the real one 1, 2, 4 and 8 frames on."
+                           "\n\nUses a lot of memory (about 120 MB per frame at 1440p) and stutters while it"
+                           "\nwrites. Move the camera while it records -- a still frame measures nothing.");
+
+                if (st.dumpActive)
+                    ImGui::TextDisabled("Recording...");
+                else if (st.dumpWritten > 0)
+                    ImGui::TextDisabled("Last dump: %u frames written.", st.dumpWritten);
+            }
+        }
+
         ImGui::SeparatorText("How much of it lands");
 
         float transfer = config->DlssNrTransferStrength.value_or_default();

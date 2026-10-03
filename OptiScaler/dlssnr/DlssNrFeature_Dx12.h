@@ -117,5 +117,30 @@ std::optional<double> LastGpuTime();
 void RequestCapture(unsigned int frames);
 bool CaptureInProgress();
 
+// The temporal edit cache, for the menu. D3D12 only.
+struct CacheStatus
+{
+    bool exists = false;       // created at all (it is, the first time it is switched on)
+    bool historyValid = false; // holding an edit to carry
+    unsigned long long refreshes = 0;
+    unsigned long long cached = 0;
+    unsigned int framesSinceRefresh = 0;
+    float lastRejected = 0.0f;
+    float cumulativeRejected = 0.0f;
+    bool stencilAvailable = false;
+    const char* lastRefreshReason = "";
+    unsigned int dumpWritten = 0;
+    bool dumpActive = false;
+
+    // The whole pass's cost averaged over recent frames, cache on or off.
+    double averageMs = 0.0;
+};
+
+CacheStatus GetCacheStatus();
+
+// Writes CacheDumpFrames consecutive frames (frame, model's frame, motion, depth) for
+// tools/dlssnr_cache/measure_reprojection.py. The model runs on every one of them.
+void RequestCacheDump();
+
 void Shutdown();
 } // namespace DlssNr

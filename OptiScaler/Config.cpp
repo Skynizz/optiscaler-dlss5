@@ -368,6 +368,25 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrReversibleMode.set_from_config(readUInt("DlssNr", "ReversibleMode"));
             DlssNrApplyModel.set_from_config(readBool("DlssNr", "ApplyModel"));
             DlssNrHoldFrame.set_from_config(readBool("DlssNr", "HoldFrame"));
+            DlssNrCacheEnabled.set_from_config(readBool("DlssNr", "CacheEnabled"));
+            DlssNrCacheInterval.set_from_config(readUInt("DlssNr", "CacheInterval"));
+            DlssNrCacheAdaptive.set_from_config(readBool("DlssNr", "CacheAdaptive"));
+            DlssNrCacheAdaptiveThreshold.set_from_config(readFloat("DlssNr", "CacheAdaptiveThreshold"));
+            DlssNrCacheDepthTolerance.set_from_config(readFloat("DlssNr", "CacheDepthTolerance"));
+            DlssNrCacheColourTolerance.set_from_config(readFloat("DlssNr", "CacheColourTolerance"));
+            DlssNrCacheHighDecay.set_from_config(readFloat("DlssNr", "CacheHighDecay"));
+            DlssNrCacheRefreshBlend.set_from_config(readFloat("DlssNr", "CacheRefreshBlend"));
+            DlssNrCacheLowGain.set_from_config(readFloat("DlssNr", "CacheLowGain"));
+            DlssNrCacheHighGain.set_from_config(readFloat("DlssNr", "CacheHighGain"));
+            DlssNrCacheBilateral.set_from_config(readBool("DlssNr", "CacheBilateral"));
+            DlssNrCacheModelHistory.set_from_config(readUInt("DlssNr", "CacheModelHistory"));
+            DlssNrCacheStencil.set_from_config(readBool("DlssNr", "CacheStencil"));
+            DlssNrCacheStencilMask.set_from_config(readUInt("DlssNr", "CacheStencilMask"));
+            DlssNrCacheStencilRef.set_from_config(readUInt("DlssNr", "CacheStencilRef"));
+            DlssNrCacheDebugView.set_from_config(readUInt("DlssNr", "CacheDebugView"));
+            DlssNrCacheDumpFrames.set_from_config(readUInt("DlssNr", "CacheDumpFrames"));
+            DlssNrJbuUpsample.set_from_config(readBool("DlssNr", "JbuUpsample"));
+            DlssNrJbuSigma.set_from_config(readFloat("DlssNr", "JbuSigma"));
             UseGenericAppIdWithDlss.set_from_config(readBool("DLSS", "UseGenericAppIdWithDlss"));
 
             RenderPresetOverride.set_from_config(readBool("DLSS", "RenderPresetOverride"));
@@ -1259,6 +1278,32 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "ReversibleMode", GetIntValue(Instance()->DlssNrReversibleMode.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ApplyModel", GetBoolValue(Instance()->DlssNrApplyModel.value_for_config()).c_str());
     ini.SetValue("DlssNr", "HoldFrame", GetBoolValue(Instance()->DlssNrHoldFrame.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheEnabled", GetBoolValue(Instance()->DlssNrCacheEnabled.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheInterval", GetIntValue(Instance()->DlssNrCacheInterval.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheAdaptive", GetBoolValue(Instance()->DlssNrCacheAdaptive.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheAdaptiveThreshold",
+                 GetFloatValue(Instance()->DlssNrCacheAdaptiveThreshold.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheDepthTolerance",
+                 GetFloatValue(Instance()->DlssNrCacheDepthTolerance.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheColourTolerance",
+                 GetFloatValue(Instance()->DlssNrCacheColourTolerance.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheHighDecay", GetFloatValue(Instance()->DlssNrCacheHighDecay.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheRefreshBlend",
+                 GetFloatValue(Instance()->DlssNrCacheRefreshBlend.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheLowGain", GetFloatValue(Instance()->DlssNrCacheLowGain.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheHighGain", GetFloatValue(Instance()->DlssNrCacheHighGain.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheBilateral", GetBoolValue(Instance()->DlssNrCacheBilateral.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheModelHistory",
+                 GetIntValue(Instance()->DlssNrCacheModelHistory.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheStencil", GetBoolValue(Instance()->DlssNrCacheStencil.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheStencilMask",
+                 GetIntValue(Instance()->DlssNrCacheStencilMask.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheStencilRef", GetIntValue(Instance()->DlssNrCacheStencilRef.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheDebugView", GetIntValue(Instance()->DlssNrCacheDebugView.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheDumpFrames",
+                 GetIntValue(Instance()->DlssNrCacheDumpFrames.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "JbuUpsample", GetBoolValue(Instance()->DlssNrJbuUpsample.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "JbuSigma", GetFloatValue(Instance()->DlssNrJbuSigma.value_for_config()).c_str());
         ini.SetValue("DLSS", "RenderPresetOverride",
                      GetBoolValue(Instance()->RenderPresetOverride.value_for_config()).c_str());
         ini.SetValue("DLSS", "RenderPresetForAll",
