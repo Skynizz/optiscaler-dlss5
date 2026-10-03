@@ -502,6 +502,9 @@ class Config
     CustomOptional<bool> DlssNrCacheEnabled { false };
     // At most this many frames between model runs. 1 runs it every frame (useful with the gains below).
     CustomOptional<uint32_t> DlssNrCacheInterval { 3 };
+    // Spread the model's cost evenly: one horizontal band of every frame instead of the whole frame one
+    // frame in N (N = CacheInterval bands, 2-4). Even frame times are kinder to pacing, Reflex and FG.
+    CustomOptional<bool> DlssNrCacheSpread { false };
     // Run the model early once this fraction of the frame has been revealed since it last ran.
     CustomOptional<bool> DlssNrCacheAdaptive { true };
     CustomOptional<float> DlssNrCacheAdaptiveThreshold { 0.10f };

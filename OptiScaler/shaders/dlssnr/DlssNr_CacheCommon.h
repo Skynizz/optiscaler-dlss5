@@ -27,8 +27,12 @@ enum DlssNrCacheMode : uint32_t
     DlssNrCacheMode_Apply = 4,      // the frame x the reconstructed edit -> output
     DlssNrCacheMode_AccumulateMv = 5, // motion since the model last ran, for its own history
     DlssNrCacheMode_JbuUpsample = 6,  // a below-size model answer -> full size, guided by the frame
-    DlssNrCacheMode_DumpPack = 7      // the measurement dump's per-frame images
+    DlssNrCacheMode_DumpPack = 7,     // the measurement dump's per-frame images
+    DlssNrCacheMode_CropGuides = 8    // one band of depth and motion, for a model run on that band
 };
+
+// Spread refresh: at most this many bands, so a band never has too little of the picture around it.
+constexpr uint32_t kDlssNrCacheMaxBands = 4;
 
 // The first pyramid level is a quarter of the frame on each side, and each level below a quarter of
 // the one above. Three levels reach 1/64, coarse enough that a disocclusion the size of a character
@@ -97,4 +101,12 @@ struct alignas(256) DlssNrCacheConstants
     uint32_t SourceHeight;
 
     uint32_t FrameIndex;
+
+    // Spread refresh (see DlssNrCacheBand).
+    uint32_t BandActive;
+    uint32_t BandY0;
+    uint32_t BandHeight;
+    uint32_t BandFeather;
+    uint32_t BandEdges;
+    uint32_t CropOffsetY;
 };

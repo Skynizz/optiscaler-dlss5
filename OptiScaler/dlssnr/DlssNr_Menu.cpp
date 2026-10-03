@@ -334,7 +334,15 @@ void RenderMenu(Config* config, float menuResScale)
                     const auto st = DlssNr::GetCacheStatus();
                     const unsigned long long total = st.refreshes + st.cached;
 
-                    if (total > 0)
+                    const bool spreading = config->DlssNrCacheSpread.value_or_default() &&
+                                           config->DlssNrCacheInterval.value_or_default() >= 2;
+                    const unsigned int bands = std::clamp(config->DlssNrCacheInterval.value_or_default(), 2u, 4u);
+
+                    if (total > 0 && spreading)
+                        ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f),
+                                           "Model on 1 band of %u every frame - %.2f ms average per frame", bands,
+                                           st.averageMs);
+                    else if (total > 0)
                         ImGui::TextColored(ImVec4(0.4f, 0.9f, 0.5f, 1.0f),
                                            "Model on %.0f%% of frames - %.2f ms average per frame",
                                            100.0 * (double) st.refreshes / (double) total, st.averageMs);
@@ -390,7 +398,23 @@ void RenderMenu(Config* config, float menuResScale)
 
                 HelpMarker("The model runs at least once in this many frames. 2 halves its cost, 3 thirds"
                            "\nit, and so on -- less the small cost of carrying the edit."
-                           "\n\n1 runs it every frame, which only makes sense with the multi-pass gains below.");
+                           "\n\n1 runs it every frame, which only makes sense with the multi-pass gains below."
+                           "\n\nWith Even frame times on, this is the number of bands instead (2 to 4).");
+
+                bool spread = config->DlssNrCacheSpread.value_or_default();
+
+                if (ImGui::Checkbox("Even frame times (one band per frame)", &spread))
+                    config->DlssNrCacheSpread = spread;
+
+                HelpMarker("Instead of the whole frame one frame in N, the model runs on one horizontal band"
+                           "\nof EVERY frame -- the frame cut into N bands, a different one each frame. The"
+                           "\nsaving is about the same, but every frame costs the same."
+                           "\n\nUneven frame times -- one heavy frame, then light ones -- are what frame"
+                           "\npacing, Reflex and frame generation handle worst: they are felt as input lag and"
+                           "\nmicro-stutter. This removes them."
+                           "\n\nEach band keeps a little of the picture above and below it for context and"
+                           "\nblends into its neighbours. Uses one model per band (about one extra model's"
+                           "\nworth of video memory in total). Needs 2 or more frames between runs.");
 
                 bool adaptive = config->DlssNrCacheAdaptive.value_or_default();
 

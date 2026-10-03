@@ -299,7 +299,7 @@ void DlssNrEditCache_Dx12::TickRetired()
 void DlssNrEditCache_Dx12::ReleaseAll(bool immediately)
 {
     ID3D12Resource** all[] = { &_histEdit[0], &_histEdit[1], &_histGuide[0], &_histGuide[1], &_level[0],
-                               &_level[1],    &_level[2],    &_levelGuide,   &_accMv[0],     &_accMv[1],
+                               &_level[1],    &_level[2],    &_levelGuide,   &_bandDepth,    &_bandMotion,
                                &_stats,       &_stencilClone, &_modelUp };
 
     for (ID3D12Resource** r : all)
@@ -311,6 +311,21 @@ void DlssNrEditCache_Dx12::ReleaseAll(bool immediately)
         else
         {
             Park(*r);
+        }
+    }
+
+    for (auto& slot : _accMv)
+    {
+        for (auto*& a : slot)
+        {
+            if (immediately)
+            {
+                SAFE_RELEASE(a);
+            }
+            else
+            {
+                Park(a);
+            }
         }
     }
 
@@ -393,12 +408,16 @@ bool DlssNrEditCache_Dx12::EnsureResources(ID3D12Device* device, unsigned int wi
     _height = height;
     _format = format;
     _historyValid = false;
-    _accReset = true;
+    for (bool& r : _accReset)
+        r = true;
     return true;
 }
 
-bool DlssNrEditCache_Dx12::EnsureAccumulator(ID3D12Device* device, ID3D12Resource* motion)
+bool DlssNrEditCache_Dx12::EnsureAccumulatorSlot(ID3D12Device* device, ID3D12Resource* motion, unsigned int slot)
 {
+    if (slot >= kDlssNrCacheMaxBands)
+        return false;
+
     const D3D12_RESOURCE_DESC md = motion->GetDesc();
     const DXGI_FORMAT readable = ReadableFormat(md.Format);
 
@@ -406,35 +425,47 @@ bool DlssNrEditCache_Dx12::EnsureAccumulator(ID3D12Device* device, ID3D12Resourc
     const DXGI_FORMAT want = (readable == DXGI_FORMAT_R32G32_FLOAT) ? DXGI_FORMAT_R32G32_FLOAT
                                                                     : DXGI_FORMAT_R16G16_FLOAT;
 
-    if (_accMv[0] != nullptr && _accWidth == (unsigned int) md.Width && _accHeight == md.Height &&
-        _accFormat == want)
+    // Every slot accumulates the same motion texture, so a change of its shape retires all of them.
+    if (_accWidth != (unsigned int) md.Width || _accHeight != md.Height || _accFormat != want)
+    {
+        for (auto& pair : _accMv)
+            for (auto*& a : pair)
+                Park(a);
+
+        _accInModelState = false;
+        _accWidth = (unsigned int) md.Width;
+        _accHeight = md.Height;
+        _accFormat = want;
+
+        for (bool& r : _accReset)
+            r = true;
+    }
+
+    if (_accMv[slot][0] != nullptr && _accMv[slot][1] != nullptr)
         return true;
 
-    Park(_accMv[0]);
-    Park(_accMv[1]);
-    _accInModelState = false;
-
-    for (auto& a : _accMv)
-        a = CreateTexture(device, want, (unsigned int) md.Width, md.Height, true, kUav);
-
-    if (_accMv[0] == nullptr || _accMv[1] == nullptr)
+    for (auto*& a : _accMv[slot])
     {
-        Park(_accMv[0]);
-        Park(_accMv[1]);
+        Park(a);
+        a = CreateTexture(device, want, (unsigned int) md.Width, md.Height, true, kUav);
+    }
+
+    if (_accMv[slot][0] == nullptr || _accMv[slot][1] == nullptr)
+    {
+        Park(_accMv[slot][0]);
+        Park(_accMv[slot][1]);
         return false;
     }
 
-    _accWidth = (unsigned int) md.Width;
-    _accHeight = md.Height;
-    _accFormat = want;
-    _accReset = true;
+    _accReset[slot] = true;
     return true;
 }
 
 void DlssNrEditCache_Dx12::Invalidate()
 {
     _historyValid = false;
-    _accReset = true;
+    for (bool& r : _accReset)
+        r = true;
 }
 
 bool DlssNrEditCache_Dx12::BeginFrame(const Config& cfg, ID3D12Device* device, unsigned int width,
@@ -464,6 +495,19 @@ bool DlssNrEditCache_Dx12::BeginFrame(const Config& cfg, ID3D12Device* device, u
     _stencilRef = cfg.DlssNrCacheStencilRef.value_or_default();
 
     const unsigned int interval = std::clamp(cfg.DlssNrCacheInterval.value_or_default(), 1u, 16u);
+
+    // Spread refresh: the interval becomes the number of bands, so the model's cost per frame is
+    // about 1/N of a full run -- every frame, rather than all of it every Nth frame.
+    const bool spread = cfg.DlssNrCacheSpread.value_or_default() && interval >= 2;
+
+    if (spread != _spread)
+    {
+        for (bool& r : _accReset)
+            r = true;
+    }
+
+    _spread = spread;
+    _bands = std::clamp(interval, 2u, kDlssNrCacheMaxBands);
     const bool adaptive = cfg.DlssNrCacheAdaptive.value_or_default();
     const float threshold = std::clamp(cfg.DlssNrCacheAdaptiveThreshold.value_or_default(), 0.001f, 1.0f);
 
@@ -475,6 +519,8 @@ bool DlssNrEditCache_Dx12::BeginFrame(const Config& cfg, ID3D12Device* device, u
         why = "the game or the model reset";
     else if (_dumpWanted > 0)
         why = "measurement dump";
+    else if (_spread)
+        why = nullptr; // every frame refreshes one band instead
     else if (_frame - _lastRefresh >= interval)
         why = "interval";
     // An early run never comes sooner than half the interval (and never two frames running). Without the
@@ -677,13 +723,13 @@ void DlssNrEditCache_Dx12::RestoreStencil(ID3D12GraphicsCommandList* cmd)
         Barrier(cmd, _stencilClone, kSrv, D3D12_RESOURCE_STATE_COPY_DEST);
 }
 
-void DlssNrEditCache_Dx12::Accumulate(ID3D12GraphicsCommandList* cmd, const DlssNrCacheInputs& in)
+void DlssNrEditCache_Dx12::Accumulate(ID3D12GraphicsCommandList* cmd, const DlssNrCacheInputs& in, unsigned int slot)
 {
-    if (_modelHistory != 1 || _accMv[0] == nullptr || in.motion == nullptr)
+    if (_modelHistory != 1 || slot >= kDlssNrCacheMaxBands || _accMv[slot][0] == nullptr || in.motion == nullptr)
         return;
 
-    ID3D12Resource* prev = _accMv[_accCur];
-    ID3D12Resource* next = _accMv[1 - _accCur];
+    ID3D12Resource* prev = _accMv[slot][_accCur[slot]];
+    ID3D12Resource* next = _accMv[slot][1 - _accCur[slot]];
 
     DlssNrCacheConstants c = BaseConstants(in);
     c.Mode = DlssNrCacheMode_AccumulateMv;
@@ -691,7 +737,7 @@ void DlssNrEditCache_Dx12::Accumulate(ID3D12GraphicsCommandList* cmd, const Dlss
     c.Height = std::min(in.motionHeight, _accHeight);
     c.SourceWidth = _accWidth;
     c.SourceHeight = _accHeight;
-    c.AccumulateReset = _accReset ? 1u : 0u;
+    c.AccumulateReset = _accReset[slot] ? 1u : 0u;
 
     Barrier(cmd, prev, kUav, kSrv);
     ID3D12Resource* srv[kSrvCount] = { nullptr, nullptr, nullptr, nullptr, in.motion, prev };
@@ -699,8 +745,111 @@ void DlssNrEditCache_Dx12::Accumulate(ID3D12GraphicsCommandList* cmd, const Dlss
     Pass(cmd, c, srv, uav, Groups(c.Width), Groups(c.Height));
     Barrier(cmd, prev, kSrv, kUav);
 
-    _accCur = 1 - _accCur;
-    _accReset = false;
+    _accCur[slot] = 1 - _accCur[slot];
+    _accReset[slot] = false;
+}
+
+void DlssNrEditCache_Dx12::AccumulateBands(ID3D12GraphicsCommandList* cmd, ID3D12Device* device,
+                                           const DlssNrCacheInputs& in)
+{
+    if (_modelHistory != 1 || in.motion == nullptr)
+        return;
+
+    for (unsigned int b = 0; b < _bands; ++b)
+    {
+        if (EnsureAccumulatorSlot(device, in.motion, b))
+            Accumulate(cmd, in, b);
+    }
+}
+
+bool DlssNrEditCache_Dx12::CropGuides(ID3D12GraphicsCommandList* cmd, ID3D12Device* device,
+                                      const DlssNrCacheInputs& in, unsigned int band, unsigned int offsetY,
+                                      unsigned int height, ID3D12Resource** depthOut, ID3D12Resource** motionOut)
+{
+    if (!_init || in.depth == nullptr || in.motion == nullptr || height == 0)
+        return false;
+
+    const unsigned int width = std::max(in.depthWidth, 1u);
+
+    // The band's own accumulated motion when the policy is to accumulate; the game's otherwise.
+    ID3D12Resource* motion = in.motion;
+    DXGI_FORMAT motionFormat = DXGI_FORMAT_R16G16_FLOAT;
+
+    if (_modelHistory == 1 && band < kDlssNrCacheMaxBands && _accMv[band][_accCur[band]] != nullptr)
+    {
+        motion = _accMv[band][_accCur[band]];
+        motionFormat = _accFormat;
+        Barrier(cmd, motion, kUav, kSrv);
+    }
+    else if (ReadableFormat(in.motion->GetDesc().Format) == DXGI_FORMAT_R32G32_FLOAT)
+    {
+        motionFormat = DXGI_FORMAT_R32G32_FLOAT;
+    }
+
+    auto fits = [&](ID3D12Resource* r, DXGI_FORMAT f)
+    {
+        if (r == nullptr)
+            return false;
+
+        const D3D12_RESOURCE_DESC d = r->GetDesc();
+        return (unsigned int) d.Width == width && d.Height == height && d.Format == f;
+    };
+
+    if (!fits(_bandDepth, DXGI_FORMAT_R32_FLOAT))
+    {
+        Park(_bandDepth);
+        _bandDepth = CreateTexture(device, DXGI_FORMAT_R32_FLOAT, width, height, true, kUav);
+    }
+
+    if (!fits(_bandMotion, motionFormat))
+    {
+        Park(_bandMotion);
+        _bandMotion = CreateTexture(device, motionFormat, width, height, true, kUav);
+    }
+
+    bool ok = _bandDepth != nullptr && _bandMotion != nullptr;
+
+    if (ok)
+    {
+        DlssNrCacheConstants c = BaseConstants(in);
+        c.Mode = DlssNrCacheMode_CropGuides;
+        c.Width = width;
+        c.Height = height;
+        c.CropOffsetY = offsetY;
+
+        ID3D12Resource* srv[kSrvCount] = { nullptr, nullptr, nullptr, in.depth, motion };
+        ID3D12Resource* uav[kUavCount] = { _bandDepth, _bandMotion };
+        ok = Pass(cmd, c, srv, uav, Groups(width), Groups(height));
+    }
+
+    if (motion != in.motion)
+    {
+        Barrier(cmd, motion, kSrv, kUav);
+
+        // The band's model sees everything up to this frame; its accumulation starts again.
+        _accReset[band] = true;
+    }
+
+    if (!ok)
+        return false;
+
+    Barrier(cmd, _bandDepth, kUav, kSrv);
+    Barrier(cmd, _bandMotion, kUav, kSrv);
+    _cropInUse = true;
+
+    *depthOut = _bandDepth;
+    *motionOut = _bandMotion;
+    return true;
+}
+
+void DlssNrEditCache_Dx12::FinishCrop(ID3D12GraphicsCommandList* cmd)
+{
+    if (!_cropInUse)
+        return;
+
+    Barrier(cmd, _bandDepth, kSrv, kUav);
+    Barrier(cmd, _bandMotion, kSrv, kUav);
+    _cropInUse = false;
 }
 
 void DlssNrEditCache_Dx12::BuildCoarseLevels(ID3D12GraphicsCommandList* cmd)
@@ -753,15 +902,16 @@ void DlssNrEditCache_Dx12::ApplyPass(ID3D12GraphicsCommandList* cmd, ID3D12Resou
 }
 
 bool DlssNrEditCache_Dx12::RunCached(ID3D12GraphicsCommandList* cmd, ID3D12Device* device, ID3D12Resource* target,
-                                     ID3D12Resource* keep, const DlssNrCacheInputs& in)
+                                     ID3D12Resource* keep, const DlssNrCacheInputs& in, const DlssNrCacheBand* band)
 {
     if (!_init || target == nullptr || keep == nullptr || in.depth == nullptr || in.motion == nullptr)
         return false;
 
-    if (_modelHistory == 1)
+    // Spread mode keeps its per-band accumulators current itself (AccumulateBands).
+    if (_modelHistory == 1 && !_spread)
     {
-        if (EnsureAccumulator(device, in.motion))
-            Accumulate(cmd, in);
+        if (EnsureAccumulatorSlot(device, in.motion, 0))
+            Accumulate(cmd, in, 0);
     }
 
     PrepareStencil(cmd, device, in);
@@ -792,9 +942,21 @@ bool DlssNrEditCache_Dx12::RunCached(ID3D12GraphicsCommandList* cmd, ID3D12Devic
     Barrier(cmd, _histGuide[prev], kUav, kSrv);
 
     c.Mode = DlssNrCacheMode_Reproject;
+
+    const bool bandActive = band != nullptr && band->resolved != nullptr && band->height > 0;
+
+    if (bandActive)
+    {
+        c.BandActive = 1;
+        c.BandY0 = band->y0;
+        c.BandHeight = band->height;
+        c.BandFeather = band->feather;
+        c.BandEdges = band->edges;
+    }
+
     {
         ID3D12Resource* srv[kSrvCount] = { _histEdit[prev], _histGuide[prev], target, in.depth, in.motion,
-                                           nullptr, nullptr, nullptr, nullptr,
+                                           bandActive ? band->resolved : nullptr, nullptr, nullptr, nullptr,
                                            _stencilBound ? _stencilClone : nullptr };
         ID3D12Resource* uav[kUavCount] = { _histEdit[next], _histGuide[next], keep, _level[0], _levelGuide, _stats };
         Pass(cmd, c, srv, uav, Groups(_width), Groups(_height));
@@ -853,18 +1015,26 @@ ID3D12Resource* DlssNrEditCache_Dx12::ModelMotion(ID3D12GraphicsCommandList* cmd
         return nullptr;
     }
 
-    if (_modelHistory != 1 || in.motion == nullptr || !EnsureAccumulator(device, in.motion))
+    // Spread mode: a whole-frame run only happens after a cut or a reset, when the full model's history
+    // is from long ago anyway. The band accumulators belong to the bands.
+    if (_spread)
+    {
+        resetModel = true;
+        return nullptr;
+    }
+
+    if (_modelHistory != 1 || in.motion == nullptr || !EnsureAccumulatorSlot(device, in.motion, 0))
         return nullptr;
 
-    Accumulate(cmd, in);
+    Accumulate(cmd, in, 0);
 
     // Read by the model now; EndFrame puts it back.
-    Barrier(cmd, _accMv[_accCur], kUav, kSrv);
+    Barrier(cmd, _accMv[0][_accCur[0]], kUav, kSrv);
     _accInModelState = true;
 
     // The model has seen everything up to this frame; the next accumulation starts again from zero.
-    _accReset = true;
-    return _accMv[_accCur];
+    _accReset[0] = true;
+    return _accMv[0][_accCur[0]];
 }
 
 bool DlssNrEditCache_Dx12::CaptureRefresh(ID3D12GraphicsCommandList* cmd, ID3D12Device* device,
@@ -922,8 +1092,10 @@ bool DlssNrEditCache_Dx12::CaptureRefresh(ID3D12GraphicsCommandList* cmd, ID3D12
 
 void DlssNrEditCache_Dx12::EndFrame(ID3D12GraphicsCommandList* cmd)
 {
-    if (_accInModelState && _accMv[_accCur] != nullptr)
-        Barrier(cmd, _accMv[_accCur], kSrv, kUav);
+    if (_accInModelState && _accMv[0][_accCur[0]] != nullptr)
+        Barrier(cmd, _accMv[0][_accCur[0]], kSrv, kUav);
+
+    FinishCrop(cmd);
 
     _accInModelState = false;
 

@@ -39,6 +39,12 @@ cbuffer Params : register(b0)
     uint  gSrcW;
     uint  gSrcH;
     uint  gFrameIndex;
+    uint  gBandActive;   // reproject: merge a freshly resolved band (gAux0, band-local rows) into history
+    uint  gBandY0;       // the band's first row in the frame
+    uint  gBandHeight;   // its height in rows
+    uint  gBandFeather;  // rows over which its top and bottom fade in (the model's context margin)
+    uint  gBandEdges;    // bit 0: band touches the top of the frame, bit 1: the bottom (no fade there)
+    uint  gCropOffsetY;  // crop: first source row
 };
 
 Texture2D<float4>   gHistEdit  : register(t0); // rgb: log2 edit, a: high-band confidence
@@ -369,7 +375,31 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
 
                 // Confidence decays with age and with every doubt -- depth or colour -- and only
                 // ever comes back on a refresh.
-                const float confidence = h.confidence * vColour * saturate(2.0 * h.valid - 1.0) * gHighDecay;
+                float confidence = h.confidence * vColour * saturate(2.0 * h.valid - 1.0) * gHighDecay;
+
+                // Spread refresh: one band of this frame was just run through the model. Inside it the
+                // model's own answer replaces the carried one, fading in over its context margin so
+                // the band's edges -- where the model saw the least around it -- count the least.
+                if (gBandActive != 0)
+                {
+                    const int ry = (int) id.y - (int) gBandY0;
+
+                    if (ry >= 0 && ry < (int) gBandHeight)
+                    {
+                        const float feather = max((float) gBandFeather, 1.0);
+                        const float wTop = (gBandEdges & 1u) ? 1.0 : saturate(((float) ry + 0.5) / feather);
+                        const float wBot = (gBandEdges & 2u) ? 1.0 : saturate(((float) gBandHeight - (float) ry - 0.5) / feather);
+                        const float bw = min(wTop, wBot);
+
+                        const float3 nr = max(gAux0.Load(int3(id.x, ry, 0)).rgb, 0.0);
+                        const float3 fresh =
+                            clamp(log2((nr + gEpsilon) / (max(colour.rgb, 0.0) + gEpsilon)), -kMaxEdit, kMaxEdit);
+
+                        edit = lerp(edit, fresh, bw);
+                        confidence = lerp(confidence, 1.0, bw);
+                        w = max(w, bw);
+                    }
+                }
 
                 gOut0[id.xy] = float4(edit, saturate(confidence));
 
@@ -608,6 +638,21 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
             M = LinearToSrgb(CubeScaleResidual(saturate(P), saturate(P) + e));
 
         gOut0[id.xy] = float4(M, full.a);
+        return;
+    }
+
+    if (gMode == 8)
+    {
+        // One band of the guides, for a model run on that band alone: depth to R32, motion as it is.
+        // The band is cut at depth's resolution. Motion may be at another (display-resolution vectors),
+        // so it is read at the matching texel and its values rescaled to depth's pixels: the game's
+        // scale then still turns them into pixels of the texture the model is handed.
+        const int3 src = int3(id.x, id.y + gCropOffsetY, 0);
+        gOut0[id.xy] = float4(gDepth.Load(src).r, 0.0, 0.0, 0.0);
+
+        const float2 ms = float2(gMotionW, gMotionH) / float2(max(gDepthW, 1u), max(gDepthH, 1u));
+        const int2 mt = min(int2((float2(src.xy) + 0.5) * ms), int2(gMotionW, gMotionH) - 1);
+        gOut1[id.xy] = float4(gMotion.Load(int3(mt, 0)).xy / ms, 0.0, 0.0);
         return;
     }
 

@@ -370,6 +370,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrHoldFrame.set_from_config(readBool("DlssNr", "HoldFrame"));
             DlssNrCacheEnabled.set_from_config(readBool("DlssNr", "CacheEnabled"));
             DlssNrCacheInterval.set_from_config(readUInt("DlssNr", "CacheInterval"));
+            DlssNrCacheSpread.set_from_config(readBool("DlssNr", "CacheSpread"));
             DlssNrCacheAdaptive.set_from_config(readBool("DlssNr", "CacheAdaptive"));
             DlssNrCacheAdaptiveThreshold.set_from_config(readFloat("DlssNr", "CacheAdaptiveThreshold"));
             DlssNrCacheDepthTolerance.set_from_config(readFloat("DlssNr", "CacheDepthTolerance"));
@@ -1280,6 +1281,7 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "HoldFrame", GetBoolValue(Instance()->DlssNrHoldFrame.value_for_config()).c_str());
     ini.SetValue("DlssNr", "CacheEnabled", GetBoolValue(Instance()->DlssNrCacheEnabled.value_for_config()).c_str());
     ini.SetValue("DlssNr", "CacheInterval", GetIntValue(Instance()->DlssNrCacheInterval.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheSpread", GetBoolValue(Instance()->DlssNrCacheSpread.value_for_config()).c_str());
     ini.SetValue("DlssNr", "CacheAdaptive", GetBoolValue(Instance()->DlssNrCacheAdaptive.value_for_config()).c_str());
     ini.SetValue("DlssNr", "CacheAdaptiveThreshold",
                  GetFloatValue(Instance()->DlssNrCacheAdaptiveThreshold.value_for_config()).c_str());

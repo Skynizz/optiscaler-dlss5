@@ -200,6 +200,18 @@ struct NrState
     // every index here equal to the pass number it belongs to.
     void* passFeature[4] = {};
 
+    // Spread refresh (edit cache): one feature per horizontal band, each with its own temporal
+    // history, since each sees its band every N frames. Built at the band's size; the band's
+    // staging surfaces alongside.
+    void* bandFeature[4] = {};
+    bool bandReset[4] = { true, true, true, true };
+    unsigned int bandFeatureWidth = 0;
+    unsigned int bandFeatureHeight = 0;
+    ID3D12Resource* bandIn = nullptr;       // the proxy's band, at the model's working size
+    ID3D12Resource* bandOut = nullptr;      // the model's answer for it
+    ID3D12Resource* bandOrig = nullptr;     // the untouched frame's band, at frame size
+    ID3D12Resource* bandResolved = nullptr; // the composed band, at frame size
+
     // The model cannot read and write one resource, so the frame is staged through these.
     ID3D12Resource* colorCopy = nullptr;
     ID3D12Resource* output = nullptr;
@@ -742,6 +754,9 @@ void ReleaseSurfacesIfFormatChanged(DXGI_FORMAT needed)
 
     // The extras go with it: they were built for this raster and this tuning too.
     for (void*& f : g_nr.passFeature)
+        ParkNrFeature(f);
+
+    for (void*& f : g_nr.bandFeature)
         ParkNrFeature(f);
 
     for (ID3D12Resource** r :
@@ -1701,6 +1716,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         for (void*& f : g_nr.passFeature)
             ParkNrFeature(f);
 
+        for (void*& f : g_nr.bandFeature)
+            ParkNrFeature(f);
+
         // Only a resolution change invalidates the scratch textures. Tuning does not, and throwing
         // them away for it would mean a reallocation every time a slider moves.
         if (resolutionChanged)
@@ -2117,7 +2135,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         return in;
     };
 
-    if (cacheActive && !cacheRefresh)
+    if (cacheActive && !cacheRefresh && !g_cache->Spread())
     {
         // A cached frame: no encode, no model, no resolve. The carried edit is laid on the frame the
         // upscaler just wrote, which stays the game's own.
@@ -2258,6 +2276,267 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, outputArrival);
         device->Release();
         return;
+    }
+
+    // Spread refresh (edit cache): instead of the whole frame one frame in N, the model runs on one
+    // horizontal band of every frame -- about 1/N of the cost, every frame. Uneven frame times are what
+    // frame pacing, Reflex and frame generation handle worst; this keeps them even. The band's answer is
+    // merged into the carried edit, which covers the rest of the frame.
+    if (cacheActive && !cacheRefresh && g_cache->Spread())
+    {
+        const DlssNrCacheInputs in = cacheInputs(depthIn, motionIn);
+        g_cache->AccumulateBands(cmdList, device, in);
+
+        const unsigned int bands = g_cache->Bands();
+        const unsigned int band = g_cache->NextBand();
+        const unsigned int featureIndex = g_cache->ModelHistory() == 2 ? 0u : band;
+
+        // Geometry, in the model's working space first. Every band has the same size, so one feature
+        // size serves all of them: the core share plus a context margin above and below, rounded up to
+        // a multiple of 32 rows (the transformer works in windows), and slid inside the frame at the
+        // edges rather than cut.
+        constexpr unsigned int kContext = 32;
+        const unsigned int core = (workHeight + bands - 1) / bands;
+        const unsigned int bandH = std::min<unsigned int>(workHeight, ((core + 2 * kContext + 31) / 32) * 32);
+        const unsigned int y0 = (unsigned int) std::clamp<int>((int) (band * core) - (int) kContext, 0,
+                                                               (int) (workHeight - bandH));
+
+        // The same rows at the guides' and at the frame's resolution, fixed sizes again.
+        const unsigned int gH = std::min<unsigned int>(guideHeight, (bandH * guideHeight + workHeight - 1) / workHeight);
+        const unsigned int gy0 = std::min<unsigned int>((unsigned int) ((unsigned long long) y0 * guideHeight / workHeight),
+                                                        guideHeight - gH);
+        const unsigned int fH = std::min<unsigned int>(height, (bandH * height + workHeight - 1) / workHeight);
+        const unsigned int fy0 = std::min<unsigned int>((unsigned int) ((unsigned long long) y0 * height / workHeight),
+                                                        height - fH);
+
+        DlssNrCacheBand merged {};
+        bool evaluated = false;
+        bool copied = false;
+
+        auto ensureSurface = [&](ID3D12Resource*& r, unsigned int w, unsigned int h)
+        {
+            if (r != nullptr)
+            {
+                const D3D12_RESOURCE_DESC d = r->GetDesc();
+
+                if ((unsigned int) d.Width == w && d.Height == h && d.Format == desc.Format)
+                    return r != nullptr;
+
+                ParkNrResource(r);
+            }
+
+            r = CreateScratch(device, desc.Format, w, h);
+            return r != nullptr;
+        };
+
+        // The band features are built for one size; a different one retires them all.
+        if (g_nr.bandFeatureWidth != workWidth || g_nr.bandFeatureHeight != bandH)
+        {
+            for (void*& f : g_nr.bandFeature)
+                ParkNrFeature(f);
+
+            g_nr.bandFeatureWidth = workWidth;
+            g_nr.bandFeatureHeight = bandH;
+        }
+
+        if (frame.Reset)
+        {
+            for (bool& r : g_nr.bandReset)
+                r = true;
+        }
+
+        auto snippet = Util::FindFilePath(g_dllDir, "nvngx_dlssnr.dll");
+
+        if (!snippet.has_value())
+            snippet = Util::FindFilePath(Util::ExePath().remove_filename(), "nvngx_dlssnr.dll");
+
+        if (g_nr.bandFeature[featureIndex] == nullptr && snippet.has_value())
+        {
+            // Built this frame and first evaluated next, like the whole-frame feature: creating and
+            // evaluating on one command list is what hung the GPU before.
+            SetExtras(cfg, nullptr, nullptr, 0, 0, 0, 0);
+            g_nr.bandFeature[featureIndex] = g_nr.create(
+                snippet->wstring().c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(), device, cmdList,
+                g_nr.capabilityParams, workWidth, bandH, (int) cfg.DlssNrPreset.value_or_default(),
+                cfg.DlssNrIntensity.value_or_default(), (int) cfg.DlssNrStyle.value_or_default(),
+                cfg.DlssNrLocalStructure.value_or_default(), cfg.DlssNrLocalTone.value_or_default(),
+                cfg.DlssNrSkinStructure.value_or_default(), cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, 1);
+
+            if (g_nr.bandFeature[featureIndex] == nullptr)
+            {
+                // Without its band models the spread mode cannot refresh anything, so it turns itself
+                // off and the cache carries on one frame in N.
+                LOG_ERROR("DLSS-NR spread refresh: the model would not build at {}x{}; spread refresh off", workWidth,
+                          bandH);
+                Config::Instance()->DlssNrCacheSpread = false;
+            }
+            else
+            {
+                g_nr.bandReset[featureIndex] = true;
+                LOG_INFO("DLSS-NR spread refresh: band model {} built at {}x{} ({} bands, guides {} rows)",
+                         featureIndex, workWidth, bandH, bands, gH);
+            }
+        }
+        else if (g_nr.bandFeature[featureIndex] != nullptr &&
+                 ensureSurface(g_nr.bandIn, workWidth, bandH) && ensureSurface(g_nr.bandOut, workWidth, bandH) &&
+                 ensureSurface(g_nr.bandOrig, width, fH) && ensureSurface(g_nr.bandResolved, width, fH))
+        {
+            ID3D12Resource* bandDepth = nullptr;
+            ID3D12Resource* bandMotion = nullptr;
+
+            if (g_cache->CropGuides(cmdList, device, in, band, gy0, gH, &bandDepth, &bandMotion))
+            {
+                // The band of the proxy the model is shown, and of the untouched frame the resolve
+                // composes against. Both sources sit in NON_PIXEL_SHADER_RESOURCE after the encode.
+                auto copyRows = [&](ID3D12Resource* src, ID3D12Resource* dst, unsigned int srcY, unsigned int w,
+                                    unsigned int h)
+                {
+                    D3D12_TEXTURE_COPY_LOCATION s {};
+                    s.pResource = src;
+                    s.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+
+                    D3D12_TEXTURE_COPY_LOCATION d {};
+                    d.pResource = dst;
+                    d.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+
+                    D3D12_BOX box { 0, srcY, 0, w, srcY + h, 1 };
+
+                    Barrier(cmdList, src, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                            D3D12_RESOURCE_STATE_COPY_SOURCE);
+                    Barrier(cmdList, dst, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
+                    cmdList->CopyTextureRegion(&d, 0, 0, 0, &s, &box);
+                    Barrier(cmdList, dst, D3D12_RESOURCE_STATE_COPY_DEST,
+                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                    Barrier(cmdList, src, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                };
+
+                copyRows(modelInput, g_nr.bandIn, y0, workWidth, bandH);
+                copyRows(g_nr.hdrCopy, g_nr.bandOrig, fy0, width, fH);
+                copied = true;
+
+                const float mvToWorkBand = width != 0 ? (float) workWidth / (float) width : 1.0f;
+                const bool resetBand = g_nr.bandReset[featureIndex] || g_cache->ModelHistory() == 2;
+
+                SetExtras(cfg, nullptr, nullptr, 0, 0, 0, 0);
+
+                if (g_ngxTime != nullptr)
+                    g_ngxTime->Start(cmdList);
+
+                const int result = g_nr.evaluate(
+                    cmdList, g_nr.bandFeature[featureIndex], g_nr.capabilityParams, g_nr.bandIn, bandDepth, bandMotion,
+                    g_nr.bandOut, workWidth, bandH, guideWidth, gH, g_nr.guideDepthInverted ? 1 : 0, resetBand ? 1 : 0,
+                    cfg.DlssNrIntensity.value_or_default(), (int) cfg.DlssNrStyle.value_or_default(),
+                    cfg.DlssNrLocalStructure.value_or_default(), cfg.DlssNrLocalTone.value_or_default(),
+                    cfg.DlssNrSkinStructure.value_or_default(), cfg.DlssNrAutoMask.value_or_default() ? 1 : 0,
+                    g_nr.guideMvScaleX * mvToWorkBand, g_nr.guideMvScaleY * mvToWorkBand);
+
+                if (g_ngxTime != nullptr)
+                    g_ngxTime->End(cmdList);
+
+                g_nr.bandReset[featureIndex] = false;
+
+                if (result == NVSDK_NGX_Result_Success)
+                {
+                    // Composed exactly as the model path composes a whole frame, on the band.
+                    DlssNrConstants bandParams {};
+                    bandParams.Mode = DlssNrMode_Resolve;
+                    bandParams.WhitePoint = whitePoint;
+                    bandParams.UseGameExposure = useGameExposure;
+                    bandParams.ExposurePreMul = exposurePreMul;
+                    bandParams.Width = width;
+                    bandParams.Height = fH;
+                    bandParams.TransferStrength = cfg.DlssNrTransferStrength.value_or_default();
+                    bandParams.ColourStrength = cfg.DlssNrColourStrength.value_or_default();
+                    bandParams.DebugView = 0;
+                    bandParams.MaxRatio = cfg.DlssNrMaxRatio.value_or_default();
+                    bandParams.Transfer = cfg.DlssNrTransfer.value_or_default();
+                    bandParams.DebugScale = cfg.DlssNrWhitePointScale.value_or_default();
+                    bandParams.Passthrough = isHdrBuffer ? 0u : 1u;
+                    bandParams.ReversibleMode = cfg.DlssNrReversibleMode.value_or_default();
+                    bandParams.ApplyModel = cfg.DlssNrApplyModel.value_or_default() ? 1u : 0u;
+                    bandParams.CompareMode = 0;
+                    bandParams.CompareZoom = 1.0f;
+
+                    Barrier(cmdList, g_nr.bandOut, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+                    DispatchPass(cmdList, bandParams, g_nr.bandIn, g_nr.bandOut, g_nr.bandOrig, bandMotion, exposureTex,
+                                 g_nr.bandResolved, nullptr);
+                    Barrier(cmdList, g_nr.bandResolved, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+                    merged.resolved = g_nr.bandResolved;
+                    merged.y0 = fy0;
+                    merged.height = fH;
+                    merged.feather = std::max(1u, kContext * height / std::max(workHeight, 1u));
+                    merged.edges = (y0 == 0 ? 1u : 0u) | (y0 + bandH >= workHeight ? 2u : 0u);
+                    evaluated = true;
+                }
+                else
+                {
+                    LOG_ERROR("DLSS-NR spread refresh: band evaluate returned 0x{:X} ({}); spread refresh off",
+                              (uint32_t) result, NgxResultName((unsigned int) result));
+                    Config::Instance()->DlssNrCacheSpread = false;
+                }
+            }
+        }
+
+        // The carried edit, with this frame's band merged in, laid on the frame. keep goes back to rest
+        // first: the cache rewrites it with the same untouched frame on its way.
+        Barrier(cmdList, g_nr.hdrCopy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        g_cache->RunCached(cmdList, device, target, g_nr.hdrCopy, in, evaluated ? &merged : nullptr);
+        g_cache->EndFrame(cmdList);
+
+        if (evaluated)
+        {
+            Barrier(cmdList, g_nr.bandOut, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            Barrier(cmdList, g_nr.bandResolved, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        }
+
+        // The staging bands rest as UAVs, like every other scratch surface here.
+        if (g_nr.bandIn != nullptr && copied)
+            Barrier(cmdList, g_nr.bandIn, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        if (g_nr.bandOrig != nullptr && copied)
+            Barrier(cmdList, g_nr.bandOrig, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        FinishPassTiming(cmdList, timingQueue);
+
+        // The same hand-back as the end of the model path (hdrCopy is already back at rest).
+        if (g_nr.depthClone != nullptr)
+            Barrier(cmdList, g_nr.depthClone, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_COPY_DEST);
+
+        if (g_nr.motionClone != nullptr)
+            Barrier(cmdList, g_nr.motionClone, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_COPY_DEST);
+
+        if (reduced && g_nr.colorSmall != nullptr)
+            Barrier(cmdList, g_nr.colorSmall, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        Barrier(cmdList, g_nr.colorCopy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, outputArrival);
+        device->Release();
+        return;
+    }
+
+    // Spread refresh off: its band models are a whole model's worth of memory, so they do not linger.
+    if (!(cacheActive && g_cache->Spread()))
+    {
+        for (void*& f : g_nr.bandFeature)
+            ParkNrFeature(f);
+
+        g_nr.bandFeatureWidth = g_nr.bandFeatureHeight = 0;
+
+        for (ID3D12Resource** r : { &g_nr.bandIn, &g_nr.bandOut, &g_nr.bandOrig, &g_nr.bandResolved })
+            ParkNrResource(*r);
     }
 
     // On a refresh with the cache on, the model has not seen the frames since it last ran. Its own
@@ -2623,7 +2902,10 @@ void FinishPassTiming(ID3D12GraphicsCommandList* cmdList, ID3D12CommandQueue* ti
             // remainder: the model's cost is NVIDIA's to set, and everything else is ours.
             static unsigned long long lastSplitLog = 0;
 
-            if (g_lastGpuTime.has_value() && g_lastNgxTime.has_value() && g_frames - lastSplitLog > 600)
+            // Skipped with the edit cache on: the model's timer then belongs to some earlier frame
+            // while the total belongs to this one, and the difference means nothing.
+            if (g_lastGpuTime.has_value() && g_lastNgxTime.has_value() && g_frames - lastSplitLog > 600 &&
+                !Config::Instance()->DlssNrCacheEnabled.value_or_default())
             {
                 lastSplitLog = g_frames;
                 const double total = g_lastGpuTime.value();
@@ -3083,6 +3365,25 @@ void Shutdown()
             g_nr.release(f);
 
         f = nullptr;
+    }
+
+    for (void*& f : g_nr.bandFeature)
+    {
+        if (f != nullptr && g_nr.release != nullptr)
+            g_nr.release(f);
+
+        f = nullptr;
+    }
+
+    g_nr.bandFeatureWidth = g_nr.bandFeatureHeight = 0;
+
+    for (ID3D12Resource** r : { &g_nr.bandIn, &g_nr.bandOut, &g_nr.bandOrig, &g_nr.bandResolved })
+    {
+        if (*r != nullptr)
+        {
+            (*r)->Release();
+            *r = nullptr;
+        }
     }
 
     if (g_nr.output != nullptr)
