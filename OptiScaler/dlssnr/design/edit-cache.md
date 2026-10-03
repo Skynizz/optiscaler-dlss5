@@ -55,7 +55,9 @@ ClearStats -> Reproject (history -> this frame, validated; first pyramid level i
 
 Refresh triggers, in order: no history; the game's reset or a feature rebuild; a measurement dump;
 the interval; adaptive -- the fraction of pixels rejected (depth) summed since the last refresh, read
-back three frames late, priority (stencil) pixels counted 4x.
+back three frames late, priority (stencil) pixels counted 4x. An early run never comes sooner than
+`max(2, interval / 2)` frames after the last: otherwise a steady pan triggers one every frame and the
+cache saves nothing exactly when frame rate matters.
 
 ## Robustness: vegetation, water, hair
 

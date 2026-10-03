@@ -477,7 +477,10 @@ bool DlssNrEditCache_Dx12::BeginFrame(const Config& cfg, ID3D12Device* device, u
         why = "measurement dump";
     else if (_frame - _lastRefresh >= interval)
         why = "interval";
-    else if (adaptive && _cumulativeRejected > threshold)
+    // An early run never comes sooner than half the interval (and never two frames running). Without the
+    // floor a steady pan reveals enough every frame to trigger every frame, and the cache saves nothing
+    // exactly when the frame rate matters most; the revealed pixels borrow their surface's edit meanwhile.
+    else if (adaptive && _cumulativeRejected > threshold && _frame - _lastRefresh >= std::max(2u, interval / 2u))
         why = "too much of the frame revealed";
 
     if (why == nullptr)

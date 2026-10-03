@@ -347,6 +347,42 @@ void RenderMenu(Config* config, float menuResScale)
                                             100.0f * st.lastRejected);
                 }
 
+                // Starting points, not modes: each just sets the controls below, which stay editable.
+                ImGui::TextUnformatted("Presets:");
+                ImGui::SameLine();
+
+                auto preset = [&](unsigned int interval, float threshold, float decay, float depthTol,
+                                  float colourTol)
+                {
+                    config->DlssNrCacheInterval = interval;
+                    config->DlssNrCacheAdaptive = true;
+                    config->DlssNrCacheAdaptiveThreshold = threshold;
+                    config->DlssNrCacheHighDecay = decay;
+                    config->DlssNrCacheDepthTolerance = depthTol;
+                    config->DlssNrCacheColourTolerance = colourTol;
+                    config->DlssNrCacheRefreshBlend = 1.0f;
+                    config->DlssNrCacheModelHistory = 1u;
+                    config->DlssNrCacheBilateral = true;
+                };
+
+                if (ImGui::SmallButton("Quality"))
+                    preset(2, 0.05f, 0.95f, 0.10f, 0.50f);
+
+                ImGui::SameLine();
+
+                if (ImGui::SmallButton("Balanced"))
+                    preset(3, 0.08f, 0.92f, 0.10f, 0.50f);
+
+                ImGui::SameLine();
+
+                if (ImGui::SmallButton("Performance"))
+                    preset(5, 0.12f, 0.88f, 0.12f, 0.60f);
+
+                HelpMarker("Quality runs the model every other frame; Balanced one in three; Performance one"
+                           "\nin five. All three run it early when much of the view changes, but never more"
+                           "\noften than every other frame. For more speed still, combine with a lower Model"
+                           "\nresolution and Edge-aware enlargement above.");
+
                 int interval = (int) config->DlssNrCacheInterval.value_or_default();
 
                 if (ImGui::SliderInt("Max frames between runs", &interval, 1, 8))
