@@ -368,7 +368,9 @@ void RenderMenu(Config* config, float menuResScale)
                     config->DlssNrCacheHighDecay = decay;
                     config->DlssNrCacheDepthTolerance = depthTol;
                     config->DlssNrCacheColourTolerance = colourTol;
-                    config->DlssNrCacheRefreshBlend = 1.0f;
+                    // A band refreshing should settle in rather than snap; a whole-frame refresh is
+                    // taken whole, as the model gave it.
+                    config->DlssNrCacheRefreshBlend = config->DlssNrCacheSpread.value_or_default() ? 0.6f : 1.0f;
                     config->DlssNrCacheModelHistory = 1u;
                     config->DlssNrCacheBilateral = true;
                 };

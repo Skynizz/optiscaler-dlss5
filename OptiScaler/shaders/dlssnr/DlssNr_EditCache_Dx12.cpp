@@ -606,6 +606,9 @@ DlssNrCacheConstants DlssNrEditCache_Dx12::BaseConstants(const DlssNrCacheInputs
     c.StatsSlot = _statsSlot;
     c.Passthrough = in.passthrough ? 1u : 0u;
     c.FrameIndex = (uint32_t) _frame;
+    c.UseGameExposure = (in.useGameExposure && in.exposure != nullptr && !in.passthrough) ? 1u : 0u;
+    c.ExposurePreMul = in.exposurePreMul;
+    c.MaxLumaEdit = std::log2(std::max(in.maxRatio, 1.0f)) + 0.5f;
     return c;
 }
 
@@ -622,6 +625,13 @@ bool DlssNrEditCache_Dx12::Pass(ID3D12GraphicsCommandList* cmd, const DlssNrCach
 
     for (uint32_t i = 0; i < kSrvCount; ++i)
     {
+        if (i == 10)
+        {
+            MakeSrv(_device, srv[10] != nullptr ? srv[10] : (_exposure != nullptr ? _exposure : _dummySrv),
+                    heap.GetSrvCPU(10));
+            continue;
+        }
+
         if (i == 9)
         {
             // The stencil plane: plane 1 of the depth buffer's own typeless format.
@@ -907,6 +917,8 @@ bool DlssNrEditCache_Dx12::RunCached(ID3D12GraphicsCommandList* cmd, ID3D12Devic
     if (!_init || target == nullptr || keep == nullptr || in.depth == nullptr || in.motion == nullptr)
         return false;
 
+    _exposure = in.useGameExposure ? in.exposure : nullptr;
+
     // Spread mode keeps its per-band accumulators current itself (AccumulateBands).
     if (_modelHistory == 1 && !_spread)
     {
@@ -1044,6 +1056,8 @@ bool DlssNrEditCache_Dx12::CaptureRefresh(ID3D12GraphicsCommandList* cmd, ID3D12
     if (!_init || target == nullptr || original == nullptr || in.depth == nullptr || in.motion == nullptr)
         return false;
 
+    _exposure = in.useGameExposure ? in.exposure : nullptr;
+
     PrepareStencil(cmd, device, in);
 
     const unsigned int prev = _cur;
@@ -1137,6 +1151,7 @@ ID3D12Resource* DlssNrEditCache_Dx12::UpsampleModel(ID3D12GraphicsCommandList* c
     c.SourceHeight = sd.Height;
     c.Passthrough = passthrough ? 1u : 0u;
     c.JbuSigma = std::clamp(sigma, 0.005f, 1.0f);
+    c.MaxLumaEdit = 1.5f;
 
     ID3D12Resource* srv[kSrvCount] = { nullptr, nullptr, fullProxy, nullptr, nullptr, smallProxy, smallModel };
     ID3D12Resource* uav[kUavCount] = { _modelUp };

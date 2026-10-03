@@ -45,6 +45,9 @@ cbuffer Params : register(b0)
     uint  gBandFeather;  // rows over which its top and bottom fade in (the model's context margin)
     uint  gBandEdges;    // bit 0: band touches the top of the frame, bit 1: the bottom (no fade there)
     uint  gCropOffsetY;  // crop: first source row
+    uint  gUseGameExposure; // the game's live exposure is bound at t10: white = gExposurePreMul / exposure
+    float gExposurePreMul;
+    float gMaxLumaEdit;     // the most, in stops, the composition can move a pixel's luminance
 };
 
 Texture2D<float4>   gHistEdit  : register(t0); // rgb: log2 edit, a: high-band confidence
@@ -57,6 +60,7 @@ Texture2D<float4>   gAux1      : register(t6); // per mode: L1 guide / small mod
 Texture2D<float4>   gAux2      : register(t7); // L2
 Texture2D<float4>   gAux3      : register(t8); // L3
 Texture2D<uint2>    gStencil   : register(t9); // the depth buffer's stencil plane, when there is one
+Texture2D<float4>   gExposure  : register(t10); // the game's 1x1 exposure, when it supplies one
 
 RWTexture2D<float4> gOut0  : register(u0);
 RWTexture2D<float4> gOut1  : register(u1);
@@ -81,7 +85,59 @@ float LinDepth(float d)
     return gDepthInverted != 0 ? 1.0 / max(d, 1e-7) : 1.0 / max(1.0 - d, 1e-7);
 }
 
-float LogLuma(float3 c) { return log2(dot(max(c, 0.0), kLuma) + gEpsilon); }
+// The ratio floor, from the same white point the composition used on this very frame.
+//
+// It was paper white / 512 from the CPU's white point, which in a game that supplies its exposure is
+// read back three frames late -- and Control's exposure swings by three orders of magnitude within a
+// second after a cut. A floor a thousand times too small makes every ratio in the shadows explode:
+// near-black pixels become black or bright, and with bands refreshing in turn they pop on and off.
+// Reading the live exposure here, exactly as dlssnr.hlsl does, keeps the floor where the composition's
+// own guard put it.
+float WhitePoint()
+{
+    float white = max(gEpsilon * 512.0, 1e-4);
+
+    if (gUseGameExposure != 0)
+    {
+        const float e = gExposure.Load(int3(0, 0, 0)).r;
+
+        if (e > 1e-6 && e < 1e6)
+            white = clamp(gExposurePreMul / e, 0.01, 4096.0);
+    }
+
+    return white;
+}
+
+float Eps() { return WhitePoint() / 512.0; }
+
+float LogLuma(float3 c) { return log2(dot(max(c, 0.0), kLuma) + Eps()); }
+
+// An edit bounded to what the composition can actually produce: its luminance within the highlight
+// guard (plus a little for the soft knee), its colour within a stop of its luminance. Anything beyond
+// is not a model verdict but a ratio against a near-black pixel, and carrying it is what flickers.
+float3 ClampEdit(float3 e, float scale)
+{
+    const float limit = gMaxLumaEdit * max(scale, 1.0);
+    const float l = dot(e, kLuma);
+    const float lc = clamp(l, -limit, limit);
+    e += lc - l;
+    return clamp(e, lc - 1.0, lc + 1.0);
+}
+
+// The model's edit for one pixel, and whether to believe it. A model answer that is black where the
+// frame is not is a failed evaluate (a band's first frame, a reset), not a verdict to carry for N frames.
+float3 FreshEdit(float3 nr, float3 orig, out float ok)
+{
+    const float eps = Eps();
+    nr = max(nr, 0.0);
+    orig = max(orig, 0.0);
+
+    const float lo = dot(orig, kLuma);
+    const float ln = dot(nr, kLuma);
+    ok = (lo > 8.0 * eps && ln < 0.05 * lo) ? 0.0 : 1.0;
+
+    return ClampEdit(log2((nr + eps) / (orig + eps)), 1.0);
+}
 
 float RelDepthDiff(float a, float b) { return abs(a - b) / max(min(a, b), 1e-7); }
 
@@ -389,14 +445,17 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
                         const float feather = max((float) gBandFeather, 1.0);
                         const float wTop = (gBandEdges & 1u) ? 1.0 : saturate(((float) ry + 0.5) / feather);
                         const float wBot = (gBandEdges & 2u) ? 1.0 : saturate(((float) gBandHeight - (float) ry - 0.5) / feather);
-                        const float bw = min(wTop, wBot);
+                        float ok;
+                        const float3 fresh = FreshEdit(gAux0.Load(int3(id.x, ry, 0)).rgb, colour.rgb, ok);
 
-                        const float3 nr = max(gAux0.Load(int3(id.x, ry, 0)).rgb, 0.0);
-                        const float3 fresh =
-                            clamp(log2((nr + gEpsilon) / (max(colour.rgb, 0.0) + gEpsilon)), -kMaxEdit, kMaxEdit);
+                        // Where the carried edit is still good, the band moves it only part of the way
+                        // (the refresh blend), so a band refreshing does not snap; where it is not, the
+                        // band's answer is taken whole.
+                        const float settle = h.valid > 0.5 ? gRefreshBlend : 1.0;
+                        const float bw = min(wTop, wBot) * ok * settle;
 
                         edit = lerp(edit, fresh, bw);
-                        confidence = lerp(confidence, 1.0, bw);
+                        confidence = lerp(confidence, 1.0, min(wTop, wBot) * ok);
                         w = max(w, bw);
                     }
                 }
@@ -413,13 +472,16 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
             }
             else
             {
-                const float3 nr = max(gAux0.Load(int3(id.xy, 0)).rgb, 0.0);
-                const float3 fresh =
-                    clamp(log2((nr + gEpsilon) / (max(colour.rgb, 0.0) + gEpsilon)), -kMaxEdit, kMaxEdit);
+                float ok;
+                const float3 fresh = FreshEdit(gAux0.Load(int3(id.xy, 0)).rgb, colour.rgb, ok);
 
                 // Optional temporal smoothing of the refresh: where the carried edit is still valid,
-                // move only part of the way to the new one. 1 takes the new answer whole.
-                const float keep = (gHistValid != 0) ? (1.0 - gRefreshBlend) * h.valid * vColour : 0.0;
+                // move only part of the way to the new one. 1 takes the new answer whole. A pixel the
+                // model returned black for keeps what was carried.
+                float keep = (gHistValid != 0) ? (1.0 - gRefreshBlend) * h.valid * vColour : 0.0;
+
+                if (ok < 0.5)
+                    keep = (gHistValid != 0 && h.valid > 0.5) ? 1.0 : 0.0;
 
                 edit = lerp(fresh, h.edit, saturate(keep));
                 w = 1.0;
@@ -524,12 +586,13 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
         // The high band is what the pixel's own history says beyond its region, and it is only as
         // good as its confidence. Where the history was rejected the pixel takes the low band alone.
         const float3 high = hist.rgb - low;
-        const float3 edit = clamp(gLowGain * low + gHighGain * hist.a * high, -kMaxEdit, kMaxEdit);
+        const float3 edit = ClampEdit(gLowGain * low + gHighGain * hist.a * high, max(gLowGain, gHighGain));
 
-        float3 result = max((max(original.rgb, 0.0) + gEpsilon) * exp2(edit) - gEpsilon, 0.0);
+        const float eps = Eps();
+        float3 result = max((max(original.rgb, 0.0) + eps) * exp2(edit) - eps, 0.0);
 
-        // Debug views, in the frame's own units (paper white = epsilon * 512).
-        const float white = gEpsilon * 512.0;
+        // Debug views, in the frame's own units.
+        const float white = WhitePoint();
 
         if (gDebugView == 1)
         {

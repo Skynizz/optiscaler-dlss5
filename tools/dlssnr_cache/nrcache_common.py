@@ -68,10 +68,21 @@ def load_dump(directory: str) -> Dump:
 # The edit
 # --------------------------------------------------------------------------------------------------
 
+MAX_LUMA_EDIT = 1.5  # log2(highlight guard 2.0) + 0.5, the shader's default gMaxLumaEdit
+
+
+def clamp_edit(e: np.ndarray, limit: float = MAX_LUMA_EDIT) -> np.ndarray:
+    """ClampEdit in the shader: luminance within the guard, colour within a stop of it."""
+    l = e @ LUMA
+    lc = np.clip(l, -limit, limit)
+    e = e + (lc - l)[..., None]
+    return np.clip(e, (lc - 1)[..., None], (lc + 1)[..., None]).astype(np.float32)
+
+
 def edit_of(orig: np.ndarray, edited: np.ndarray, eps: float) -> np.ndarray:
-    """log2((edited + eps) / (orig + eps)) per channel, clamped like the shader's capture."""
+    """log2((edited + eps) / (orig + eps)) per channel, bounded like the shader's FreshEdit."""
     e = np.log2((np.maximum(edited, 0) + eps) / (np.maximum(orig, 0) + eps))
-    return np.clip(e, -MAX_EDIT, MAX_EDIT).astype(np.float32)
+    return clamp_edit(e)
 
 
 def apply_edit(orig: np.ndarray, edit: np.ndarray, eps: float) -> np.ndarray:
@@ -294,7 +305,8 @@ def cached_edit(hist: History, frame: Frame, p: CacheParams):
     """One cached frame end to end. Returns (final edit, new history, valid)."""
     edit, conf, valid = reproject(hist, frame, p)
     low = low_band(edit, valid, frame, p)
-    final = np.clip(p.low_gain * low + p.high_gain * conf[..., None] * (edit - low), -MAX_EDIT, MAX_EDIT)
+    final = clamp_edit(p.low_gain * low + p.high_gain * conf[..., None] * (edit - low),
+                       MAX_LUMA_EDIT * max(p.low_gain, p.high_gain, 1.0))
     new_hist = History(edit=edit, confidence=conf, depth=frame.depth.copy(), log_luma=frame.log_luma.copy())
     return final, new_hist, valid
 

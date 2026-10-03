@@ -53,6 +53,14 @@ struct DlssNrCacheInputs
     // The buffer's own "1.0", so the ratio floor is in the right units.
     float whitePoint = 1.0f;
     bool passthrough = false;
+
+    // The game's live exposure, exactly as the composition reads it, so both use one white point.
+    ID3D12Resource* exposure = nullptr;
+    bool useGameExposure = false;
+    float exposurePreMul = 1.0f;
+
+    // The composition's highlight guard: no carried edit may move a pixel further than it could.
+    float maxRatio = 2.0f;
 };
 
 // Spread refresh: one band of this frame, already run through the model and resolved, to merge into the
@@ -164,7 +172,7 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
     ID3D12Resource* _constantBuffers[DLSSNR_CACHE_NUM_OF_HEAPS] = {};
     uint32_t _heapIndex = 0;
 
-    static constexpr uint32_t kSrvCount = 10;
+    static constexpr uint32_t kSrvCount = 11;
     static constexpr uint32_t kUavCount = 6;
 
     // The frame-sized history, two of each so one is read while the other is written.
@@ -206,6 +214,9 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
     ID3D12Resource* _dummySrv = nullptr;
     ID3D12Resource* _dummyUav = nullptr;
     ID3D12Resource* _dummyStencil = nullptr;
+
+    // This frame's exposure texture, bound to every pass at t10 (a stand-in when there is none).
+    ID3D12Resource* _exposure = nullptr;
 
     std::vector<Retired> _retired;
 

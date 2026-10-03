@@ -109,4 +109,11 @@ struct alignas(256) DlssNrCacheConstants
     uint32_t BandFeather;
     uint32_t BandEdges;
     uint32_t CropOffsetY;
+
+    // The game's live exposure (bound at t10), so the ratio floor is the composition's own on this frame.
+    uint32_t UseGameExposure;
+    float ExposurePreMul;
+
+    // log2 of the composition's highlight guard, plus half a stop for the soft knee.
+    float MaxLumaEdit;
 };

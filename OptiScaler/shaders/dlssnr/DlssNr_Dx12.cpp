@@ -2132,6 +2132,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         in.depthInverted = g_nr.guideDepthInverted;
         in.whitePoint = whitePoint;
         in.passthrough = !isHdrBuffer;
+        in.exposure = exposureTex;
+        in.useGameExposure = useGameExposure != 0;
+        in.exposurePreMul = exposurePreMul;
+        in.maxRatio = cfg.DlssNrMaxRatio.value_or_default();
         return in;
     };
 
