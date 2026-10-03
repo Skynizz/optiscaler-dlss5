@@ -152,7 +152,16 @@ def main():
     ap.add_argument("--reset-ini", action="store_true", help="rewrite OptiScaler.ini even if already installed")
     ap.add_argument("--name", default="winmm.dll", help="file name OptiScaler is installed as (default winmm.dll)")
     ap.add_argument("--disable", action="append", default=[], help="a file to switch off by renaming (repeatable)")
+    ap.add_argument("--set", action="append", default=[], metavar="SECTION.KEY=VALUE",
+                    help="an extra ini setting for this game, e.g. DlssNr.WhitePointSource=0 (repeatable)")
     args = ap.parse_args()
+
+    for item in args.set:
+        key, _, value = item.partition("=")
+        section, _, name = key.partition(".")
+        if not (section and name and value):
+            sys.exit(f"--set expects SECTION.KEY=VALUE, got {item}")
+        SETTINGS.setdefault(section, {})[name] = value
 
     if args.action == "install":
         if not args.model:

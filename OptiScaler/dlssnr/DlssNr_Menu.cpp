@@ -808,6 +808,10 @@ void RenderMenu(Config* config, float menuResScale)
                     ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.25f, 1.0f),
                                        "This game supplies no exposure -- paper white is in use. Try "
                                        "the scan instead.");
+                else if (!vk && ex.unreliable)
+                    ImGui::TextColored(ImVec4(0.9f, 0.6f, 0.25f, 1.0f),
+                                       "This game's \"exposure\" jumps by thousands of times, so it is not "
+                                       "one -- ignored, paper white is in use.");
                 else if (vk)
                     ImGui::TextColored(ImVec4(0.45f, 0.8f, 0.45f, 1.0f),
                                        "This game supplies an exposure and it is being read.");

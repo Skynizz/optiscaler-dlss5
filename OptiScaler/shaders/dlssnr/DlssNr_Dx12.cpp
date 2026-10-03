@@ -310,6 +310,16 @@ struct NrState
     float gameExposure = 0.0f;
     float gamePreExposure = 1.0f;
 
+    // Whether the game's exposure can be believed at all. Some games hand DLSS a texture under that name
+    // that is not a stable exposure: Control's moved from 0.00025 to 116 within seconds, which put the
+    // white point at the 0.01 floor one moment and the 4096 ceiling the next. The model was then shown
+    // a black frame, then a blown one, and answered with black patches popping on and off. Once seen, it
+    // is latched for the session and the paper white slider takes over.
+    bool exposureUnreliable = false;
+    float exposureLogWhite[120] = {};
+    unsigned int exposureReadings = 0;
+    unsigned int exposureOutOfRange = 0;
+
     // What the game OFFERS, as opposed to what has been read. Recorded from the parameter block every
     // frame whether or not the setting is on, and deliberately so: the menu has to be able to answer
     // "would this do anything here?" before the user turns it on, and reading a pointer for null costs
@@ -973,7 +983,40 @@ void ConsumeMeterReadback()
     // When it is not believed gameExposure keeps its last good value, or stays 0 and lets
     // ResolveWhitePoint fall back to the slider, which is what a game supplying none should get.
     if (g_nr.meterExposureValid[slot] && std::isfinite(src[0]) && src[0] > 0.0f)
+    {
         g_nr.gameExposure = src[0];
+
+        // The white point this exposure implies, judged for plausibility. A real exposure moves a few
+        // stops between a cave and daylight and never asks for a white point near the clamps; a value
+        // that does either is something else under the exposure's name.
+        if (!g_nr.exposureUnreliable)
+        {
+            const float white = g_nr.gamePreExposure / src[0];
+            const unsigned int n = sizeof(g_nr.exposureLogWhite) / sizeof(float);
+            g_nr.exposureLogWhite[g_nr.exposureReadings % n] = std::log2(std::max(white, 1e-9f));
+            g_nr.exposureReadings++;
+
+            if (white < 0.02f || white > 512.0f)
+                g_nr.exposureOutOfRange++;
+
+            const unsigned int have = std::min(g_nr.exposureReadings, n);
+            float lo = 1e9f, hi = -1e9f;
+
+            for (unsigned int i = 0; i < have; ++i)
+            {
+                lo = std::min(lo, g_nr.exposureLogWhite[i]);
+                hi = std::max(hi, g_nr.exposureLogWhite[i]);
+            }
+
+            if (g_nr.exposureOutOfRange >= 3 || (have >= 30 && hi - lo > 8.0f))
+            {
+                g_nr.exposureUnreliable = true;
+                LOG_WARN("DLSS-NR: the game's exposure is not a usable exposure (white point {:.4f}..{:.1f}, {} "
+                         "readings out of range) -- ignoring it for this session, paper white is used instead",
+                         std::exp2(lo), std::exp2(hi), g_nr.exposureOutOfRange);
+            }
+        }
+    }
 
     D3D12_RANGE nothingWritten { 0, 0 };
     buffer->Unmap(0, &nothingWritten);
@@ -1064,7 +1107,8 @@ float ResolveWhitePoint(const Config& cfg, bool isHdrBuffer)
             return w;
     }
 
-    if (cfg.DlssNrWhitePointSource.value_or_default() == 1 && g_nr.gameExposure > 1e-6f)
+    if (cfg.DlssNrWhitePointSource.value_or_default() == 1 && g_nr.gameExposure > 1e-6f &&
+        !g_nr.exposureUnreliable)
     {
         // Its own setting, not the manual divisor. See Config: they are different quantities with
         // different units and different sensible ranges, and sharing one value meant adjusting the
@@ -1995,7 +2039,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     uint32_t useGameExposure = 0;
     float exposurePreMul = 0.0f;
 
-    if (cfg.DlssNrWhitePointSource.value_or_default() == 1 && frame.ExposureTexture != nullptr)
+    if (cfg.DlssNrWhitePointSource.value_or_default() == 1 && frame.ExposureTexture != nullptr &&
+        !g_nr.exposureUnreliable)
     {
         exposureTex = (ID3D12Resource*) frame.ExposureTexture;
         useGameExposure = 1;
@@ -3292,6 +3337,7 @@ ExposureStatus GameExposureStatus()
     s.everOffered = g_nr.exposureEverOffered;
     s.exposure = g_nr.gameExposure;
     s.preExposure = g_nr.gamePreExposure;
+    s.unreliable = g_nr.exposureUnreliable;
     return s;
 }
 
