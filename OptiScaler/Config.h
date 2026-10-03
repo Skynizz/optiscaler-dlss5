@@ -512,7 +512,7 @@ class Config
     CustomOptional<float> DlssNrCacheDepthTolerance { 0.10f };
     CustomOptional<float> DlssNrCacheColourTolerance { 0.50f };
     // How much of the high band's confidence survives each cached frame.
-    CustomOptional<float> DlssNrCacheHighDecay { 0.92f };
+    CustomOptional<float> DlssNrCacheHighDecay { 0.97f };
     // On a refresh, the share of the model's new edit taken (1 = all; lower smooths the refresh).
     CustomOptional<float> DlssNrCacheRefreshBlend { 1.0f };
     // Multi-pass approximation: gains on the low and high bands of the edit, in log space.

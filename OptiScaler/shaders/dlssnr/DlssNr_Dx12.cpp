@@ -2991,6 +2991,8 @@ struct BenchState
     // What the user had, put back at the end whatever happens.
     bool savedEnabled = false;
     bool savedCache = false;
+    float savedScale = 1.0f;
+    bool savedJbu = false;
 
     DlssNr::BenchmarkResult results[3];
 };
@@ -3009,9 +3011,13 @@ double Seconds(LARGE_INTEGER a, LARGE_INTEGER b)
 
 void BenchApplyPhase()
 {
+    // Vanilla is the pass as it ships: the model every frame, full size, nothing carried. The last
+    // phase is exactly what the user has set, whichever road to speed that is.
     Config* cfg = Config::Instance();
     cfg->DlssNrEnabled = g_bench.phase != 0;
-    cfg->DlssNrCacheEnabled = g_bench.phase == 2;
+    cfg->DlssNrCacheEnabled = g_bench.phase == 2 ? g_bench.savedCache : false;
+    cfg->DlssNrWorkingScale = g_bench.phase == 2 ? g_bench.savedScale : 1.0f;
+    cfg->DlssNrJbuUpsample = g_bench.phase == 2 ? g_bench.savedJbu : false;
     g_bench.frames.clear();
     g_bench.gpuSum = 0.0;
     g_bench.gpuCount = 0;
@@ -3061,6 +3067,8 @@ void BenchEnd()
     Config* cfg = Config::Instance();
     cfg->DlssNrEnabled = g_bench.savedEnabled;
     cfg->DlssNrCacheEnabled = g_bench.savedCache;
+    cfg->DlssNrWorkingScale = g_bench.savedScale;
+    cfg->DlssNrJbuUpsample = g_bench.savedJbu;
     g_bench.active = false;
 
     // A copy on disk, so a result can be compared with the next build's.
@@ -3132,7 +3140,7 @@ const char* BenchmarkPhaseName(int phase)
     {
     case 0: return "Neural Rendering off";
     case 1: return "DLSS 5 vanilla (model every frame)";
-    case 2: return "DLSS 5 + edit cache (your settings)";
+    case 2: return "DLSS 5, your settings";
     default: return "?";
     }
 }
@@ -3145,6 +3153,8 @@ void StartBenchmark(bool includeOff)
     Config* cfg = Config::Instance();
     g_bench.savedEnabled = cfg->DlssNrEnabled.value_or_default();
     g_bench.savedCache = cfg->DlssNrCacheEnabled.value_or_default();
+    g_bench.savedScale = cfg->DlssNrWorkingScale.value_or_default();
+    g_bench.savedJbu = cfg->DlssNrJbuUpsample.value_or_default();
     g_bench.includeOff = includeOff;
 
     for (auto& r : g_bench.results)
@@ -3163,6 +3173,8 @@ void CancelBenchmark()
         Config* cfg = Config::Instance();
         cfg->DlssNrEnabled = g_bench.savedEnabled;
         cfg->DlssNrCacheEnabled = g_bench.savedCache;
+        cfg->DlssNrWorkingScale = g_bench.savedScale;
+        cfg->DlssNrJbuUpsample = g_bench.savedJbu;
         g_bench.active = false;
     }
 }

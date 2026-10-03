@@ -508,6 +508,12 @@ bool DlssNrEditCache_Dx12::BeginFrame(const Config& cfg, ID3D12Device* device, u
 
     _spread = spread;
     _bands = std::clamp(interval, 2u, kDlssNrCacheMaxBands);
+
+    // Spreading, every pixel is refreshed every few frames, so its detail has no time to go stale. A
+    // decay then only makes each band's detail fade and snap back at the band rate -- a pulse of
+    // twenty-odd cycles a second, read as the bands stuttering. Validation still drops what moved.
+    if (_spread)
+        _highDecay = 1.0f;
     const bool adaptive = cfg.DlssNrCacheAdaptive.value_or_default();
     const float threshold = std::clamp(cfg.DlssNrCacheAdaptiveThreshold.value_or_default(), 0.001f, 1.0f);
 

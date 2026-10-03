@@ -449,17 +449,17 @@ void RenderMenu(Config* config, float menuResScale)
                 };
 
                 if (ImGui::SmallButton("Quality"))
-                    preset(2, 0.05f, 0.95f, 0.10f, 0.50f);
+                    preset(2, 0.05f, 0.98f, 0.10f, 0.50f);
 
                 ImGui::SameLine();
 
                 if (ImGui::SmallButton("Balanced"))
-                    preset(3, 0.08f, 0.92f, 0.10f, 0.50f);
+                    preset(3, 0.08f, 0.97f, 0.10f, 0.50f);
 
                 ImGui::SameLine();
 
                 if (ImGui::SmallButton("Performance"))
-                    preset(5, 0.12f, 0.88f, 0.12f, 0.60f);
+                    preset(5, 0.12f, 0.95f, 0.12f, 0.60f);
 
                 HelpMarker("Quality runs the model every other frame; Balanced one in three; Performance one"
                            "\nin five. All three run it early when much of the view changes, but never more"
@@ -540,7 +540,8 @@ void RenderMenu(Config* config, float menuResScale)
 
                 HelpMarker("How much of the fine detail's confidence survives each frame without the"
                            "\nmodel. Lower fades it toward the broad edit faster, which is steadier but"
-                           "\nsofter between runs.");
+                           "\nsofter between runs -- and too low makes the detail visibly pulse at the"
+                           "\nrefresh rate. Not used with Even frame times, where nothing waits long.");
 
                 float blend = config->DlssNrCacheRefreshBlend.value_or_default();
 
@@ -683,6 +684,21 @@ void RenderMenu(Config* config, float menuResScale)
                     ImGui::TextDisabled("Last dump: %u frames written.", st.dumpWritten);
             }
         }
+
+        // The other road to an even frame cost: no cache, no bands -- the model every frame, smaller.
+        if (ImGui::Button("Even cost without bands: model every frame at 60%"))
+        {
+            config->DlssNrCacheEnabled = false;
+            config->DlssNrWorkingScale = 0.6f;
+            config->DlssNrJbuUpsample = true;
+            config->DlssNrTransfer = 1u;
+        }
+
+        HelpMarker("Turns the edit cache off and runs the model on every frame at 60% of the frame's size"
+                   "\n(about a third of the cost), brought back up guided by the full-size frame."
+                   "\n\nNothing is carried between frames and there are no bands, so there is nothing to"
+                   "\npop or stutter -- the model's own temporal behaviour, just cheaper. It softens the"
+                   "\nfinest synthesised detail a little. Compare it with the benchmark above.");
 
         ImGui::SeparatorText("How much of it lands");
 
