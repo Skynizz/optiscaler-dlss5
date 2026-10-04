@@ -1168,6 +1168,19 @@ void RenderMenu(Config* config, float menuResScale)
             if (ImGui::SliderFloat("Local adaptation", &local, 0.0f, 1.0f, "%.2f"))
                 config->DlssNrAutoLocal = std::clamp(local, 0.0f, 1.0f);
 
+            if (local > 0.0f)
+            {
+                float shadows = config->DlssNrAutoLocalShadows.value_or_default();
+
+                if (ImGui::SliderFloat("...in shadows too", &shadows, 0.0f, 1.0f, "%.2f"))
+                    config->DlssNrAutoLocalShadows = std::clamp(shadows, 0.0f, 1.0f);
+
+                HelpMarker("Whether dark regions are brightened for the model as well. 0 (the default) leaves"
+                           "\nthem as dark as the scene has them: measured, brightening them shows the model the"
+                           "\nnoise in its shadows and it answers with specks that pop. Raise it only if a game's"
+                           "\ndark areas get no detail at all.");
+            }
+
             HelpMarker("How much each region of the frame gets its own white point, from its own brightness."
                        "\n\nOne number for a whole frame cannot serve a lit window and the shadow beside it: high"
                        "\nenough for the window, it shows the model the shadow as black -- and the model answers"

@@ -190,6 +190,9 @@ struct alignas(256) DlssNrConstants
     // A band dispatch (spread refresh): frame v = UvOffsetY + v * UvScaleY. 0 scale means a whole frame.
     float UvOffsetY;
     float UvScaleY;
+
+    // Local adaptation in regions darker than the average, as a share of LocalStrength (0 = leave them).
+    float LocalShadows;
 };
 
 class DlssNr_Common

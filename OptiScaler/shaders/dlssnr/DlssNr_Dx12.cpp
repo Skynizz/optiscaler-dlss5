@@ -473,6 +473,79 @@ void CheckCaptureTrigger()
         LOG_INFO("DLSS-NR edit cache dump requested by trigger file");
     }
 
+    // An observation dump: what the cache shows, every frame, model not forced.
+    const auto observeTrigger = Util::DllPath().remove_filename() / "dlssnr-cacheobserve.trigger";
+
+    if (std::filesystem::exists(observeTrigger, ec))
+    {
+        std::filesystem::remove(observeTrigger, ec);
+
+        if (g_cache != nullptr)
+            g_cache->RequestDump(Config::Instance()->DlssNrCacheDumpFrames.value_or_default(), true);
+
+        LOG_INFO("DLSS-NR edit cache observation dump requested by trigger file");
+    }
+
+    // Live settings, so a setting can be changed and compared without restarting the game: a file named
+    // dlssnr-set.txt beside OptiScaler holding Key=Value lines (the [DlssNr] key names). Assigned, not
+    // re-read -- OptiScaler's config reload keeps any value it already holds, so a reload changes nothing.
+    const auto setFile = Util::DllPath().remove_filename() / "dlssnr-set.txt";
+
+    if (std::filesystem::exists(setFile, ec))
+    {
+        Config* c = Config::Instance();
+        FILE* f = _wfopen(setFile.wstring().c_str(), L"r");
+        char line[256];
+
+        while (f != nullptr && fgets(line, sizeof(line), f) != nullptr)
+        {
+            char key[128] = {};
+            char value[64] = {};
+
+            if (sscanf(line, " %127[^= ] = %63s", key, value) != 2)
+                continue;
+
+            const std::string k(key);
+            const float v = (float) atof(value);
+            const bool b = v != 0.0f || std::string(value) == "true";
+
+            if (k == "CacheEnabled") c->DlssNrCacheEnabled = b;
+            else if (k == "CacheInterval") c->DlssNrCacheInterval = (uint32_t) v;
+            else if (k == "CacheSpread") c->DlssNrCacheSpread = b;
+            else if (k == "CacheAdaptive") c->DlssNrCacheAdaptive = b;
+            else if (k == "CacheAdaptiveThreshold") c->DlssNrCacheAdaptiveThreshold = v;
+            else if (k == "CacheDepthTolerance") c->DlssNrCacheDepthTolerance = v;
+            else if (k == "CacheColourTolerance") c->DlssNrCacheColourTolerance = v;
+            else if (k == "CacheHighDecay") c->DlssNrCacheHighDecay = v;
+            else if (k == "CacheRefreshBlend") c->DlssNrCacheRefreshBlend = v;
+            else if (k == "CacheStabilize") c->DlssNrCacheStabilize = v;
+            else if (k == "CacheDespeckle") c->DlssNrCacheDespeckle = b;
+            else if (k == "CacheCrossfade") c->DlssNrCacheCrossfade = b;
+            else if (k == "CacheModelHistory") c->DlssNrCacheModelHistory = (uint32_t) v;
+            else if (k == "CacheDumpFrames") c->DlssNrCacheDumpFrames = (uint32_t) v;
+            else if (k == "WhitePointSource") c->DlssNrWhitePointSource = (uint32_t) v;
+            else if (k == "WhitePointScale") c->DlssNrWhitePointScale = v;
+            else if (k == "WhitePointTrim") c->DlssNrWhitePointTrim = v;
+            else if (k == "AutoLocal") c->DlssNrAutoLocal = v;
+            else if (k == "AutoLocalShadows") c->DlssNrAutoLocalShadows = v;
+            else if (k == "WorkingScale") c->DlssNrWorkingScale = v;
+            else if (k == "JbuUpsample") c->DlssNrJbuUpsample = b;
+            else if (k == "Enabled") c->DlssNrEnabled = b;
+            else
+            {
+                LOG_WARN("DLSS-NR dlssnr-set.txt: unknown key {}", k);
+                continue;
+            }
+
+            LOG_INFO("DLSS-NR live setting {} = {}", k, value);
+        }
+
+        if (f != nullptr)
+            fclose(f);
+
+        std::filesystem::remove(setFile, ec);
+    }
+
     // And the FPS comparison, so a test can be run without opening the menu.
     const auto benchTrigger = Util::DllPath().remove_filename() / "dlssnr-benchmark.trigger";
 
@@ -2209,6 +2282,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         c.UseLocalMap = 1;
         c.LocalStrength = std::clamp(cfg.DlssNrAutoLocal.value_or_default(), 0.0f, 1.0f);
         c.LocalMeanLog = g_nr.autoWhiteLog + std::log2(encoded / (1.0f - encoded));
+        c.LocalShadows = std::clamp(cfg.DlssNrAutoLocalShadows.value_or_default(), 0.0f, 1.0f);
     };
 
     // Frame hold. Freeze the encode's input so a live setting change re-renders the same frame. This

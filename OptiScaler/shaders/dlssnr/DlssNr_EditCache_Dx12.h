@@ -162,7 +162,9 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
 
     // Writes a run of consecutive frames for the offline measurement script. The model runs on every
     // one of them, so each frame has its own ground truth.
-    void RequestDump(unsigned int frames);
+    // observe: record what the cache actually shows, frame by frame, without forcing the model -- the
+    // way to measure its flicker in the real game rather than in a replay.
+    void RequestDump(unsigned int frames, bool observe = false);
     bool DumpActive() const { return _dumpWanted > 0; }
 
     Status GetStatus() const;
@@ -274,6 +276,7 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
     };
 
     unsigned int _dumpWanted = 0;
+    bool _dumpObserve = false;
     unsigned int _dumpCaptured = 0;
     unsigned long long _dumpWriteAt = 0;
     unsigned int _dumpWritten = 0;

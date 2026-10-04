@@ -534,7 +534,7 @@ bool DlssNrEditCache_Dx12::BeginFrame(const Config& cfg, ID3D12Device* device, u
         why = "no history";
     else if (reset)
         why = "the game or the model reset";
-    else if (_dumpWanted > 0)
+    else if (_dumpWanted > 0 && !_dumpObserve)
         why = "measurement dump";
     else if (_spread)
         why = nullptr; // every frame refreshes one band instead
@@ -580,7 +580,9 @@ unsigned int DlssNrEditCache_Dx12::EffectiveInterval(unsigned int interval, bool
         return interval;
     }
 
-    const int wanted = _motion > threshold ? 2 : (_motion < threshold * 0.05f ? 0 : 1);
+    // Standing still is not zero: TAA jitter on thin things alone rejects about 0.6% of the frame in
+    // Control. The floor for "still" sits above that, or the regime never engages.
+    const int wanted = _motion > threshold ? 2 : (_motion < std::max(0.015f, threshold * 0.15f) ? 0 : 1);
 
     if (wanted == _regime)
     {
@@ -1092,6 +1094,14 @@ bool DlssNrEditCache_Dx12::RunCached(ID3D12GraphicsCommandList* cmd, ID3D12Devic
     Barrier(cmd, keep, kUav, kSrv);
     BuildCoarseLevels(cmd);
     ApplyPass(cmd, target, keep, in);
+
+    if (_dumpWanted > 0 && _dumpObserve)
+    {
+        Barrier(cmd, target, kUav, kSrv);
+        DumpRecord(cmd, device, target, keep, in);
+        Barrier(cmd, target, kSrv, kUav);
+    }
+
     Barrier(cmd, keep, kSrv, kUav);
 
     RestoreStencil(cmd);
@@ -1169,7 +1179,7 @@ bool DlssNrEditCache_Dx12::CaptureRefresh(ID3D12GraphicsCommandList* cmd, ID3D12
     _cur = next;
     _historyValid = true;
 
-    if (_dumpWanted > 0)
+    if (_dumpWanted > 0 && !_dumpObserve)
         DumpRecord(cmd, device, target, original, in);
 
     // The stored edit is the model's own unless something changed it -- the blend, the gains, the
@@ -1186,6 +1196,13 @@ bool DlssNrEditCache_Dx12::CaptureRefresh(ID3D12GraphicsCommandList* cmd, ID3D12
     {
         BuildCoarseLevels(cmd);
         ApplyPass(cmd, target, original, in);
+    }
+
+    if (_dumpWanted > 0 && _dumpObserve)
+    {
+        Barrier(cmd, target, kUav, kSrv);
+        DumpRecord(cmd, device, target, original, in);
+        Barrier(cmd, target, kSrv, kUav);
     }
 
     RestoreStencil(cmd);
@@ -1305,12 +1322,13 @@ void DlssNrEditCache_Dx12::FinishUpsample(ID3D12GraphicsCommandList* cmd)
         Barrier(cmd, _modelUp, kSrv, kUav);
 }
 
-void DlssNrEditCache_Dx12::RequestDump(unsigned int frames)
+void DlssNrEditCache_Dx12::RequestDump(unsigned int frames, bool observe)
 {
     if (_dumpWanted > 0)
         return;
 
     DumpRelease();
+    _dumpObserve = observe;
     _dumpWanted = std::clamp(frames, 2u, 32u);
     _dumpCaptured = 0;
     _dumpWriteAt = 0;
@@ -1442,6 +1460,7 @@ void DlssNrEditCache_Dx12::DumpWrite()
              << "  \"height\": " << _height << ",\n"
              << "  \"white_points\": [" << whitePoints << "],\n"
              << "  \"epsilon_rule\": \"white_point / 512\",\n"
+             << "  \"observe\": " << (_dumpObserve ? "true" : "false") << ",\n"
              << "  \"orig\": \"the frame as the upscaler wrote it, linear, RGBA float16\",\n"
              << "  \"nr\": \"the same frame after Neural Rendering (the model ran on every dumped frame)\",\n"
              << "  \"geo\": \"float32: [0:2] uv offset to the PREVIOUS frame (prev_uv = uv + geo.xy), "

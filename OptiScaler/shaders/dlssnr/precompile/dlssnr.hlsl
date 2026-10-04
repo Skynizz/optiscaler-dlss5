@@ -34,6 +34,7 @@ cbuffer Params : register(b0)
     float gLocalMeanLog;   // log2 of the scene average that deviation is measured from
     float gUvOffsetY;      // a band dispatch: frame v = offset + v * scale (scale 0 means a whole frame)
     float gUvScaleY;
+    float gLocalShadows;   // 0..1: share of the local adaptation applied to regions darker than the average
 };
 
 // Bringing an impossible colour back into a possible one.
@@ -301,7 +302,14 @@ float WhitePointAt(float2 uv)
 
         // Four stops either way at most before the strength: a black HUD bar or the sun cannot drag a
         // region's exposure further than that.
-        w *= exp2(clamp(l - gLocalMeanLog, -4.0, 4.0) * gLocalStrength);
+        //
+        // Asymmetric. Bright regions get a higher white point, so the model sees their highlights rather
+        // than a flat clip. Dark regions are left as dark as the scene has them unless asked otherwise:
+        // measured on Control, lifting them showed the model the noise in its shadows, and the model
+        // answered with five times as many specks popping there. A finished frame has dark shadows; the
+        // model is at its steadiest when it is shown one.
+        const float dev = clamp(l - gLocalMeanLog, -4.0, 4.0);
+        w *= exp2(dev * gLocalStrength * (dev < 0.0 ? gLocalShadows : 1.0));
     }
 #endif
     return w;

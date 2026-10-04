@@ -497,7 +497,10 @@ class Config
     // Automatic white point (source 3), local adaptation: how much of each region's own brightness the
     // white point follows (0 = one value for the whole frame, 1 = fully local). What the model is shown
     // is evened out; the frame keeps its own contrast, since the edit comes back as a ratio.
-    CustomOptional<float> DlssNrAutoLocal { 0.5f };
+    CustomOptional<float> DlssNrAutoLocal { 0.0f };
+    // ...in regions darker than the average, as a share of it. 0 leaves them as dark as the scene has
+    // them, which keeps the model steady there; above 0 shows it more of the shadows.
+    CustomOptional<float> DlssNrAutoLocalShadows { 0.0f };
 
     // The temporal edit cache (shaders/dlssnr/DlssNr_EditCache_Dx12). Off by default, and off is the
     // pass exactly as it was: the model runs every frame and none of the cache's code is reached.

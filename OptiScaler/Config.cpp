@@ -359,6 +359,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrAutoCapture.set_from_config(readBool("DlssNr", "AutoCapture"));
             DlssNrWhitePointScale.set_from_config(readFloat("DlssNr", "WhitePointScale"));
             DlssNrAutoLocal.set_from_config(readFloat("DlssNr", "AutoLocal"));
+            DlssNrAutoLocalShadows.set_from_config(readFloat("DlssNr", "AutoLocalShadows"));
             DlssNrPreset.set_from_config(readUInt("DlssNr", "Preset"));
             DlssNrIntensity.set_from_config(readFloat("DlssNr", "Intensity"));
             DlssNrStyle.set_from_config(readUInt("DlssNr", "Style"));
@@ -1272,6 +1273,8 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "WhitePointScale",
                  GetFloatValue(Instance()->DlssNrWhitePointScale.value_for_config()).c_str());
     ini.SetValue("DlssNr", "AutoLocal", GetFloatValue(Instance()->DlssNrAutoLocal.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "AutoLocalShadows",
+                 GetFloatValue(Instance()->DlssNrAutoLocalShadows.value_for_config()).c_str());
     ini.SetValue("DlssNr", "Preset", GetIntValue(Instance()->DlssNrPreset.value_for_config()).c_str());
     ini.SetValue("DlssNr", "Intensity", GetFloatValue(Instance()->DlssNrIntensity.value_for_config()).c_str());
     ini.SetValue("DlssNr", "Style", GetIntValue(Instance()->DlssNrStyle.value_for_config()).c_str());
