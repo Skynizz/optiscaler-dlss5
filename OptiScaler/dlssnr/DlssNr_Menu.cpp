@@ -448,6 +448,16 @@ void RenderMenu(Config* config, float menuResScale)
                     config->DlssNrCacheBilateral = true;
                 };
 
+                if (ImGui::SmallButton("Stable vanilla"))
+                {
+                    // The model every frame -- no speed-up -- but through the stabiliser, so flicker
+                    // can be told apart from the cache: if this is clean, the cache is the cause.
+                    preset(1, 0.10f, 1.0f, 0.10f, 0.50f);
+                    config->DlssNrCacheSpread = false;
+                }
+
+                ImGui::SameLine();
+
                 if (ImGui::SmallButton("Quality"))
                     preset(2, 0.05f, 0.98f, 0.10f, 0.50f);
 
@@ -579,6 +589,17 @@ void RenderMenu(Config* config, float menuResScale)
                            "\nstop or more and back again: that is the black popping, and this holds it."
                            "\n\nLower is steadier; too low and genuine changes (a light switching on) arrive"
                            "\nover a few frames instead of at once. 0 turns it off.");
+
+                bool despeckle = config->DlssNrCacheDespeckle.value_or_default();
+
+                if (ImGui::Checkbox("Despeckle", &despeckle))
+                    config->DlssNrCacheDespeckle = despeckle;
+
+                HelpMarker("Bounds each new model edit by its eight neighbours'. The model's typical failure"
+                           "\nin shadows is a speck: a few pixels it suddenly darkens while everything around"
+                           "\nthem stays put, and next run they are back. A pixel darker than all of its"
+                           "\nneighbours is that speck, not structure; a real edge has neighbours on its own"
+                           "\nside that agree with it, so edges keep their shape.");
 
                 bool bilateral = config->DlssNrCacheBilateral.value_or_default();
 

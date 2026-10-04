@@ -242,6 +242,7 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
     float _highGain = 1.0f;
     bool _bilateral = true;
     float _stabilize = 0.5f;
+    bool _despeckle = true;
     unsigned int _debugView = 0;
     unsigned int _modelHistory = 1;
     bool _stencilWanted = false;   // read the plane at all: priority on, or the stencil debug view

@@ -119,4 +119,7 @@ struct alignas(256) DlssNrCacheConstants
 
     // Anti-flicker: the largest step, in stops, a refresh may make on a still-valid pixel. 0 is off.
     float Stabilize;
+
+    // Bound each fresh edit by its eight neighbours' (removes isolated specks the model invents).
+    uint32_t Despeckle;
 };

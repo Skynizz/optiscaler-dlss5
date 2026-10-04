@@ -2896,7 +2896,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // Enshrouded session, because a measured white point drifts continuously and every drift was a
         // change. A line per meaningful change is the point; a line per frame is a different problem.
         const ComposeReport composeNow { true,
-                                         std::round(resolveParams.WhitePoint * 100.0f) / 100.0f,
+                                         // 5% steps in log space: the automatic source moves every frame.
+                                         std::exp2(std::round(std::log2(std::max(resolveParams.WhitePoint, 1e-4f)) * 14.0f) / 14.0f),
                                          resolveParams.TransferStrength,
                                          resolveParams.ColourStrength,
                                          resolveParams.MaxRatio,

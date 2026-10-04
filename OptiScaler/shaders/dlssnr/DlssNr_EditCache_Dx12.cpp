@@ -488,6 +488,7 @@ bool DlssNrEditCache_Dx12::BeginFrame(const Config& cfg, ID3D12Device* device, u
     _highGain = std::clamp(cfg.DlssNrCacheHighGain.value_or_default(), 0.0f, 4.0f);
     _bilateral = cfg.DlssNrCacheBilateral.value_or_default();
     _stabilize = std::clamp(cfg.DlssNrCacheStabilize.value_or_default(), 0.0f, 4.0f);
+    _despeckle = cfg.DlssNrCacheDespeckle.value_or_default();
     _debugView = cfg.DlssNrCacheDebugView.value_or_default();
     _modelHistory = cfg.DlssNrCacheModelHistory.value_or_default();
     _stencilPriority = cfg.DlssNrCacheStencil.value_or_default();
@@ -617,6 +618,7 @@ DlssNrCacheConstants DlssNrEditCache_Dx12::BaseConstants(const DlssNrCacheInputs
     c.ExposurePreMul = in.exposurePreMul;
     c.MaxLumaEdit = std::log2(std::max(in.maxRatio, 1.0f)) + 0.5f;
     c.Stabilize = _stabilize;
+    c.Despeckle = _despeckle ? 1u : 0u;
     return c;
 }
 
@@ -1095,10 +1097,13 @@ bool DlssNrEditCache_Dx12::CaptureRefresh(ID3D12GraphicsCommandList* cmd, ID3D12
     if (_dumpWanted > 0)
         DumpRecord(cmd, device, target, original, in);
 
-    // The stored edit is the model's own unless the blend or the gains changed it, in which case the
-    // frame on screen has to be the stored one too, or the refresh frames would not match the rest.
+    // The stored edit is the model's own unless something changed it -- the blend, the gains, the
+    // anti-flicker or the despeckle -- in which case the frame on screen has to be the stored one too.
+    // Without this the refresh frames showed the model's raw answer: exactly the frames where a speck
+    // pops, unfiltered, while the frames between were steady.
     const bool rewrite = (_refreshBlend < 0.999f && wasValid) || std::abs(_lowGain - 1.0f) > 1e-3f ||
-                         std::abs(_highGain - 1.0f) > 1e-3f || _debugView != 0;
+                         std::abs(_highGain - 1.0f) > 1e-3f || _debugView != 0 || (_stabilize > 0.0f && wasValid) ||
+                         _despeckle;
 
     Barrier(cmd, target, kSrv, kUav);
 

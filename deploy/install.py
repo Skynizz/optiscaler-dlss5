@@ -32,7 +32,7 @@ MARKER = "optiscaler-nr-cache.installed.json"
 SETTINGS = {
     "Upscalers": {"Dx12Upscaler": "dlss"},
     "Log": {"LogToFile": "true", "LogLevel": "2"},
-    "DlssNr": {"Enabled": "true", "CacheEnabled": "true", "CacheInterval": "3", "CacheSpread": "true",
+    "DlssNr": {"Enabled": "true", "CacheEnabled": "true", "CacheInterval": "2", "CacheSpread": "false",
                "CacheRefreshBlend": "1.0"},
 }
 

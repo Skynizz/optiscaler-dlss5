@@ -523,6 +523,9 @@ class Config
     // Anti-flicker: the largest step, in stops, a model refresh may make on a pixel that is still the
     // same surface. Holds the black pops, lets detail through. 0 is off.
     CustomOptional<float> DlssNrCacheStabilize { 0.5f };
+    // Bound each fresh model edit by its eight neighbours': removes the isolated dark specks the model
+    // invents in shadows, keeps edges (their own side agrees with them).
+    CustomOptional<bool> DlssNrCacheDespeckle { true };
     // What the model is told on a refresh: 0 the game's vectors, 1 motion accumulated since it last
     // ran, 2 reset its history every refresh.
     CustomOptional<uint32_t> DlssNrCacheModelHistory { 1 };

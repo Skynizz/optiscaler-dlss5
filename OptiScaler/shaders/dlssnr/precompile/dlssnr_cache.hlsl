@@ -49,6 +49,7 @@ cbuffer Params : register(b0)
     float gExposurePreMul;
     float gMaxLumaEdit;     // the most, in stops, the composition can move a pixel's luminance
     float gStabilize;       // anti-flicker: the most a refresh may move a still-valid pixel's edit, in stops (0 off)
+    uint  gDespeckle;       // bound each fresh edit by its eight neighbours' (isolated dark specks)
 };
 
 Texture2D<float4>   gHistEdit  : register(t0); // rgb: log2 edit, a: high-band confidence
@@ -154,6 +155,52 @@ float3 FreshEdit(float3 nr, float3 orig, out float ok)
 
     return ClampEdit(log2((nr + eps) / (orig + eps)), 1.0);
 }
+
+// The model's fresh edit at a pixel, with its eight neighbours' edits bounding its luminance.
+//
+// The model's characteristic failure in shadows is a speck: a few pixels it suddenly darkens by a stop
+// or more while everything around them stays put, and next run they are back. An edit that is darker
+// (or brighter) than every one of its neighbours is that speck, not structure -- a real edge has
+// neighbours on its own side that agree with it -- so it is brought back to the range they span.
+//
+// nr is read from gAux0 at nrPos (band-local or frame coordinates), the frame from gColour at framePos.
+float3 FreshEditAt(int2 framePos, int2 nrPos, int2 nrSize, out float ok)
+{
+    const float3 e = FreshEdit(gAux0.Load(int3(nrPos, 0)).rgb, gColour.Load(int3(framePos, 0)).rgb, ok);
+
+    if (gDespeckle == 0)
+        return e;
+
+    float lo = 1e9, hi = -1e9;
+
+    [unroll] for (int k = 0; k < 9; ++k)
+    {
+        if (k == 4)
+            continue;
+
+        const int2 o = int2(k % 3 - 1, k / 3 - 1);
+        const int2 pn = clamp(nrPos + o, int2(0, 0), nrSize - 1);
+        const int2 pf = clamp(framePos + o, int2(0, 0), int2(gWidth, gHeight) - 1);
+
+        float okn;
+        const float3 en = FreshEdit(gAux0.Load(int3(pn, 0)).rgb, gColour.Load(int3(pf, 0)).rgb, okn);
+
+        if (okn > 0.5)
+        {
+            const float l = dot(en, kLuma);
+            lo = min(lo, l);
+            hi = max(hi, l);
+        }
+    }
+
+    if (hi < lo)
+        return e;
+
+    const float l = dot(e, kLuma);
+    const float lc = clamp(l, lo - 0.1, hi + 0.1);
+    return e + (lc - l);
+}
+
 
 float RelDepthDiff(float a, float b) { return abs(a - b) / max(min(a, b), 1e-7); }
 
@@ -462,7 +509,8 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
                         const float wTop = (gBandEdges & 1u) ? 1.0 : saturate(((float) ry + 0.5) / feather);
                         const float wBot = (gBandEdges & 2u) ? 1.0 : saturate(((float) gBandHeight - (float) ry - 0.5) / feather);
                         float ok;
-                        const float3 fresh = Stabilize(FreshEdit(gAux0.Load(int3(id.x, ry, 0)).rgb, colour.rgb, ok),
+                        const float3 fresh = Stabilize(FreshEditAt(int2(id.xy), int2(id.x, ry),
+                                                                   int2(gWidth, gBandHeight), ok),
                                                        h.edit, h.valid * vColour);
 
                         // Where the carried edit is still good, the band moves it only part of the way
@@ -490,8 +538,8 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
             else
             {
                 float ok;
-                const float3 fresh = Stabilize(FreshEdit(gAux0.Load(int3(id.xy, 0)).rgb, colour.rgb, ok), h.edit,
-                                               gHistValid != 0 ? h.valid * vColour : 0.0);
+                const float3 fresh = Stabilize(FreshEditAt(int2(id.xy), int2(id.xy), int2(gWidth, gHeight), ok),
+                                               h.edit, gHistValid != 0 ? h.valid * vColour : 0.0);
 
                 // Optional temporal smoothing of the refresh: where the carried edit is still valid,
                 // move only part of the way to the new one. 1 takes the new answer whole. A pixel the
