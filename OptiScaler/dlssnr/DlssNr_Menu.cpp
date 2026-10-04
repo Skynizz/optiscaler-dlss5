@@ -604,6 +604,16 @@ void RenderMenu(Config* config, float menuResScale)
                            "\n\nLower is steadier; too low and genuine changes (a light switching on) arrive"
                            "\nover a few frames instead of at once. 0 turns it off.");
 
+                bool crossfade = config->DlssNrCacheCrossfade.value_or_default();
+
+                if (ImGui::Checkbox("Smooth model updates", &crossfade))
+                    config->DlssNrCacheCrossfade = crossfade;
+
+                HelpMarker("Between two model runs, what is shown walks steadily toward the model's latest answer"
+                           "\nand arrives exactly when the model runs again. Without it the change lands all at once"
+                           "\non the frame the model runs -- the step that makes distant things blink at longer"
+                           "\nintervals. Nothing is averaged: the model's answer is always reached in full.");
+
                 bool despeckle = config->DlssNrCacheDespeckle.value_or_default();
 
                 if (ImGui::Checkbox("Despeckle", &despeckle))
@@ -1152,6 +1162,19 @@ void RenderMenu(Config* config, float menuResScale)
 
             if (ImGui::SmallButton("Reset##autotrim"))
                 config->DlssNrWhitePointTrim = 1.0f;
+
+            float local = config->DlssNrAutoLocal.value_or_default();
+
+            if (ImGui::SliderFloat("Local adaptation", &local, 0.0f, 1.0f, "%.2f"))
+                config->DlssNrAutoLocal = std::clamp(local, 0.0f, 1.0f);
+
+            HelpMarker("How much each region of the frame gets its own white point, from its own brightness."
+                       "\n\nOne number for a whole frame cannot serve a lit window and the shadow beside it: high"
+                       "\nenough for the window, it shows the model the shadow as black -- and the model answers"
+                       "\nblack with specks that pop -- low enough for the shadow, it flattens the window. With"
+                       "\nthis, every region is shown to the model properly exposed."
+                       "\n\nThe frame itself keeps its contrast: the model's answer comes back as a ratio, divided"
+                       "\nby the same local value it was shown with. 0 is one white point for the whole frame.");
 
             HelpMarker("The white point follows the scene: its average brightness, measured on the frame"
                        "\nbefore Neural Rendering touches it, sets where white is, and eases over about"

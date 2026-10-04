@@ -29,6 +29,11 @@ cbuffer Params : register(b0)
     uint  gApplyModel;     // 0 output the clean frame (pass still runs), 1 apply the model's edit
     uint  gUseGameExposure;// D3D12 source-1 only: 1 = read the game's live exposure in-shader (t4)
     float gExposurePreMul; // preExposure * trim, so the live white point is gExposurePreMul / exposure
+    uint  gUseLocalMap;    // D3D12 automatic source: t4 holds the scene's smoothed log2 tile luminance, 64x64
+    float gLocalStrength;  // 0..1: how much of each region's deviation from the scene average the white point follows
+    float gLocalMeanLog;   // log2 of the scene average that deviation is measured from
+    float gUvOffsetY;      // a band dispatch: frame v = offset + v * scale (scale 0 means a whole frame)
+    float gUvScaleY;
 };
 
 // Bringing an impossible colour back into a possible one.
@@ -260,6 +265,46 @@ float WhitePoint()
     }
 #endif
     return max(gWhitePoint, 1e-4);
+}
+
+// The white point at one place in the frame.
+//
+// One divisor for a whole frame cannot serve a frame that holds both a lit window and the shadow beside
+// it: high enough for the window, it shows the model the shadow as black -- and the model answers black
+// with the specks that pop on and off -- low enough for the shadow, it flattens the window. So with the
+// automatic source the white point also follows each region's own brightness, partially (gLocalStrength)
+// and smoothly (a 64x64 map, smoothed over a few frames), the way a camera's local exposure does.
+//
+// What the model is shown changes; the frame does not. The resolve divides by this same per-pixel value
+// on the way back, so the model's verdict returns as a ratio onto the game's own frame, contrast intact.
+// With the map off this is WhitePoint() exactly.
+float WhitePointAt(float2 uv)
+{
+    float w = WhitePoint();
+#ifndef VK_MODE
+    if (gUseLocalMap != 0)
+    {
+        const float2 uvf = float2(uv.x, gUvScaleY > 0.0 ? gUvOffsetY + uv.y * gUvScaleY : uv.y);
+        const float2 pos = saturate(uvf) * 64.0 - 0.5;
+        const int2 i0 = (int2) floor(pos);
+        const float2 f = pos - floor(pos);
+
+        float l = 0.0;
+
+        [unroll] for (int k = 0; k < 4; ++k)
+        {
+            const int2 o = int2(k & 1, k >> 1);
+            const int2 t = clamp(i0 + o, int2(0, 0), int2(63, 63));
+            const float wb = (o.x ? f.x : 1.0 - f.x) * (o.y ? f.y : 1.0 - f.y);
+            l += gExposure.Load(int3(t, 0)).r * wb;
+        }
+
+        // Four stops either way at most before the strength: a black HUD bar or the sun cannot drag a
+        // region's exposure further than that.
+        w *= exp2(clamp(l - gLocalMeanLog, -4.0, 4.0) * gLocalStrength);
+    }
+#endif
+    return w;
 }
 
 
@@ -549,7 +594,8 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         // nothing and touches no state -- and it rides back on the readback that already exists.
         //
         // The motion slot is free here: the meter has no use for motion vectors.
-        if (id.x == 0 && id.y == 0)
+        // Not when the grid is the automatic source's luminance map: every tile is a tile there.
+        if (id.x == 0 && id.y == 0 && gUseLocalMap == 0)
         {
             gTarget[id.xy] = float4(gMotion.Load(int3(0, 0, 0)).r, 0.0, 0.0, 1.0);
             return;
@@ -677,7 +723,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         // that shows the model highlight gradation the knee throws away. Reached only when the frame
         // is not passthrough (handled and returned above), so NeutwoEncode never sees a tone-mapped
         // frame. Both are undone by the resolve: the knee approximately, Neutwo exactly.
-        float3 normalized = frame / WhitePoint();
+        float3 normalized = frame / WhitePointAt(uv);
         float3 display;
         if (gReversibleMode == 0)
             display = SoftKnee(normalized);        // soft knee
@@ -753,7 +799,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     // the shadow branch never fires, every pixel takes the highlight branch, and the clamp flattens
     // the result to a near-constant scale. Colour still moves, because that comes from the model's
     // own hue, which is what makes the failure so confusing to look at.
-    const float normScale = gPassthrough != 0 ? 1.0 : WhitePoint();
+    const float normScale = gPassthrough != 0 ? 1.0 : WhitePointAt(cmpUv);
     float3 original = originalSample.rgb / normScale;
 
     float originalLuma = dot(original, kLuma);
@@ -1002,7 +1048,7 @@ void CSMain(uint3 id : SV_DispatchThreadID)
 
     // A hairline so the two sides are never mistaken for one picture.
     if (onDivider)
-        result = float3(WhitePoint(), WhitePoint(), WhitePoint());
+        result = WhitePointAt(uv).xxx;
 
     gTarget[id.xy] = float4(max(result, float3(0.0, 0.0, 0.0)), originalSample.a);
 }

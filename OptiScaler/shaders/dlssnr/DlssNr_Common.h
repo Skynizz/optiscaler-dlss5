@@ -180,6 +180,16 @@ struct alignas(256) DlssNrConstants
     // preExposure * trim, so the live white point is ExposurePreMul / exposure. Mirrored in the cbuffer.
     uint32_t UseGameExposure;
     float ExposurePreMul;
+
+    // Automatic source, local adaptation (D3D12): the smoothed log2 luminance map bound at t4, how much
+    // of each region's deviation from the scene average the white point follows, and that average.
+    uint32_t UseLocalMap;
+    float LocalStrength;
+    float LocalMeanLog;
+
+    // A band dispatch (spread refresh): frame v = UvOffsetY + v * UvScaleY. 0 scale means a whole frame.
+    float UvOffsetY;
+    float UvScaleY;
 };
 
 class DlssNr_Common

@@ -232,7 +232,7 @@ def reproject(hist: History, frame: Frame, p: CacheParams):
     edit *= on_screen[..., None]
     colour_tol = max(p.colour_tol, 1e-3)
     v_colour = np.clip((2 * colour_tol - np.abs(frame.log_luma - lum)) / colour_tol, 0, 1)
-    conf = np.clip(conf * v_colour * np.clip(2 * valid - 1, 0, 1) * p.high_decay, 0, 1) * on_screen
+    conf = np.clip(conf * (0.6 + 0.4 * v_colour) * np.clip(2 * valid - 1, 0, 1) * p.high_decay, 0, 1) * on_screen
     return edit, conf, valid
 
 

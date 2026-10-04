@@ -2138,6 +2138,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         ConsumeMeterReadback();
     }
 
+    // The automatic source's local luminance map for this frame, when local adaptation is on.
+    ID3D12Resource* localMap = nullptr;
+
     // The automatic white point measures the frame as the upscaler wrote it, every frame, on the full
     // 64 x 64 grid. Exclusive with the exposure courier above: they share the meter and its readback.
     if (g_nr.meter != nullptr && cfg.DlssNrWhitePointSource.value_or_default() == 3 && !wantExposure)
@@ -2146,6 +2149,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         meterParams.Mode = DlssNrMode_Meter;
         meterParams.Width = kDlssNrMeterGrid;
         meterParams.Height = kDlssNrMeterGrid;
+        meterParams.UseLocalMap = 1; // every tile a tile mean, including (0,0)
 
         Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                 D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -2157,6 +2161,16 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
         // A cut or a reset starts from the new scene rather than easing in from the old one.
         ConsumeAutoWhite(frame.Reset);
+
+        // Local adaptation: the same grid, smoothed into a log2 map the encode and the resolve read.
+        if (cfg.DlssNrAutoLocal.value_or_default() > 0.0f && g_nr.autoWhiteValid)
+        {
+            if (g_cache == nullptr)
+                g_cache = std::make_unique<DlssNrEditCache_Dx12>(device);
+
+            if (g_cache != nullptr && g_cache->IsInit())
+                localMap = g_cache->SmoothLocalMap(cmdList, device, g_nr.meter, frame.Reset);
+        }
     }
     else
     {
@@ -2183,6 +2197,19 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         const float trim = std::clamp(cfg.DlssNrWhitePointTrim.value_or_default(), 0.25f, 4.0f);
         exposurePreMul = g_nr.gamePreExposure * trim;
     }
+
+    // Local adaptation's constants, the same for the encode and the resolve so the two agree per pixel.
+    // The reference is the scene average the automatic white point was derived from.
+    auto applyLocal = [&](DlssNrConstants& c)
+    {
+        if (localMap == nullptr || exposureTex != nullptr || !isHdrBuffer)
+            return;
+
+        const float encoded = powf(kTargetEncodedMean, 2.2f);
+        c.UseLocalMap = 1;
+        c.LocalStrength = std::clamp(cfg.DlssNrAutoLocal.value_or_default(), 0.0f, 1.0f);
+        c.LocalMeanLog = g_nr.autoWhiteLog + std::log2(encoded / (1.0f - encoded));
+    };
 
     // Frame hold. Freeze the encode's input so a live setting change re-renders the same frame. This
     // is self-contained on purpose: it copies the output aside on hold-on and copies it BACK over the
@@ -2357,6 +2384,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     encodeParams.WhitePoint = whitePoint;
     encodeParams.UseGameExposure = useGameExposure;
     encodeParams.ExposurePreMul = exposurePreMul;
+    applyLocal(encodeParams);
     encodeParams.ReversibleMode = cfg.DlssNrReversibleMode.value_or_default();
     // Match only takes effect once a fit exists; until then the table is empty and the shader would
     // read a curve of zeros, so it falls back to the plain proxy.
@@ -2365,7 +2393,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    DispatchPass(cmdList, encodeParams, target, nullptr, nullptr, nullptr, exposureTex,
+    DispatchPass(cmdList, encodeParams, target, nullptr, nullptr, nullptr, exposureTex != nullptr ? exposureTex : localMap,
                         g_nr.colorCopy, g_nr.hdrCopy);
 
     Barrier(cmdList, target, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
@@ -2642,11 +2670,14 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                     bandParams.ApplyModel = cfg.DlssNrApplyModel.value_or_default() ? 1u : 0u;
                     bandParams.CompareMode = 0;
                     bandParams.CompareZoom = 1.0f;
+                    applyLocal(bandParams);
+                    bandParams.UvOffsetY = (float) fy0 / (float) std::max(height, 1u);
+                    bandParams.UvScaleY = (float) fH / (float) std::max(height, 1u);
 
                     Barrier(cmdList, g_nr.bandOut, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-                    DispatchPass(cmdList, bandParams, g_nr.bandIn, g_nr.bandOut, g_nr.bandOrig, bandMotion, exposureTex,
-                                 g_nr.bandResolved, nullptr);
+                    DispatchPass(cmdList, bandParams, g_nr.bandIn, g_nr.bandOut, g_nr.bandOrig, bandMotion,
+                                 exposureTex != nullptr ? exposureTex : localMap, g_nr.bandResolved, nullptr);
                     Barrier(cmdList, g_nr.bandResolved, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
 
@@ -2861,6 +2892,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         resolveParams.WhitePoint = whitePoint;
         resolveParams.UseGameExposure = useGameExposure;
         resolveParams.ExposurePreMul = exposurePreMul;
+        applyLocal(resolveParams);
         resolveParams.Width = width;
         resolveParams.Height = height;
         resolveParams.TransferStrength = cfg.DlssNrTransferStrength.value_or_default();
@@ -2981,7 +3013,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         }
 
         DispatchPass(cmdList, resolveParams, resolveProxy, resolveAnswer, g_nr.hdrCopy, motionIn,
-                            exposureTex, target, nullptr);
+                            exposureTex != nullptr ? exposureTex : localMap, target, nullptr);
         Barrier(cmdList, g_nr.output, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 

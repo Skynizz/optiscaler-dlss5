@@ -494,6 +494,11 @@ class Config
     // Higher means highlights sit lower on the curve and the model treats them as less extreme.
     CustomOptional<float> DlssNrWhitePointScale { 1.0f };
 
+    // Automatic white point (source 3), local adaptation: how much of each region's own brightness the
+    // white point follows (0 = one value for the whole frame, 1 = fully local). What the model is shown
+    // is evened out; the frame keeps its own contrast, since the edit comes back as a ratio.
+    CustomOptional<float> DlssNrAutoLocal { 0.5f };
+
     // The temporal edit cache (shaders/dlssnr/DlssNr_EditCache_Dx12). Off by default, and off is the
     // pass exactly as it was: the model runs every frame and none of the cache's code is reached.
     //
@@ -526,6 +531,9 @@ class Config
     // Bound each fresh model edit by its eight neighbours': removes the isolated dark specks the model
     // invents in shadows, keeps edges (their own side agrees with them).
     CustomOptional<bool> DlssNrCacheDespeckle { true };
+    // Keyframe crossfade: between model runs, walk the shown edit toward the model's latest answer so it
+    // arrives exactly at the next run -- no step when the model runs, nothing averaged away.
+    CustomOptional<bool> DlssNrCacheCrossfade { true };
     // What the model is told on a refresh: 0 the game's vectors, 1 motion accumulated since it last
     // ran, 2 reset its history every refresh.
     CustomOptional<uint32_t> DlssNrCacheModelHistory { 1 };

@@ -57,17 +57,20 @@ experiment.
 
 ### Editing the shader
 
-`dlssnr.hlsl` is **precompiled**; editing it alone changes nothing. Rebuild the header:
+`dlssnr.hlsl` is **precompiled**; editing it alone changes nothing. Rebuild both headers:
 
 ```
 cd OptiScaler/shaders/dlssnr/precompile
-../../shader_tools/fxc.exe -T cs_5_0 -E CSMain -O3 dlssnr.hlsl -Fo DlssNr_Shader.cso
+../../shader_tools/dxc.exe -T cs_6_0 -E CSMain -O3 dlssnr.hlsl -Fo DlssNr_Shader.cso
 python ../../shader_tools/create_header.py DlssNr_Shader.cso DlssNr_Shader.h DlssNr_cso
+../../shader_tools/dxc.exe -spirv -T cs_6_0 -E CSMain -O3 -Qstrip_debug -D VK_MODE -Cc -Vi dlssnr.hlsl -Fo DlssNr_Shader_Vk.spv
+python ../../shader_tools/create_header.py DlssNr_Shader_Vk.spv DlssNr_Shader_Vk.h dlssnr_spv
 ```
 
-**fxc `cs_5_0`, not the dxc in `build_precompiled_shader.bat` next to it.** Only fxc reproduces the
-committed header byte for byte; dxc emits DXIL and would silently change what the pass runs on.
-Verified by recompiling the unmodified shader both ways and diffing.
+**dxc `cs_6_0` (DXIL), not fxc.** The committed `DlssNr_Shader.h` is DXIL: recompiling the source with
+dxc `-O3` reproduces its size to within a few bytes (the version string), while fxc `cs_5_0` produces a
+different, larger DXBC program. An earlier version of this note said fxc; it was wrong. The edit cache's
+own shader (`dlssnr_cache.hlsl`) is compiled with fxc `cs_5_0`, see `design/edit-cache.md`.
 
 ## Attribution
 

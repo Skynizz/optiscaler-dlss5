@@ -298,7 +298,15 @@ void DlssNrEditCache_Dx12::TickRetired()
 
 void DlssNrEditCache_Dx12::ReleaseAll(bool immediately)
 {
-    ID3D12Resource** all[] = { &_histEdit[0], &_histEdit[1], &_histGuide[0], &_histGuide[1], &_level[0],
+    // The local map is frame-size independent; it goes with the rest only at shutdown.
+    if (immediately)
+    {
+        SAFE_RELEASE(_localMap[0]);
+        SAFE_RELEASE(_localMap[1]);
+    }
+
+    ID3D12Resource** all[] = { &_histTarget[0], &_histTarget[1],
+                               &_histEdit[0], &_histEdit[1], &_histGuide[0], &_histGuide[1], &_level[0],
                                &_level[1],    &_level[2],    &_levelGuide,   &_bandDepth,    &_bandMotion,
                                &_stats,       &_stencilClone, &_modelUp };
 
@@ -374,6 +382,7 @@ bool DlssNrEditCache_Dx12::EnsureResources(ID3D12Device* device, unsigned int wi
         _histEdit[i] = CreateTexture(device, DXGI_FORMAT_R16G16B16A16_FLOAT, width, height, true, kUav);
         // 32-bit depth: the tolerance is relative and a few percent, which half floats only just carry.
         _histGuide[i] = CreateTexture(device, DXGI_FORMAT_R32G32_FLOAT, width, height, true, kUav);
+        _histTarget[i] = CreateTexture(device, DXGI_FORMAT_R16G16B16A16_FLOAT, width, height, true, kUav);
     }
 
     for (unsigned int l = 0; l < kDlssNrCachePyramidLevels; ++l)
@@ -389,7 +398,7 @@ bool DlssNrEditCache_Dx12::EnsureResources(ID3D12Device* device, unsigned int wi
     bool ok = _stats != nullptr && _levelGuide != nullptr;
 
     for (unsigned int i = 0; i < 2; ++i)
-        ok = ok && _histEdit[i] != nullptr && _histGuide[i] != nullptr;
+        ok = ok && _histEdit[i] != nullptr && _histGuide[i] != nullptr && _histTarget[i] != nullptr;
 
     for (auto* l : _level)
         ok = ok && l != nullptr;
@@ -529,14 +538,24 @@ bool DlssNrEditCache_Dx12::BeginFrame(const Config& cfg, ID3D12Device* device, u
         why = "measurement dump";
     else if (_spread)
         why = nullptr; // every frame refreshes one band instead
-    else if (_frame - _lastRefresh >= EffectiveInterval(interval, adaptive, threshold))
+    else if (_frame - _lastRefresh >= (_intervalNow = EffectiveInterval(interval, adaptive, threshold)))
         why = _regime == 0 ? "interval (still: slower)" : _regime == 2 ? "interval (fast motion: faster)" : "interval";
+
+    // Keyframe crossfade step for this frame: the share of the remaining way to the model's latest answer,
+    // so the shown edit reaches it exactly when the model runs next. Not with spread refresh, where
+    // every frame already brings a band of fresh answer.
+    _crossfadeOn = cfg.DlssNrCacheCrossfade.value_or_default() && !_spread;
+    const unsigned int intervalNow = std::max(1u, _intervalNow);
+    const unsigned int since = (unsigned int) (_frame - _lastRefresh);
 
     if (why == nullptr)
     {
+        _crossfade = since >= intervalNow ? 1.0f : 1.0f / (float) (intervalNow - since);
         ++_cachedFrames;
         return false;
     }
+
+    _crossfade = 1.0f / (float) intervalNow;
 
     _refreshReason = why;
     _lastRefresh = _frame;
@@ -667,6 +686,8 @@ DlssNrCacheConstants DlssNrEditCache_Dx12::BaseConstants(const DlssNrCacheInputs
     c.MaxLumaEdit = std::log2(std::max(in.maxRatio, 1.0f)) + 0.5f;
     c.Stabilize = _stabilize;
     c.Despeckle = _despeckle ? 1u : 0u;
+    c.CrossfadeOn = _crossfadeOn ? 1u : 0u;
+    c.Crossfade = _crossfade;
     return c;
 }
 
@@ -1010,6 +1031,7 @@ bool DlssNrEditCache_Dx12::RunCached(ID3D12GraphicsCommandList* cmd, ID3D12Devic
     Barrier(cmd, target, kUav, kSrv);
     Barrier(cmd, _histEdit[prev], kUav, kSrv);
     Barrier(cmd, _histGuide[prev], kUav, kSrv);
+    Barrier(cmd, _histTarget[prev], kUav, kSrv);
 
     c.Mode = DlssNrCacheMode_Reproject;
 
@@ -1027,13 +1049,15 @@ bool DlssNrEditCache_Dx12::RunCached(ID3D12GraphicsCommandList* cmd, ID3D12Devic
     {
         ID3D12Resource* srv[kSrvCount] = { _histEdit[prev], _histGuide[prev], target, in.depth, in.motion,
                                            bandActive ? band->resolved : nullptr, nullptr, nullptr, nullptr,
-                                           _stencilBound ? _stencilClone : nullptr };
-        ID3D12Resource* uav[kUavCount] = { _histEdit[next], _histGuide[next], keep, _level[0], _levelGuide, _stats };
+                                           _stencilBound ? _stencilClone : nullptr, nullptr, _histTarget[prev] };
+        ID3D12Resource* uav[kUavCount] = { _histEdit[next], _histGuide[next], keep, _level[0], _levelGuide, _stats,
+                                           _histTarget[next] };
         Pass(cmd, c, srv, uav, Groups(_width), Groups(_height));
     }
 
     Barrier(cmd, _histEdit[prev], kSrv, kUav);
     Barrier(cmd, _histGuide[prev], kSrv, kUav);
+    Barrier(cmd, _histTarget[prev], kSrv, kUav);
     Barrier(cmd, target, kSrv, kUav);
 
     // The counters go home on a readback looked at three frames from now.
@@ -1124,19 +1148,22 @@ bool DlssNrEditCache_Dx12::CaptureRefresh(ID3D12GraphicsCommandList* cmd, ID3D12
     Barrier(cmd, target, kUav, kSrv);
     Barrier(cmd, _histEdit[prev], kUav, kSrv);
     Barrier(cmd, _histGuide[prev], kUav, kSrv);
+    Barrier(cmd, _histTarget[prev], kUav, kSrv);
 
     DlssNrCacheConstants c = BaseConstants(in);
     c.Mode = DlssNrCacheMode_Capture;
     {
         ID3D12Resource* srv[kSrvCount] = { _histEdit[prev], _histGuide[prev], original, in.depth, in.motion,
                                            target, nullptr, nullptr, nullptr,
-                                           _stencilBound ? _stencilClone : nullptr };
-        ID3D12Resource* uav[kUavCount] = { _histEdit[next], _histGuide[next], nullptr, _level[0], _levelGuide };
+                                           _stencilBound ? _stencilClone : nullptr, nullptr, _histTarget[prev] };
+        ID3D12Resource* uav[kUavCount] = { _histEdit[next], _histGuide[next], nullptr, _level[0], _levelGuide, nullptr,
+                                           _histTarget[next] };
         Pass(cmd, c, srv, uav, Groups(_width), Groups(_height));
     }
 
     Barrier(cmd, _histEdit[prev], kSrv, kUav);
     Barrier(cmd, _histGuide[prev], kSrv, kUav);
+    Barrier(cmd, _histTarget[prev], kSrv, kUav);
 
     const bool wasValid = _historyValid;
     _cur = next;
@@ -1151,7 +1178,7 @@ bool DlssNrEditCache_Dx12::CaptureRefresh(ID3D12GraphicsCommandList* cmd, ID3D12
     // pops, unfiltered, while the frames between were steady.
     const bool rewrite = (_refreshBlend < 0.999f && wasValid) || std::abs(_lowGain - 1.0f) > 1e-3f ||
                          std::abs(_highGain - 1.0f) > 1e-3f || _debugView != 0 || (_stabilize > 0.0f && wasValid) ||
-                         _despeckle;
+                         _despeckle || (_crossfadeOn && wasValid && _crossfade < 0.999f);
 
     Barrier(cmd, target, kSrv, kUav);
 
@@ -1222,6 +1249,54 @@ ID3D12Resource* DlssNrEditCache_Dx12::UpsampleModel(ID3D12GraphicsCommandList* c
 
     Barrier(cmd, _modelUp, kUav, kSrv);
     return _modelUp;
+}
+
+ID3D12Resource* DlssNrEditCache_Dx12::SmoothLocalMap(ID3D12GraphicsCommandList* cmd, ID3D12Device* device,
+                                                     ID3D12Resource* meter, bool reset)
+{
+    if (!_init || meter == nullptr)
+        return nullptr;
+
+    if (_localMap[0] == nullptr)
+    {
+        // Both start as readable: the one about to be written is moved to UAV below, the other is read.
+        for (auto& m : _localMap)
+            m = CreateTexture(device, DXGI_FORMAT_R32_FLOAT, 64, 64, true, kSrv);
+
+        if (_localMap[0] == nullptr || _localMap[1] == nullptr)
+        {
+            Park(_localMap[0]);
+            Park(_localMap[1]);
+            return nullptr;
+        }
+
+        _localValid = false;
+    }
+
+    ID3D12Resource* prev = _localMap[_localCur];
+    ID3D12Resource* next = _localMap[1 - _localCur];
+
+    DlssNrCacheConstants c {};
+    c.Mode = DlssNrCacheMode_LocalMap;
+    c.Width = 64;
+    c.Height = 64;
+    // About three frames to follow a change: steady under small motion, quick enough for a cut to read
+    // as a cut (a reset takes the new reading whole).
+    c.MapBlend = (reset || !_localValid) ? 1.0f : 0.3f;
+
+    Barrier(cmd, meter, kUav, kSrv);
+    Barrier(cmd, next, kSrv, kUav);
+
+    ID3D12Resource* srv[kSrvCount] = { nullptr, nullptr, nullptr, nullptr, nullptr, meter, prev };
+    ID3D12Resource* uav[kUavCount] = { next };
+    Pass(cmd, c, srv, uav, Groups(64), Groups(64));
+
+    Barrier(cmd, next, kUav, kSrv);
+    Barrier(cmd, meter, kSrv, kUav);
+
+    _localCur = 1 - _localCur;
+    _localValid = true;
+    return next;
 }
 
 void DlssNrEditCache_Dx12::FinishUpsample(ID3D12GraphicsCommandList* cmd)

@@ -50,6 +50,9 @@ cbuffer Params : register(b0)
     float gMaxLumaEdit;     // the most, in stops, the composition can move a pixel's luminance
     float gStabilize;       // anti-flicker: the most a refresh may move a still-valid pixel's edit, in stops (0 off)
     uint  gDespeckle;       // bound each fresh edit by its eight neighbours' (isolated dark specks)
+    float gMapBlend;        // local luminance map: share of this frame's reading taken (1 on a reset)
+    uint  gCrossfadeOn;     // keyframe crossfade: the shown edit walks toward the model's latest answer
+    float gCrossfade;       // this frame's step: 1 / (frames left until the model runs again)
 };
 
 Texture2D<float4>   gHistEdit  : register(t0); // rgb: log2 edit, a: high-band confidence
@@ -63,6 +66,7 @@ Texture2D<float4>   gAux2      : register(t7); // L2
 Texture2D<float4>   gAux3      : register(t8); // L3
 Texture2D<uint2>    gStencil   : register(t9); // the depth buffer's stencil plane, when there is one
 Texture2D<float4>   gExposure  : register(t10); // the game's 1x1 exposure, when it supplies one
+Texture2D<float4>   gHistTarget : register(t11); // keyframe crossfade: the model's latest answer, carried
 
 RWTexture2D<float4> gOut0  : register(u0);
 RWTexture2D<float4> gOut1  : register(u1);
@@ -70,6 +74,7 @@ RWTexture2D<float4> gOut2  : register(u2);
 RWTexture2D<float4> gOut3  : register(u3);
 RWTexture2D<float4> gOut4  : register(u4);
 RWTexture2D<uint>   gStats : register(u5);
+RWTexture2D<float4> gOut6  : register(u6); // keyframe crossfade: the carried target, written
 
 SamplerState gLinear : register(s0);
 
@@ -262,12 +267,14 @@ struct History
 {
     float3 edit;
     float confidence;
+    float3 target;     // keyframe crossfade: the model's latest answer, reprojected like the shown edit
+    float targetConfidence;
     float logLuma;
     float valid; // the fraction of the bilinear weight that passed, 0..1
 };
 
-// The history's edit at uv q, Catmull-Rom filtered in five bilinear taps (the usual TAA arrangement).
-float3 CatmullRomEdit(float2 q)
+// A history texture at uv q, Catmull-Rom filtered in five bilinear taps (the usual TAA arrangement).
+float3 CatmullRom(Texture2D<float4> tex, float2 q)
 {
     const float2 size = float2(gWidth, gHeight);
     const float2 samplePos = q * size;
@@ -287,11 +294,11 @@ float3 CatmullRomEdit(float2 q)
     const float2 tc12 = (texPos1 + offset12) / size;
 
     float3 r = 0.0;
-    r += gHistEdit.SampleLevel(gLinear, float2(tc12.x, tc0.y), 0).rgb * (w12.x * w0.y);
-    r += gHistEdit.SampleLevel(gLinear, float2(tc0.x, tc12.y), 0).rgb * (w0.x * w12.y);
-    r += gHistEdit.SampleLevel(gLinear, float2(tc12.x, tc12.y), 0).rgb * (w12.x * w12.y);
-    r += gHistEdit.SampleLevel(gLinear, float2(tc3.x, tc12.y), 0).rgb * (w3.x * w12.y);
-    r += gHistEdit.SampleLevel(gLinear, float2(tc12.x, tc3.y), 0).rgb * (w12.x * w3.y);
+    r += tex.SampleLevel(gLinear, float2(tc12.x, tc0.y), 0).rgb * (w12.x * w0.y);
+    r += tex.SampleLevel(gLinear, float2(tc0.x, tc12.y), 0).rgb * (w0.x * w12.y);
+    r += tex.SampleLevel(gLinear, float2(tc12.x, tc12.y), 0).rgb * (w12.x * w12.y);
+    r += tex.SampleLevel(gLinear, float2(tc3.x, tc12.y), 0).rgb * (w3.x * w12.y);
+    r += tex.SampleLevel(gLinear, float2(tc12.x, tc3.y), 0).rgb * (w12.x * w3.y);
 
     const float wsum = w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y;
     return r / max(wsum, 1e-6);
@@ -302,6 +309,8 @@ History ReadHistory(float2 q, float linC, float tol)
     History h;
     h.edit = 0.0;
     h.confidence = 0.0;
+    h.target = 0.0;
+    h.targetConfidence = 0.0;
     h.logLuma = 0.0;
     h.valid = 0.0;
 
@@ -312,6 +321,7 @@ History ReadHistory(float2 q, float linC, float tol)
     float wsum = 0.0;
     float allValid = 1.0;
     float3 lo = 1e9, hi = -1e9;
+    float3 tlo = 1e9, thi = -1e9;
 
     [unroll] for (int k = 0; k < 4; ++k)
     {
@@ -335,6 +345,15 @@ History ReadHistory(float2 q, float linC, float tol)
         wsum += w;
         lo = min(lo, e.rgb);
         hi = max(hi, e.rgb);
+
+        if (gCrossfadeOn != 0)
+        {
+            const float4 g4 = gHistTarget.Load(int3(t, 0));
+            h.target += g4.rgb * w;
+            h.targetConfidence += g4.a * w;
+            tlo = min(tlo, g4.rgb);
+            thi = max(thi, g4.rgb);
+        }
     }
 
     if (wsum > 1e-4)
@@ -342,6 +361,8 @@ History ReadHistory(float2 q, float linC, float tol)
         h.edit /= wsum;
         h.confidence /= wsum;
         h.logLuma /= wsum;
+        h.target /= wsum;
+        h.targetConfidence /= wsum;
     }
 
     // Where all four taps are the same surface, the edit is read with Catmull-Rom instead of bilinear.
@@ -349,8 +370,16 @@ History ReadHistory(float2 q, float linC, float tol)
     // little more each frame and came back sharp when the model ran -- distant, fine things visibly
     // breathed at the refresh rate. Catmull-Rom keeps the detail; clamping it to the four taps' range
     // keeps its overshoot from inventing any.
-    if (allValid > 0.999)
-        h.edit = clamp(CatmullRomEdit(q), lo, hi);
+    //
+    // Blended in by how surely all four are that surface, not switched at a threshold: on a thin, distant
+    // thing that surety flickers from frame to frame, and a hard switch made its sharpness flicker with it.
+    if (allValid > 0.0)
+    {
+        h.edit = lerp(h.edit, clamp(CatmullRom(gHistEdit, q), lo, hi), allValid);
+
+        if (gCrossfadeOn != 0)
+            h.target = lerp(h.target, clamp(CatmullRom(gHistTarget, q), tlo, thi), allValid);
+    }
 
     h.valid = saturate(wsum);
     return h;
@@ -533,7 +562,19 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
             {
                 gOut2[id.xy] = colour; // the untouched frame, kept for the apply
 
-                edit = h.edit;
+                // Keyframe crossfade: the shown edit takes this frame's share of the way to the model's
+                // latest answer, so that it arrives exactly when the model runs again -- the change spread
+                // evenly over the frames between runs instead of landing on one of them as a step.
+                float3 shownEdit = h.edit;
+                float shownConfidence = h.confidence;
+
+                if (gCrossfadeOn != 0)
+                {
+                    shownEdit = lerp(h.edit, h.target, saturate(gCrossfade));
+                    shownConfidence = lerp(h.confidence, h.targetConfidence, saturate(gCrossfade));
+                }
+
+                edit = shownEdit;
                 w = h.valid;
 
                 // Confidence decays with age and with every doubt -- depth or colour -- and only
@@ -542,7 +583,11 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
                 // little from frame to frame and passed or failed the colour test at random, so their
                 // detail switched on and off; now a single failure dims it and only a run of them --
                 // a surface that really changed, like grass in the wind -- takes it away.
-                float confidence = h.confidence * lerp(0.6, 1.0, vColour) * saturate(2.0 * h.valid - 1.0) * gHighDecay;
+                const float doubt = lerp(0.6, 1.0, vColour) * saturate(2.0 * h.valid - 1.0) * gHighDecay;
+                float confidence = shownConfidence * doubt;
+
+                if (gCrossfadeOn != 0)
+                    gOut6[id.xy] = float4(h.target, saturate(h.targetConfidence * doubt));
 
                 // Spread refresh: one band of this frame was just run through the model. Inside it the
                 // model's own answer replaces the carried one, fading in over its context margin so
@@ -599,7 +644,22 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
 
                 edit = lerp(fresh, h.edit, saturate(keep));
                 w = 1.0;
-                gOut0[id.xy] = float4(edit, 1.0);
+
+                if (gCrossfadeOn != 0)
+                {
+                    // The model's answer becomes the target, whole. What is shown takes the first step of
+                    // the walk toward it, from what was shown before -- where that is still the same
+                    // surface; elsewhere there is nothing to walk from, and the answer is shown at once.
+                    const bool carry = gHistValid != 0 && h.valid > 0.5 && ok > 0.5;
+                    const float a = carry ? saturate(gCrossfade) : 1.0;
+                    gOut6[id.xy] = float4(edit, 1.0);
+                    edit = lerp(h.edit, edit, a);
+                    gOut0[id.xy] = float4(edit, carry ? lerp(h.confidence, 1.0, a) : 1.0);
+                }
+                else
+                {
+                    gOut0[id.xy] = float4(edit, 1.0);
+                }
             }
 
             gOut1[id.xy] = float4(linC, logLuma, 0.0, 0.0);
@@ -830,6 +890,17 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
         const float2 ms = float2(gMotionW, gMotionH) / float2(max(gDepthW, 1u), max(gDepthH, 1u));
         const int2 mt = min(int2((float2(src.xy) + 0.5) * ms), int2(gMotionW, gMotionH) - 1);
         gOut1[id.xy] = float4(gMotion.Load(int3(mt, 0)).xy / ms, 0.0, 0.0);
+        return;
+    }
+
+    if (gMode == 9)
+    {
+        // The automatic white point's local map: this frame's 64x64 tile means (gAux0), in log2,
+        // eased toward from last frame's map (gAux1) so that what moves under a tile does not make the
+        // model's exposure shimmer.
+        const float raw = log2(max(gAux0.Load(int3(id.xy, 0)).r, 1e-12));
+        const float prev = gAux1.Load(int3(id.xy, 0)).r;
+        gOut0[id.xy] = float4(lerp(prev, raw, saturate(gMapBlend)), 0.0, 0.0, 0.0);
         return;
     }
 

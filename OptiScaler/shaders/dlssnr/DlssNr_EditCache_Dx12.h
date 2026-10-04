@@ -155,6 +155,11 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
                                   ID3D12Resource* smallModel, bool passthrough, float sigma);
     void FinishUpsample(ID3D12GraphicsCommandList* cmd);
 
+    // The automatic white point's local map: this frame's tile means (meter, R32F 64x64, UNORDERED_ACCESS)
+    // smoothed into a log2 map, returned in NON_PIXEL_SHADER_RESOURCE where it stays until the next call.
+    ID3D12Resource* SmoothLocalMap(ID3D12GraphicsCommandList* cmd, ID3D12Device* device, ID3D12Resource* meter,
+                                   bool reset);
+
     // Writes a run of consecutive frames for the offline measurement script. The model runs on every
     // one of them, so each frame has its own ground truth.
     void RequestDump(unsigned int frames);
@@ -173,12 +178,17 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
     ID3D12Resource* _constantBuffers[DLSSNR_CACHE_NUM_OF_HEAPS] = {};
     uint32_t _heapIndex = 0;
 
-    static constexpr uint32_t kSrvCount = 11;
-    static constexpr uint32_t kUavCount = 6;
+    static constexpr uint32_t kSrvCount = 12;
+    static constexpr uint32_t kUavCount = 7;
 
     // The frame-sized history, two of each so one is read while the other is written.
     ID3D12Resource* _histEdit[2] = {};
     ID3D12Resource* _histGuide[2] = {};
+
+    // Keyframe crossfade: the model's latest answer, carried alongside what is shown.
+    ID3D12Resource* _histTarget[2] = {};
+    bool _crossfadeOn = false;
+    float _crossfade = 1.0f;
     unsigned int _cur = 0;
 
     ID3D12Resource* _level[kDlssNrCachePyramidLevels] = {};
@@ -203,6 +213,10 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
     bool _stencilBound = false;
 
     ID3D12Resource* _modelUp = nullptr;
+
+    ID3D12Resource* _localMap[2] = {};
+    unsigned int _localCur = 0;
+    bool _localValid = false;
 
     ID3D12Resource* _bandDepth = nullptr;
     ID3D12Resource* _bandMotion = nullptr;
@@ -284,6 +298,7 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
     unsigned int EffectiveInterval(unsigned int interval, bool adaptive, float threshold);
 
     float _motion = 0.0f;
+    unsigned int _intervalNow = 1;
     int _regime = 1;
     int _regimeCandidate = 1;
     unsigned int _regimeFrames = 0;

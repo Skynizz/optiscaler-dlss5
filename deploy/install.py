@@ -33,7 +33,9 @@ SETTINGS = {
     "Upscalers": {"Dx12Upscaler": "dlss"},
     "Log": {"LogToFile": "true", "LogLevel": "2"},
     "DlssNr": {"Enabled": "true", "CacheEnabled": "true", "CacheInterval": "2", "CacheSpread": "false",
-               "CacheRefreshBlend": "1.0"},
+               "CacheRefreshBlend": "1.0",
+               # No paper white to tune: measured from each scene, adapted per region.
+               "WhitePointSource": "3"},
 }
 
 

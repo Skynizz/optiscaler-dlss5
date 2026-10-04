@@ -358,6 +358,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrWhitePointTrim.set_from_config(readFloat("DlssNr", "WhitePointTrim"));
             DlssNrAutoCapture.set_from_config(readBool("DlssNr", "AutoCapture"));
             DlssNrWhitePointScale.set_from_config(readFloat("DlssNr", "WhitePointScale"));
+            DlssNrAutoLocal.set_from_config(readFloat("DlssNr", "AutoLocal"));
             DlssNrPreset.set_from_config(readUInt("DlssNr", "Preset"));
             DlssNrIntensity.set_from_config(readFloat("DlssNr", "Intensity"));
             DlssNrStyle.set_from_config(readUInt("DlssNr", "Style"));
@@ -382,6 +383,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrCacheBilateral.set_from_config(readBool("DlssNr", "CacheBilateral"));
             DlssNrCacheStabilize.set_from_config(readFloat("DlssNr", "CacheStabilize"));
             DlssNrCacheDespeckle.set_from_config(readBool("DlssNr", "CacheDespeckle"));
+            DlssNrCacheCrossfade.set_from_config(readBool("DlssNr", "CacheCrossfade"));
             DlssNrCacheModelHistory.set_from_config(readUInt("DlssNr", "CacheModelHistory"));
             DlssNrCacheStencil.set_from_config(readBool("DlssNr", "CacheStencil"));
             DlssNrCacheStencilMask.set_from_config(readUInt("DlssNr", "CacheStencilMask"));
@@ -1269,6 +1271,7 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "ScanExposure", GetBoolValue(Instance()->DlssNrScanExposure.value_for_config()).c_str());
     ini.SetValue("DlssNr", "WhitePointScale",
                  GetFloatValue(Instance()->DlssNrWhitePointScale.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "AutoLocal", GetFloatValue(Instance()->DlssNrAutoLocal.value_for_config()).c_str());
     ini.SetValue("DlssNr", "Preset", GetIntValue(Instance()->DlssNrPreset.value_for_config()).c_str());
     ini.SetValue("DlssNr", "Intensity", GetFloatValue(Instance()->DlssNrIntensity.value_for_config()).c_str());
     ini.SetValue("DlssNr", "Style", GetIntValue(Instance()->DlssNrStyle.value_for_config()).c_str());
@@ -1299,6 +1302,7 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "CacheBilateral", GetBoolValue(Instance()->DlssNrCacheBilateral.value_for_config()).c_str());
     ini.SetValue("DlssNr", "CacheStabilize", GetFloatValue(Instance()->DlssNrCacheStabilize.value_for_config()).c_str());
     ini.SetValue("DlssNr", "CacheDespeckle", GetBoolValue(Instance()->DlssNrCacheDespeckle.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheCrossfade", GetBoolValue(Instance()->DlssNrCacheCrossfade.value_for_config()).c_str());
     ini.SetValue("DlssNr", "CacheModelHistory",
                  GetIntValue(Instance()->DlssNrCacheModelHistory.value_for_config()).c_str());
     ini.SetValue("DlssNr", "CacheStencil", GetBoolValue(Instance()->DlssNrCacheStencil.value_for_config()).c_str());
