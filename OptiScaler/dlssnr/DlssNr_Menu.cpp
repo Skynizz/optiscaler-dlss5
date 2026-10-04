@@ -568,6 +568,24 @@ void RenderMenu(Config* config, float menuResScale)
                            "\nlands where the scene went. The game's vectors tell it one frame's worth."
                            "\nReset discards its history every run, which is stable but noisier.");
 
+                float stabilize = config->DlssNrCacheStabilize.value_or_default();
+
+                if (ImGui::SliderFloat("Anti-flicker", &stabilize, 0.0f, 2.0f, stabilize <= 0.0f ? "off" : "%.2f stops"))
+                    config->DlssNrCacheStabilize = std::clamp(stabilize, 0.0f, 4.0f);
+
+                HelpMarker("Each time the model runs, a pixel that is still the same surface may change"
+                           "
+brightness by at most this much. The model re-decides small things every run --"
+                           "
+that is its detail, and it passes. Now and then it re-decides a dark patch by a"
+                           "
+stop or more and back again: that is the black popping, and this holds it."
+                           "
+
+Lower is steadier; too low and genuine changes (a light switching on) arrive"
+                           "
+over a few frames instead of at once. 0 turns it off.");
+
                 bool bilateral = config->DlssNrCacheBilateral.value_or_default();
 
                 if (ImGui::Checkbox("Borrow from the same surface", &bilateral))
@@ -860,11 +878,11 @@ void RenderMenu(Config* config, float menuResScale)
             const bool haveAnchor = !DlssNr::ExposureScan::Anchors().empty();
 
             static const char* sourceNames[] = { "Paper white only", "The game's own exposure",
-                                                 "A buffer the scan found" };
+                                                 "A buffer the scan found", "Automatic (measured from the frame)" };
 
             int source = (int) config->DlssNrWhitePointSource.value_or_default();
 
-            if (source < 0 || source > 2)
+            if (source < 0 || source > 3)
                 source = 0;
 
             if (ImGui::Combo("White point from", &source, sourceNames, IM_ARRAYSIZE(sourceNames)))
@@ -891,7 +909,18 @@ void RenderMenu(Config* config, float menuResScale)
                            "\nafterwards.");
 
             // Availability, in colour, for the option currently chosen.
-            if (source == 1)
+            if (source == 3)
+            {
+                const float wp = DlssNr::AutoWhitePoint();
+
+                if (wp > 0.0f)
+                    ImGui::TextColored(ImVec4(0.45f, 0.8f, 0.45f, 1.0f),
+                                       "Scene average  ->  white point %.2f (adapting toward %.2f)", wp,
+                                       DlssNr::AutoWhiteMeasured());
+                else
+                    ImGui::TextDisabled("Measuring the scene...");
+            }
+            else if (source == 1)
             {
                 if (!vk && ex.seenFrames == 0)
                     ImGui::TextDisabled("Waiting for a frame...");
@@ -1081,6 +1110,36 @@ void RenderMenu(Config* config, float menuResScale)
                                "\nlight, then press Anchor here -- it captures the trimmed value as a new"
                                "\npoint and resets the trim to 1.");
             }
+        }
+        else if (wpSource == 3)
+        {
+            float trim = config->DlssNrWhitePointTrim.value_or_default();
+
+            if (ImGui::SliderFloat("Trim (x the measured scene)", &trim, 0.25f, 4.0f, "%.2fx",
+                                   ImGuiSliderFlags_Logarithmic))
+                config->DlssNrWhitePointTrim = std::clamp(trim, 0.25f, 4.0f);
+
+            ImGui::SameLine();
+
+            if (ImGui::SmallButton("Reset##autotrim"))
+                config->DlssNrWhitePointTrim = 1.0f;
+
+            HelpMarker("The white point follows the scene: its average brightness, measured on the frame"
+                       "
+before Neural Rendering touches it, sets where white is, and eases over about"
+                       "
+half a second like an eye adapting. Bright exteriors and dark interiors each get"
+                       "
+the value that suits them, which no single paper white can -- high enough for"
+                       "
+daylight, a fixed one shows the model a black picture indoors, and the model"
+                       "
+answers that with speckle that flickers."
+                       "
+
+This multiplies the measured value: above 1 the model sees a darker picture"
+                       "
+(highlights keep more detail), below 1 a brighter one.");
         }
         else if (wpSource == 1)
         {

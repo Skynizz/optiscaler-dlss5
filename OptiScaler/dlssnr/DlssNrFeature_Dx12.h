@@ -110,6 +110,11 @@ ExposureStatus GameExposureStatus();
 // What the pass last cost on the GPU, in milliseconds, or nothing if it has not been measured yet.
 std::optional<double> LastGpuTime();
 
+// The automatic white point (source 3): the smoothed value in use, and the last raw reading. 0 until
+// the first reading has come back.
+float AutoWhitePoint();
+float AutoWhiteMeasured();
+
 // What the white point meter last settled on, or 0 when it is not running. For the menu.
 
 

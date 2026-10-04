@@ -297,6 +297,17 @@ struct NrState
     unsigned int meterSlot = 0;
     unsigned long long meterFrames = 0;
 
+    // The automatic white point (source 3): the scene's average luminance, measured on the frame as the
+    // upscaler wrote it -- before this pass touches it, so nothing it writes can feed back into what it
+    // measures -- and smoothed in log space. A fixed paper white cannot serve a bright exterior and a
+    // dark interior at once: high enough for the first, it shows the model a black picture in the
+    // second, and the model answers a black picture with speckle that pops on and off.
+    bool autoWhiteValid = false;
+    float autoWhiteLog = 0.0f;      // log2 of the smoothed white point
+    float autoWhiteMeasured = 0.0f; // the last raw reading, for the menu
+    LARGE_INTEGER autoWhiteLast {};
+    bool autoWhiteSnap = true;
+
     // Whether the setting was on last frame, so the off->on edge can be caught.
     //
     // Deliberately the SETTING and not `wantExposure`: the texture itself comes and goes between
@@ -1022,6 +1033,89 @@ void ConsumeMeterReadback()
     buffer->Unmap(0, &nothingWritten);
 }
 
+// Reads the tile grid written four frames ago and moves the automatic white point toward it.
+//
+// The statistic is the geometric mean of tile means with the darkest and brightest 5% of tiles left
+// out: a sky or a lamp cannot decide it, nor can a black HUD bar. The white point then puts that
+// average where the encode wants a mid-grey -- the same target the proxy has always aimed at.
+void ConsumeAutoWhite(bool snap)
+{
+    if (g_nr.meterFrames < 4)
+        return;
+
+    const unsigned int slot = (unsigned int) (g_nr.meterFrames % 4);
+    ID3D12Resource* buffer = g_nr.meterReadback[slot];
+
+    if (buffer == nullptr)
+        return;
+
+    void* mapped = nullptr;
+    D3D12_RANGE range { 0, kMeterBytes };
+
+    if (FAILED(buffer->Map(0, &range, &mapped)) || mapped == nullptr)
+        return;
+
+    const float* src = (const float*) mapped;
+    std::vector<float> logs;
+    logs.reserve(kDlssNrMeterGrid * kDlssNrMeterGrid);
+
+    // Tile 0 carries the exposure courier's value, not a tile mean; it is skipped.
+    for (unsigned int i = 1; i < kDlssNrMeterGrid * kDlssNrMeterGrid; ++i)
+    {
+        if (std::isfinite(src[i]) && src[i] > 1e-12f)
+            logs.push_back(std::log2(src[i]));
+    }
+
+    D3D12_RANGE nothingWritten { 0, 0 };
+    buffer->Unmap(0, &nothingWritten);
+
+    if (logs.size() < 64)
+        return;
+
+    const size_t lo = logs.size() / 20;
+    const size_t hi = logs.size() - 1 - logs.size() / 20;
+    std::nth_element(logs.begin(), logs.begin() + lo, logs.end());
+    const float lowCut = logs[lo];
+    std::nth_element(logs.begin(), logs.begin() + hi, logs.end());
+    const float highCut = logs[hi];
+
+    double sum = 0.0;
+
+    for (float v : logs)
+        sum += std::clamp(v, lowCut, highCut);
+
+    const float meanLuma = std::exp2((float) (sum / logs.size()));
+
+    // WhitePointForMean caps at 10000 for its own purposes; the auto path needs the room some games
+    // ask for (Control wants thousands in daylight).
+    const float encoded = powf(kTargetEncodedMean, 2.2f);
+    const float target = std::clamp(meanLuma / (encoded / (1.0f - encoded)), 0.01f, 65536.0f);
+    const float targetLog = std::log2(target);
+    g_nr.autoWhiteMeasured = target;
+
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+
+    if (!g_nr.autoWhiteValid || snap || g_nr.autoWhiteSnap)
+    {
+        g_nr.autoWhiteLog = targetLog;
+        g_nr.autoWhiteValid = true;
+        g_nr.autoWhiteSnap = false;
+    }
+    else
+    {
+        // An eye adapting, not a meter jumping: about 0.4 s to cover most of a change, independent of
+        // the frame rate.
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        const double dt = std::clamp((double) (now.QuadPart - g_nr.autoWhiteLast.QuadPart) / f.QuadPart, 0.0, 0.25);
+        const float a = 1.0f - (float) std::exp(-dt / 0.4);
+        g_nr.autoWhiteLog += (targetLog - g_nr.autoWhiteLog) * a;
+    }
+
+    g_nr.autoWhiteLast = now;
+}
+
 // Forget everything the meter knows, so nothing read before this moment can be believed after it.
 //
 // The exposure is written only inside the block that dispatches the meter, and that block does not
@@ -1094,6 +1188,13 @@ float ResolveWhitePoint(const Config& cfg, bool isHdrBuffer)
     // menu. A game that hands over a real exposure has no business being driven by a buffer found by
     // its shape, and two sources fighting over one number is the class of bug worth making
     // unreachable rather than merely unlikely.
+    // Automatic: the scene's own average, times the user's trim.
+    if (cfg.DlssNrWhitePointSource.value_or_default() == 3 && g_nr.autoWhiteValid)
+    {
+        const float trim = std::clamp(cfg.DlssNrWhitePointTrim.value_or_default(), 0.25f, 4.0f);
+        return std::clamp(std::exp2(g_nr.autoWhiteLog) * trim, 0.01f, 65536.0f);
+    }
+
     if (cfg.DlssNrWhitePointSource.value_or_default() == 2)
     {
         // Multi-point: one or more calibration points the user placed, interpolated in log space by
@@ -2025,6 +2126,31 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
         CopyMeterToReadback(cmdList, device, true);
         ConsumeMeterReadback();
+    }
+
+    // The automatic white point measures the frame as the upscaler wrote it, every frame, on the full
+    // 64 x 64 grid. Exclusive with the exposure courier above: they share the meter and its readback.
+    if (g_nr.meter != nullptr && cfg.DlssNrWhitePointSource.value_or_default() == 3 && !wantExposure)
+    {
+        DlssNrConstants meterParams {};
+        meterParams.Mode = DlssNrMode_Meter;
+        meterParams.Width = kDlssNrMeterGrid;
+        meterParams.Height = kDlssNrMeterGrid;
+
+        Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        DispatchPass(cmdList, meterParams, target, nullptr, nullptr, nullptr, nullptr, g_nr.meter, nullptr);
+        Barrier(cmdList, target, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        CopyMeterToReadback(cmdList, device, false);
+
+        // A cut or a reset starts from the new scene rather than easing in from the old one.
+        ConsumeAutoWhite(frame.Reset);
+    }
+    else
+    {
+        g_nr.autoWhiteSnap = true;
     }
 
     g_nr.gamePreExposure = frame.PreExposure;
@@ -3580,6 +3706,10 @@ ExposureStatus GameExposureStatus()
 }
 
 std::optional<double> LastGpuTime() { return g_lastGpuTime; }
+
+float AutoWhitePoint() { return g_nr.autoWhiteValid ? std::exp2(g_nr.autoWhiteLog) : 0.0f; }
+
+float AutoWhiteMeasured() { return g_nr.autoWhiteMeasured; }
 
 
 

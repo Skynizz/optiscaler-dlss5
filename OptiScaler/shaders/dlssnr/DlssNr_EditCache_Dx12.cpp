@@ -487,6 +487,7 @@ bool DlssNrEditCache_Dx12::BeginFrame(const Config& cfg, ID3D12Device* device, u
     _lowGain = std::clamp(cfg.DlssNrCacheLowGain.value_or_default(), 0.0f, 4.0f);
     _highGain = std::clamp(cfg.DlssNrCacheHighGain.value_or_default(), 0.0f, 4.0f);
     _bilateral = cfg.DlssNrCacheBilateral.value_or_default();
+    _stabilize = std::clamp(cfg.DlssNrCacheStabilize.value_or_default(), 0.0f, 4.0f);
     _debugView = cfg.DlssNrCacheDebugView.value_or_default();
     _modelHistory = cfg.DlssNrCacheModelHistory.value_or_default();
     _stencilPriority = cfg.DlssNrCacheStencil.value_or_default();
@@ -615,6 +616,7 @@ DlssNrCacheConstants DlssNrEditCache_Dx12::BaseConstants(const DlssNrCacheInputs
     c.UseGameExposure = (in.useGameExposure && in.exposure != nullptr && !in.passthrough) ? 1u : 0u;
     c.ExposurePreMul = in.exposurePreMul;
     c.MaxLumaEdit = std::log2(std::max(in.maxRatio, 1.0f)) + 0.5f;
+    c.Stabilize = _stabilize;
     return c;
 }
 

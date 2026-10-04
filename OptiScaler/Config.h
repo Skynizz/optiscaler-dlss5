@@ -520,6 +520,9 @@ class Config
     CustomOptional<float> DlssNrCacheHighGain { 1.0f };
     // Fill rejected pixels from neighbours on the same surface (depth and luma) rather than nearest.
     CustomOptional<bool> DlssNrCacheBilateral { true };
+    // Anti-flicker: the largest step, in stops, a model refresh may make on a pixel that is still the
+    // same surface. Holds the black pops, lets detail through. 0 is off.
+    CustomOptional<float> DlssNrCacheStabilize { 0.5f };
     // What the model is told on a refresh: 0 the game's vectors, 1 motion accumulated since it last
     // ran, 2 reset its history every refresh.
     CustomOptional<uint32_t> DlssNrCacheModelHistory { 1 };

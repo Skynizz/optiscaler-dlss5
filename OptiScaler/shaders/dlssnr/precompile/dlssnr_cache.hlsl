@@ -48,6 +48,7 @@ cbuffer Params : register(b0)
     uint  gUseGameExposure; // the game's live exposure is bound at t10: white = gExposurePreMul / exposure
     float gExposurePreMul;
     float gMaxLumaEdit;     // the most, in stops, the composition can move a pixel's luminance
+    float gStabilize;       // anti-flicker: the most a refresh may move a still-valid pixel's edit, in stops (0 off)
 };
 
 Texture2D<float4>   gHistEdit  : register(t0); // rgb: log2 edit, a: high-band confidence
@@ -122,6 +123,21 @@ float3 ClampEdit(float3 e, float scale)
     const float lc = clamp(l, -limit, limit);
     e += lc - l;
     return clamp(e, lc - 1.0, lc + 1.0);
+}
+
+// Anti-flicker. Where the carried edit still belongs to this surface, a refresh may move its luminance
+// by at most gStabilize stops. The model re-decides small things every run -- that is detail, and it
+// passes -- but now and then it re-decides a dark patch by a stop or more and back again, which is
+// the black popping. A limit on the step lets the first through and holds the second.
+float3 Stabilize(float3 fresh, float3 carried, float trust)
+{
+    if (gStabilize <= 0.0 || trust < 0.5)
+        return fresh;
+
+    const float lf = dot(fresh, kLuma);
+    const float lc = dot(carried, kLuma);
+    const float l = lc + clamp(lf - lc, -gStabilize, gStabilize);
+    return fresh + (l - lf);
 }
 
 // The model's edit for one pixel, and whether to believe it. A model answer that is black where the
@@ -446,7 +462,8 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
                         const float wTop = (gBandEdges & 1u) ? 1.0 : saturate(((float) ry + 0.5) / feather);
                         const float wBot = (gBandEdges & 2u) ? 1.0 : saturate(((float) gBandHeight - (float) ry - 0.5) / feather);
                         float ok;
-                        const float3 fresh = FreshEdit(gAux0.Load(int3(id.x, ry, 0)).rgb, colour.rgb, ok);
+                        const float3 fresh = Stabilize(FreshEdit(gAux0.Load(int3(id.x, ry, 0)).rgb, colour.rgb, ok),
+                                                       h.edit, h.valid * vColour);
 
                         // Where the carried edit is still good, the band moves it only part of the way
                         // (the refresh blend), so a band refreshing does not snap; where it is not, the
@@ -473,7 +490,8 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
             else
             {
                 float ok;
-                const float3 fresh = FreshEdit(gAux0.Load(int3(id.xy, 0)).rgb, colour.rgb, ok);
+                const float3 fresh = Stabilize(FreshEdit(gAux0.Load(int3(id.xy, 0)).rgb, colour.rgb, ok), h.edit,
+                                               gHistValid != 0 ? h.valid * vColour : 0.0);
 
                 // Optional temporal smoothing of the refresh: where the carried edit is still valid,
                 // move only part of the way to the new one. 1 takes the new answer whole. A pixel the

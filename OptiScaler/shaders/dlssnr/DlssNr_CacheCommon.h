@@ -116,4 +116,7 @@ struct alignas(256) DlssNrCacheConstants
 
     // log2 of the composition's highlight guard, plus half a stop for the soft knee.
     float MaxLumaEdit;
+
+    // Anti-flicker: the largest step, in stops, a refresh may make on a still-valid pixel. 0 is off.
+    float Stabilize;
 };

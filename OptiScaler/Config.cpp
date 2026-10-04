@@ -380,6 +380,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrCacheLowGain.set_from_config(readFloat("DlssNr", "CacheLowGain"));
             DlssNrCacheHighGain.set_from_config(readFloat("DlssNr", "CacheHighGain"));
             DlssNrCacheBilateral.set_from_config(readBool("DlssNr", "CacheBilateral"));
+            DlssNrCacheStabilize.set_from_config(readFloat("DlssNr", "CacheStabilize"));
             DlssNrCacheModelHistory.set_from_config(readUInt("DlssNr", "CacheModelHistory"));
             DlssNrCacheStencil.set_from_config(readBool("DlssNr", "CacheStencil"));
             DlssNrCacheStencilMask.set_from_config(readUInt("DlssNr", "CacheStencilMask"));
@@ -1295,6 +1296,7 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "CacheLowGain", GetFloatValue(Instance()->DlssNrCacheLowGain.value_for_config()).c_str());
     ini.SetValue("DlssNr", "CacheHighGain", GetFloatValue(Instance()->DlssNrCacheHighGain.value_for_config()).c_str());
     ini.SetValue("DlssNr", "CacheBilateral", GetBoolValue(Instance()->DlssNrCacheBilateral.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheStabilize", GetFloatValue(Instance()->DlssNrCacheStabilize.value_for_config()).c_str());
     ini.SetValue("DlssNr", "CacheModelHistory",
                  GetIntValue(Instance()->DlssNrCacheModelHistory.value_for_config()).c_str());
     ini.SetValue("DlssNr", "CacheStencil", GetBoolValue(Instance()->DlssNrCacheStencil.value_for_config()).c_str());
