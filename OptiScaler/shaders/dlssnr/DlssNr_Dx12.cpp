@@ -472,6 +472,16 @@ void CheckCaptureTrigger()
         DlssNr::RequestCacheDump();
         LOG_INFO("DLSS-NR edit cache dump requested by trigger file");
     }
+
+    // And the FPS comparison, so a test can be run without opening the menu.
+    const auto benchTrigger = Util::DllPath().remove_filename() / "dlssnr-benchmark.trigger";
+
+    if (std::filesystem::exists(benchTrigger, ec))
+    {
+        std::filesystem::remove(benchTrigger, ec);
+        DlssNr::StartBenchmark(true);
+        LOG_INFO("DLSS-NR benchmark requested by trigger file");
+    }
 }
 
 // The encoded mean is aimed here. Mid-grey rather than anything brighter: the model has to see both the
