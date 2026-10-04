@@ -574,17 +574,11 @@ void RenderMenu(Config* config, float menuResScale)
                     config->DlssNrCacheStabilize = std::clamp(stabilize, 0.0f, 4.0f);
 
                 HelpMarker("Each time the model runs, a pixel that is still the same surface may change"
-                           "
-brightness by at most this much. The model re-decides small things every run --"
-                           "
-that is its detail, and it passes. Now and then it re-decides a dark patch by a"
-                           "
-stop or more and back again: that is the black popping, and this holds it."
-                           "
-
-Lower is steadier; too low and genuine changes (a light switching on) arrive"
-                           "
-over a few frames instead of at once. 0 turns it off.");
+                           "\nbrightness by at most this much. The model re-decides small things every run --"
+                           "\nthat is its detail, and it passes. Now and then it re-decides a dark patch by a"
+                           "\nstop or more and back again: that is the black popping, and this holds it."
+                           "\n\nLower is steadier; too low and genuine changes (a light switching on) arrive"
+                           "\nover a few frames instead of at once. 0 turns it off.");
 
                 bool bilateral = config->DlssNrCacheBilateral.value_or_default();
 
@@ -1125,21 +1119,13 @@ over a few frames instead of at once. 0 turns it off.");
                 config->DlssNrWhitePointTrim = 1.0f;
 
             HelpMarker("The white point follows the scene: its average brightness, measured on the frame"
-                       "
-before Neural Rendering touches it, sets where white is, and eases over about"
-                       "
-half a second like an eye adapting. Bright exteriors and dark interiors each get"
-                       "
-the value that suits them, which no single paper white can -- high enough for"
-                       "
-daylight, a fixed one shows the model a black picture indoors, and the model"
-                       "
-answers that with speckle that flickers."
-                       "
-
-This multiplies the measured value: above 1 the model sees a darker picture"
-                       "
-(highlights keep more detail), below 1 a brighter one.");
+                       "\nbefore Neural Rendering touches it, sets where white is, and eases over about"
+                       "\nhalf a second like an eye adapting. Bright exteriors and dark interiors each get"
+                       "\nthe value that suits them, which no single paper white can -- high enough for"
+                       "\ndaylight, a fixed one shows the model a black picture indoors, and the model"
+                       "\nanswers that with speckle that flickers."
+                       "\n\nThis multiplies the measured value: above 1 the model sees a darker picture"
+                       "\n(highlights keep more detail), below 1 a brighter one.");
         }
         else if (wpSource == 1)
         {
