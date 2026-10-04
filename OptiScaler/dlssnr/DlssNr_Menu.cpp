@@ -503,23 +503,37 @@ void RenderMenu(Config* config, float menuResScale)
 
                 bool adaptive = config->DlssNrCacheAdaptive.value_or_default();
 
-                if (ImGui::Checkbox("Run early when the view changes", &adaptive))
+                if (ImGui::Checkbox("Adapt to motion", &adaptive))
                     config->DlssNrCacheAdaptive = adaptive;
 
-                HelpMarker("Runs the model before the interval is up once enough of the picture has been"
-                           "\nrevealed since it last ran -- a fast turn, a door opening, someone walking out"
-                           "\nfrom behind a wall. The newly revealed pixels have no history of their own and"
-                           "\ncan only borrow their neighbours' edit until the model sees them.");
+                if (adaptive)
+                {
+                    const auto st = DlssNr::GetCacheStatus();
+                    static const char* regimeNames[] = { "still -- model half as often",
+                                                         "moving -- interval as set",
+                                                         "fast motion -- model twice as often" };
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(%s)", regimeNames[std::clamp(st.regime, 0, 2)]);
+                }
+
+                HelpMarker("Changes how often the model runs with how much of the picture is changing, in"
+                           "\nthree steady regimes rather than runs fired early at random moments (an uneven"
+                           "\nrhythm flickers by itself):"
+                           "\n\n  standing still  -- half as often (up to 1 frame in 8): nothing to redo"
+                           "\n  moving          -- the interval set above"
+                           "\n  fast motion     -- twice as often: more of each frame is new"
+                           "\n\nA regime only changes once the motion has clearly left it, so the rhythm holds.");
 
                 if (adaptive)
                 {
                     float thr = config->DlssNrCacheAdaptiveThreshold.value_or_default();
 
-                    if (ImGui::SliderFloat("Revealed area", &thr, 0.01f, 0.5f, "%.2f", ImGuiSliderFlags_Logarithmic))
+                    if (ImGui::SliderFloat("Fast-motion threshold", &thr, 0.01f, 0.5f, "%.2f", ImGuiSliderFlags_Logarithmic))
                         config->DlssNrCacheAdaptiveThreshold = std::clamp(thr, 0.001f, 1.0f);
 
-                    HelpMarker("The fraction of the frame revealed since the model last ran that triggers an"
-                               "\nearly run. Lower runs it more often in motion.");
+                    HelpMarker("The share of each frame that has to be newly revealed for the fast-motion"
+                               "\nregime; a twentieth of it counts as standing still. Lower switches to the fast"
+                               "\nregime sooner.");
                 }
 
                 float depthTol = config->DlssNrCacheDepthTolerance.value_or_default();

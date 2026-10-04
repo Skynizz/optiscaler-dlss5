@@ -3740,6 +3740,7 @@ CacheStatus GetCacheStatus()
     s.cumulativeRejected = c.cumulativeRejected;
     s.stencilAvailable = c.stencilAvailable;
     s.lastRefreshReason = c.lastRefreshReason;
+    s.regime = c.regime;
     s.dumpWritten = c.dumpWritten;
     s.dumpActive = c.dumpActive;
     return s;

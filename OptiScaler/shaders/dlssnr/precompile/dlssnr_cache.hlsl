@@ -266,6 +266,37 @@ struct History
     float valid; // the fraction of the bilinear weight that passed, 0..1
 };
 
+// The history's edit at uv q, Catmull-Rom filtered in five bilinear taps (the usual TAA arrangement).
+float3 CatmullRomEdit(float2 q)
+{
+    const float2 size = float2(gWidth, gHeight);
+    const float2 samplePos = q * size;
+    const float2 texPos1 = floor(samplePos - 0.5) + 0.5;
+    const float2 f = samplePos - texPos1;
+
+    const float2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    const float2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    const float2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    const float2 w3 = f * f * (-0.5 + 0.5 * f);
+
+    const float2 w12 = w1 + w2;
+    const float2 offset12 = w2 / max(w12, 1e-6);
+
+    const float2 tc0 = (texPos1 - 1.0) / size;
+    const float2 tc3 = (texPos1 + 2.0) / size;
+    const float2 tc12 = (texPos1 + offset12) / size;
+
+    float3 r = 0.0;
+    r += gHistEdit.SampleLevel(gLinear, float2(tc12.x, tc0.y), 0).rgb * (w12.x * w0.y);
+    r += gHistEdit.SampleLevel(gLinear, float2(tc0.x, tc12.y), 0).rgb * (w0.x * w12.y);
+    r += gHistEdit.SampleLevel(gLinear, float2(tc12.x, tc12.y), 0).rgb * (w12.x * w12.y);
+    r += gHistEdit.SampleLevel(gLinear, float2(tc3.x, tc12.y), 0).rgb * (w3.x * w12.y);
+    r += gHistEdit.SampleLevel(gLinear, float2(tc12.x, tc3.y), 0).rgb * (w12.x * w3.y);
+
+    const float wsum = w12.x * w0.y + w0.x * w12.y + w12.x * w12.y + w3.x * w12.y + w12.x * w3.y;
+    return r / max(wsum, 1e-6);
+}
+
 History ReadHistory(float2 q, float linC, float tol)
 {
     History h;
@@ -279,6 +310,8 @@ History ReadHistory(float2 q, float linC, float tol)
     const float2 f = pos - floor(pos);
 
     float wsum = 0.0;
+    float allValid = 1.0;
+    float3 lo = 1e9, hi = -1e9;
 
     [unroll] for (int k = 0; k < 4; ++k)
     {
@@ -293,12 +326,15 @@ History ReadHistory(float2 q, float linC, float tol)
         // flicker for a surface sitting right on the threshold.
         const float wd = saturate((2.0 * tol - rel) / max(tol, 1e-6));
         const float w = wb * wd;
+        allValid = min(allValid, wd);
 
         const float4 e = gHistEdit.Load(int3(t, 0));
         h.edit += e.rgb * w;
         h.confidence += e.a * w;
         h.logLuma += g.y * w;
         wsum += w;
+        lo = min(lo, e.rgb);
+        hi = max(hi, e.rgb);
     }
 
     if (wsum > 1e-4)
@@ -307,6 +343,14 @@ History ReadHistory(float2 q, float linC, float tol)
         h.confidence /= wsum;
         h.logLuma /= wsum;
     }
+
+    // Where all four taps are the same surface, the edit is read with Catmull-Rom instead of bilinear.
+    // A bilinear read is a small blur, and one blur per carried frame adds up: the detail softened a
+    // little more each frame and came back sharp when the model ran -- distant, fine things visibly
+    // breathed at the refresh rate. Catmull-Rom keeps the detail; clamping it to the four taps' range
+    // keeps its overshoot from inventing any.
+    if (allValid > 0.999)
+        h.edit = clamp(CatmullRomEdit(q), lo, hi);
 
     h.valid = saturate(wsum);
     return h;
@@ -494,7 +538,11 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
 
                 // Confidence decays with age and with every doubt -- depth or colour -- and only
                 // ever comes back on a refresh.
-                float confidence = h.confidence * vColour * saturate(2.0 * h.valid - 1.0) * gHighDecay;
+                // A colour failure costs confidence rather than all of it. Fine distant things alias a
+                // little from frame to frame and passed or failed the colour test at random, so their
+                // detail switched on and off; now a single failure dims it and only a run of them --
+                // a surface that really changed, like grass in the wind -- takes it away.
+                float confidence = h.confidence * lerp(0.6, 1.0, vColour) * saturate(2.0 * h.valid - 1.0) * gHighDecay;
 
                 // Spread refresh: one band of this frame was just run through the model. Inside it the
                 // model's own answer replaces the carried one, fading in over its context margin so

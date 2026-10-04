@@ -135,6 +135,7 @@ struct CacheStatus
     float cumulativeRejected = 0.0f;
     bool stencilAvailable = false;
     const char* lastRefreshReason = "";
+    int regime = 1; // 0 still, 1 moving, 2 fast
     unsigned int dumpWritten = 0;
     bool dumpActive = false;
 

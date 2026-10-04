@@ -529,13 +529,8 @@ bool DlssNrEditCache_Dx12::BeginFrame(const Config& cfg, ID3D12Device* device, u
         why = "measurement dump";
     else if (_spread)
         why = nullptr; // every frame refreshes one band instead
-    else if (_frame - _lastRefresh >= interval)
-        why = "interval";
-    // An early run never comes sooner than half the interval (and never two frames running). Without the
-    // floor a steady pan reveals enough every frame to trigger every frame, and the cache saves nothing
-    // exactly when the frame rate matters most; the revealed pixels borrow their surface's edit meanwhile.
-    else if (adaptive && _cumulativeRejected > threshold && _frame - _lastRefresh >= std::max(2u, interval / 2u))
-        why = "too much of the frame revealed";
+    else if (_frame - _lastRefresh >= EffectiveInterval(interval, adaptive, threshold))
+        why = _regime == 0 ? "interval (still: slower)" : _regime == 2 ? "interval (fast motion: faster)" : "interval";
 
     if (why == nullptr)
     {
@@ -548,6 +543,56 @@ bool DlssNrEditCache_Dx12::BeginFrame(const Config& cfg, ID3D12Device* device, u
     _cumulativeRejected = 0.0f;
     ++_refreshes;
     return true;
+}
+
+// The interval actually used. With adaptation on, a regular cadence per regime instead of runs fired
+// early whenever enough was revealed: the early runs made the cadence irregular (2, 3, 2, 2, 3...) and an
+// irregular refresh is visible as flicker in its own right. Each regime holds until the motion has
+// clearly left it, so the cadence does not hop either.
+//
+//   still   (almost nothing revealed)  twice the interval, up to 8 -- standing still costs least
+//   moving                              the interval as set
+//   fast    (more than the threshold)   half the interval -- more of the frame is new each frame
+unsigned int DlssNrEditCache_Dx12::EffectiveInterval(unsigned int interval, bool adaptive, float threshold)
+{
+    if (!adaptive || interval <= 1)
+    {
+        _regime = 1;
+        return interval;
+    }
+
+    const int wanted = _motion > threshold ? 2 : (_motion < threshold * 0.05f ? 0 : 1);
+
+    if (wanted == _regime)
+    {
+        _regimeCandidate = wanted;
+        _regimeFrames = 0;
+    }
+    else
+    {
+        if (wanted != _regimeCandidate)
+        {
+            _regimeCandidate = wanted;
+            _regimeFrames = 0;
+        }
+
+        // Into fast motion quickly, out of it and into stillness slowly: a lag there costs a little
+        // performance, a lag the other way costs flicker.
+        const unsigned int needed = wanted == 2 ? 4u : 30u;
+
+        if (++_regimeFrames >= needed)
+        {
+            _regime = wanted;
+            _regimeFrames = 0;
+        }
+    }
+
+    switch (_regime)
+    {
+    case 0: return std::min(interval * 2u, 8u);
+    case 2: return std::max(1u, (interval + 1u) / 2u);
+    default: return interval;
+    }
 }
 
 void DlssNrEditCache_Dx12::ConsumeStats()
@@ -579,6 +624,9 @@ void DlssNrEditCache_Dx12::ConsumeStats()
         // Priority pixels count four times over: a revealed character matters more than revealed sky.
         const float fraction = std::min(1.0f, (rejected + 3.0f * rejectedPriority) / total);
         _lastRejected = fraction;
+
+        // How much is being revealed, smoothed over a few readings: the motion the regimes follow.
+        _motion = _motion * 0.75f + fraction * 0.25f;
 
         // Only what happened since the last refresh decides the next one.
         if (_statsFrame[s] > _lastRefresh)
@@ -1360,6 +1408,7 @@ DlssNrEditCache_Dx12::Status DlssNrEditCache_Dx12::GetStatus() const
     s.cumulativeRejected = _cumulativeRejected;
     s.stencilAvailable = _stencilBound;
     s.lastRefreshReason = _refreshReason;
+    s.regime = _regime;
     s.dumpWritten = _dumpWritten;
     s.dumpActive = _dumpWanted > 0;
     return s;

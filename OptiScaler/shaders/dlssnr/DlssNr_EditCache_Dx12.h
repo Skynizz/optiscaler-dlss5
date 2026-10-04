@@ -91,6 +91,7 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
         float cumulativeRejected = 0.0f; // since the last refresh
         bool stencilAvailable = false;
         const char* lastRefreshReason = "";
+        int regime = 1; // 0 still, 1 moving, 2 fast
         unsigned int dumpWritten = 0;
         bool dumpActive = false;
     };
@@ -280,6 +281,12 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
                    const DlssNrCacheInputs& in);
 
     void ConsumeStats();
+    unsigned int EffectiveInterval(unsigned int interval, bool adaptive, float threshold);
+
+    float _motion = 0.0f;
+    int _regime = 1;
+    int _regimeCandidate = 1;
+    unsigned int _regimeFrames = 0;
 
     void DumpRecord(ID3D12GraphicsCommandList* cmd, ID3D12Device* device, ID3D12Resource* target,
                     ID3D12Resource* original, const DlssNrCacheInputs& in);
