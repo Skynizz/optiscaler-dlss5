@@ -453,6 +453,7 @@ void RenderMenu(Config* config, float menuResScale)
                     config->DlssNrCacheStabilize = 0.5f;
                     config->DlssNrCacheDespeckle = true;
                     config->DlssNrCacheTemporal = temporal;
+                    config->DlssNrCacheLowTemporal = 0.95f;
                     config->DlssNrCacheSpread = false;
                     config->DlssNrWorkingScale = scale;
                     config->DlssNrJbuUpsample = scale < 0.999f;
@@ -627,6 +628,19 @@ void RenderMenu(Config* config, float menuResScale)
                            "\n\nWith frame generation it matters twice: the generated frames are built from two real"
                            "\nones, and an edit that flickers between them becomes ghosting in every frame between."
                            "\n0 is off; 0.5 is a good default; higher is steadier and slower to change.");
+
+                float lowTemporal = config->DlssNrCacheLowTemporal.value_or_default();
+
+                if (ImGui::SliderFloat("Luminance stability (OLED)", &lowTemporal, 0.0f, 0.95f,
+                                       lowTemporal <= 0.0f ? "off" : "%.2f"))
+                    config->DlssNrCacheLowTemporal = std::clamp(lowTemporal, 0.0f, 0.95f);
+
+                HelpMarker("Holds the brightness that trembles region by region. The model sometimes lifts and"
+                           "\ndrops the light of a whole area a little from frame to frame; per pixel nothing"
+                           "\nlooks wrong, so the stabiliser above lets it through, but on an OLED, black around"
+                           "\nit, the area visibly breathes."
+                           "\n\nThis eases the edit's regional light in time on its own. A real change of light --"
+                           "\na third of a stop or more -- comes through at once. 0 is off; higher is steadier.");
 
                 bool crossfade = config->DlssNrCacheCrossfade.value_or_default();
 

@@ -540,6 +540,9 @@ class Config
     // Temporal stabiliser: the weight of last frame's edit, reprojected and clamped to this frame's local
     // range (TAA-style variance clipping). Averages out flicker and specks without trails. 0 is off.
     CustomOptional<float> DlssNrCacheTemporal { 0.5f };
+    // Luminance stability: the regional light of the edit eased in time on its own (0 off, up to 0.95).
+    // Holds the brightness that breathes region by region -- what an OLED shows most.
+    CustomOptional<float> DlssNrCacheLowTemporal { 0.95f };
     // What the model is told on a refresh: 0 the game's vectors, 1 motion accumulated since it last
     // ran, 2 reset its history every refresh.
     CustomOptional<uint32_t> DlssNrCacheModelHistory { 1 };

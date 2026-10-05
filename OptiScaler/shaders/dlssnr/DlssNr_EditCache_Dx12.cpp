@@ -507,6 +507,7 @@ bool DlssNrEditCache_Dx12::BeginFrame(const Config& cfg, ID3D12Device* device, u
     _stabilize = std::clamp(cfg.DlssNrCacheStabilize.value_or_default(), 0.0f, 4.0f);
     _despeckle = cfg.DlssNrCacheDespeckle.value_or_default();
     _temporal = std::clamp(cfg.DlssNrCacheTemporal.value_or_default(), 0.0f, 0.9f);
+    _lowTemporal = std::clamp(cfg.DlssNrCacheLowTemporal.value_or_default(), 0.0f, 0.95f);
     _debugView = cfg.DlssNrCacheDebugView.value_or_default();
     _modelHistory = cfg.DlssNrCacheModelHistory.value_or_default();
     _stencilPriority = cfg.DlssNrCacheStencil.value_or_default();
@@ -700,6 +701,7 @@ DlssNrCacheConstants DlssNrEditCache_Dx12::BaseConstants(const DlssNrCacheInputs
     c.CrossfadeOn = _crossfadeOn ? 1u : 0u;
     c.Crossfade = _crossfade;
     c.Temporal = _debugView == 0 ? _temporal : 0.0f;
+    c.LowTemporal = _lowTemporal;
     c.TemporalValid = _finalValid ? 1u : 0u;
     return c;
 }

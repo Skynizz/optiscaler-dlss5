@@ -135,4 +135,7 @@ struct alignas(256) DlssNrCacheConstants
     // Temporal stabiliser: the weight of last frame's clamped edit, and whether it exists.
     float Temporal;
     uint32_t TemporalValid;
+
+    // Luminance stability: the weight of last frame's regional (low band) edit, eased on its own.
+    float LowTemporal;
 };

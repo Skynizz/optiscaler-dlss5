@@ -386,6 +386,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrCacheDespeckle.set_from_config(readBool("DlssNr", "CacheDespeckle"));
             DlssNrCacheCrossfade.set_from_config(readBool("DlssNr", "CacheCrossfade"));
             DlssNrCacheTemporal.set_from_config(readFloat("DlssNr", "CacheTemporal"));
+            DlssNrCacheLowTemporal.set_from_config(readFloat("DlssNr", "CacheLowTemporal"));
             DlssNrCacheModelHistory.set_from_config(readUInt("DlssNr", "CacheModelHistory"));
             DlssNrCacheStencil.set_from_config(readBool("DlssNr", "CacheStencil"));
             DlssNrCacheStencilMask.set_from_config(readUInt("DlssNr", "CacheStencilMask"));
@@ -1308,6 +1309,8 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "CacheDespeckle", GetBoolValue(Instance()->DlssNrCacheDespeckle.value_for_config()).c_str());
     ini.SetValue("DlssNr", "CacheCrossfade", GetBoolValue(Instance()->DlssNrCacheCrossfade.value_for_config()).c_str());
     ini.SetValue("DlssNr", "CacheTemporal", GetFloatValue(Instance()->DlssNrCacheTemporal.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheLowTemporal",
+                 GetFloatValue(Instance()->DlssNrCacheLowTemporal.value_for_config()).c_str());
     ini.SetValue("DlssNr", "CacheModelHistory",
                  GetIntValue(Instance()->DlssNrCacheModelHistory.value_for_config()).c_str());
     ini.SetValue("DlssNr", "CacheStencil", GetBoolValue(Instance()->DlssNrCacheStencil.value_for_config()).c_str());

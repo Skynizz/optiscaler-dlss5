@@ -193,6 +193,7 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
     unsigned int _finalCur = 0;
     bool _finalValid = false;
     float _temporal = 0.5f;
+    float _lowTemporal = 0.95f;
 
     void TemporalPass(ID3D12GraphicsCommandList* cmd, ID3D12Resource* target, ID3D12Resource* original,
                       const DlssNrCacheInputs& in);

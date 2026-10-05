@@ -526,6 +526,7 @@ void CheckCaptureTrigger()
             else if (k == "CacheDespeckle") c->DlssNrCacheDespeckle = b;
             else if (k == "CacheCrossfade") c->DlssNrCacheCrossfade = b;
             else if (k == "CacheTemporal") c->DlssNrCacheTemporal = v;
+            else if (k == "CacheLowTemporal") c->DlssNrCacheLowTemporal = v;
             else if (k == "CacheModelHistory") c->DlssNrCacheModelHistory = (uint32_t) v;
             else if (k == "CacheDumpFrames") c->DlssNrCacheDumpFrames = (uint32_t) v;
             else if (k == "WhitePointSource") c->DlssNrWhitePointSource = (uint32_t) v;
@@ -1225,10 +1226,21 @@ void ConsumeAutoWhite(bool snap)
     // the model is shown for the whole frame, so every lunge of it -- the sky panning into view -- made
     // the model's whole answer pump. About a second toward brighter, two toward darker, and never more
     // than three stops a second whatever the scene does.
+    //
+    // And a dead band, as a camera's exposure lock has: while the scene stays within 0.4 stop of the value
+    // in use, the value does not move at all. Every small drift of the scene's average while walking
+    // otherwise nudged what the model was shown, and the model's whole answer trembled with it.
+    const float deadBand = 0.4f;
+    const float excess = targetLog - g_nr.autoWhiteLog;
+
+    if (std::abs(excess) <= deadBand)
+        return;
+
+    const float goal = targetLog - (excess > 0.0f ? deadBand : -deadBand);
     const float tau = targetLog > g_nr.autoWhiteLog ? 0.8f : 1.6f;
     const float a = 1.0f - (float) std::exp(-dt / tau);
     const float maxStep = 3.0f * (float) dt;
-    g_nr.autoWhiteLog += std::clamp((targetLog - g_nr.autoWhiteLog) * a, -maxStep, maxStep);
+    g_nr.autoWhiteLog += std::clamp((goal - g_nr.autoWhiteLog) * a, -maxStep, maxStep);
 }
 
 // Forget everything the meter knows, so nothing read before this moment can be believed after it.

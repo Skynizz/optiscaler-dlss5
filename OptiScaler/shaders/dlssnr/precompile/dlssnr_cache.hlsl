@@ -55,6 +55,7 @@ cbuffer Params : register(b0)
     float gCrossfade;       // this frame's step: 1 / (frames left until the model runs again)
     float gTemporal;        // temporal stabiliser: weight of the reprojected, clamped previous edit (0 off)
     uint  gTemporalValid;   // the previous stabilised edit exists and belongs to this raster
+    float gLowTemporal;     // luminance stability: weight of the reprojected regional (low band) edit (0 off)
 };
 
 Texture2D<float4>   gHistEdit  : register(t0); // rgb: log2 edit, a: high-band confidence
@@ -904,6 +905,8 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
 
     if (gMode == 10)
     {
+        // The edit's regional light at uv: a 3x3 tent of bilinear taps a dozen pixels apart, which is
+        // the region a few dozen pixels across that a shift of overall brightness covers.
         // The temporal stabiliser: the shown edit, blended with last frame's shown edit reprojected --
         // with that history clamped to the range this frame's own 3x3 neighbourhood spans (variance
         // clipping, as every TAA does). Whatever the model re-decides from frame to frame within that
@@ -928,6 +931,20 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
         const float sigma = sqrt(max(m2 / 9.0 - mu * mu, 0.0));
 
         float3 outEdit = e;
+
+        // The regional light of this frame's edit, for the luminance stability below.
+        const float2 texel = 12.0 / float2(gWidth, gHeight);
+        float3 lowNow = 0.0;
+
+        if (gLowTemporal > 0.0)
+        {
+            [unroll] for (int r = 0; r < 9; ++r)
+            {
+                const float2 o = float2(r % 3 - 1, r / 3 - 1);
+                const float wt = (o.x == 0 ? 2.0 : 1.0) * (o.y == 0 ? 2.0 : 1.0) / 16.0;
+                lowNow += gAux0.SampleLevel(gLinear, uv + o * texel, 0).rgb * wt;
+            }
+        }
 
         if (gTemporalValid != 0)
         {
@@ -959,8 +976,46 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
                     hist /= wsum;
                     const float lh = dot(hist, kLuma);
                     const float lc = clamp(lh, mu - sigma - 0.02, mu + sigma + 0.02);
-                    hist += lc - lh;
-                    outEdit = lerp(e, hist, gTemporal * saturate(2.0 * wsum - 1.0));
+                    const float valid = saturate(2.0 * wsum - 1.0);
+
+                    if (gLowTemporal <= 0.0)
+                    {
+                        hist += lc - lh;
+                        outEdit = lerp(e, hist, gTemporal * valid);
+                    }
+                    else
+                    {
+                        // Luminance stability. The variance clip above holds a pixel to what its eight
+                        // neighbours span -- and when a whole region of the model's answer brightens and
+                        // darkens together, the neighbours move with it, so the clip lets it through.
+                        // That regional breathing is what an OLED, black around it, shows most.
+                        //
+                        // So the edit is split: its regional light (the tent above) is eased in time on
+                        // its own, strongly, while the detail on top keeps the clipped blend. A real change
+                        // of the edit's light -- a step of a third of a stop or more -- loosens the easing at
+                        // once, so the light follows the scene and only the trembling is held.
+                        float3 lowHist = 0.0;
+
+                        [unroll] for (int r = 0; r < 9; ++r)
+                        {
+                            const float2 o = float2(r % 3 - 1, r / 3 - 1);
+                            const float wt = (o.x == 0 ? 2.0 : 1.0) * (o.y == 0 ? 2.0 : 1.0) / 16.0;
+                            lowHist += gAux1.SampleLevel(gLinear, q + o * texel, 0).rgb * wt;
+                        }
+
+                        const float step = dot(lowHist - lowNow, kLuma) / 0.35;
+
+                        // Full strength standing still and in slow motion, where the breathing shows; let
+                        // go as the view moves faster, where new content legitimately changes the light and
+                        // holding it would only make it trail (measured: +15% change in a pan without this).
+                        const float motionPx = length((q - uv) * float2(gWidth, gHeight)) / 6.0;
+                        const float lowW = gLowTemporal * valid * exp(-step * step) * exp(-motionPx * motionPx);
+                        const float3 lowOut = lerp(lowNow, lowHist, lowW);
+
+                        hist += lc - lh;
+                        const float3 detail = lerp(e - lowNow, hist - lowHist, gTemporal * valid);
+                        outEdit = lowOut + detail;
+                    }
                 }
             }
         }
