@@ -432,49 +432,60 @@ void RenderMenu(Config* config, float menuResScale)
                 ImGui::TextUnformatted("Presets:");
                 ImGui::SameLine();
 
-                auto preset = [&](unsigned int interval, float threshold, float decay, float depthTol,
-                                  float colourTol)
+                // Measured presets (Control, RTX 4070, 1440p, rendered fps; vanilla 31 fps):
+                //   Max quality  model every frame, full size              31 fps, the most detail
+                //   Quality      every frame, 67% + edge-aware enlargement   40 fps, as steady as vanilla
+                //   Balanced     67%, every other frame, smoothed            48 fps, the least flicker
+                //   Performance  67%, one in three, smoothed                 53 fps
+                // All with the temporal stabiliser, which halved the worst flicker in every mode.
+                auto preset = [&](unsigned int interval, float scale, float temporal)
                 {
                     config->DlssNrCacheInterval = interval;
-                    config->DlssNrCacheAdaptive = true;
-                    config->DlssNrCacheAdaptiveThreshold = threshold;
-                    config->DlssNrCacheHighDecay = decay;
-                    config->DlssNrCacheDepthTolerance = depthTol;
-                    config->DlssNrCacheColourTolerance = colourTol;
-                    // Taken whole: blending refreshes averages away the detail the model re-decides
-                    // each run, and faces lose exactly what Neural Rendering is for.
+                    config->DlssNrCacheAdaptive = interval > 1;
+                    config->DlssNrCacheAdaptiveThreshold = 0.10f;
+                    config->DlssNrCacheHighDecay = 0.97f;
+                    config->DlssNrCacheDepthTolerance = 0.10f;
+                    config->DlssNrCacheColourTolerance = 0.50f;
                     config->DlssNrCacheRefreshBlend = 1.0f;
                     config->DlssNrCacheModelHistory = 1u;
                     config->DlssNrCacheBilateral = true;
+                    config->DlssNrCacheCrossfade = true;
+                    config->DlssNrCacheStabilize = 0.5f;
+                    config->DlssNrCacheDespeckle = true;
+                    config->DlssNrCacheTemporal = temporal;
+                    config->DlssNrCacheSpread = false;
+                    config->DlssNrWorkingScale = scale;
+                    config->DlssNrJbuUpsample = scale < 0.999f;
+                    config->DlssNrTransfer = 1u;
                 };
 
-                if (ImGui::SmallButton("Stable vanilla"))
-                {
-                    // The model every frame -- no speed-up -- but through the stabiliser, so flicker
-                    // can be told apart from the cache: if this is clean, the cache is the cause.
-                    preset(1, 0.10f, 1.0f, 0.10f, 0.50f);
-                    config->DlssNrCacheSpread = false;
-                }
+                if (ImGui::SmallButton("Max quality"))
+                    preset(1, 1.0f, 0.5f);
 
                 ImGui::SameLine();
 
                 if (ImGui::SmallButton("Quality"))
-                    preset(2, 0.05f, 0.98f, 0.10f, 0.50f);
+                    preset(1, 0.67f, 0.5f);
 
                 ImGui::SameLine();
 
                 if (ImGui::SmallButton("Balanced"))
-                    preset(3, 0.08f, 0.97f, 0.10f, 0.50f);
+                    preset(2, 0.67f, 0.5f);
 
                 ImGui::SameLine();
 
                 if (ImGui::SmallButton("Performance"))
-                    preset(5, 0.12f, 0.95f, 0.12f, 0.60f);
+                    preset(3, 0.67f, 0.6f);
 
-                HelpMarker("Quality runs the model every other frame; Balanced one in three; Performance one"
-                           "\nin five. All three run it early when much of the view changes, but never more"
-                           "\noften than every other frame. For more speed still, combine with a lower Model"
-                           "\nresolution and Edge-aware enlargement above.");
+                HelpMarker("Measured in Control (RTX 4070, 1440p, frames the game renders; vanilla 31 fps):"
+                           "\n\n  Max quality  the model every frame, full size: 31 fps, the most fine detail"
+                           "\n  Quality      every frame at 67%, edge-aware enlargement: 40 fps, as steady as"
+                           "\n               vanilla, the steadiest frame times"
+                           "\n  Balanced     67%, every other frame, smoothed: 48 fps, the least flicker of all"
+                           "\n  Performance  67%, one frame in three: 53 fps"
+                           "\n\nAll four use the temporal stabiliser. With frame generation, pick the preset that keeps"
+                           "\nthe game's own frame rate above ~45 fps and keep the generation factor modest (x2-x3):"
+                           "\ngenerated frames are only as clean as the real frames they are built from.");
 
                 int interval = (int) config->DlssNrCacheInterval.value_or_default();
 

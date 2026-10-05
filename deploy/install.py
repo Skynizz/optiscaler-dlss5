@@ -26,6 +26,37 @@ import shutil
 import sys
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+HERE = os.path.dirname(os.path.abspath(__file__))
+
+# Packaged (the release folder): the files sit beside this script. From the source tree: the build output.
+PACKAGED = os.path.isfile(os.path.join(HERE, "OptiScaler.dll"))
+
+
+def built(name: str) -> str:
+    if PACKAGED:
+        return os.path.join(HERE, name)
+    return os.path.join(ROOT, "x64", "Release", "a" if name.startswith("nvngx") else "", name).replace(os.sep + os.sep, os.sep)
+
+
+def pick_name(game: str) -> str:
+    """The proxy name OptiScaler can load under in this game without displacing anything.
+
+    An ASI loader already present means OptiScaler.asi is picked up with nothing renamed; otherwise the first
+    common proxy name that is free."""
+    try:
+        for f in os.listdir(game):
+            if f.lower().endswith(".asi"):
+                return "OptiScaler.asi"
+            if f.lower() in ("version.dll", "dinput8.dll", "winmm.dll", "d3d9.dll"):
+                with open(os.path.join(game, f), "rb") as h:
+                    if b"Ultimate-ASI-Loader" in h.read():
+                        return "OptiScaler.asi"
+    except OSError:
+        pass
+    for name in ("winmm.dll", "version.dll", "dbghelp.dll", "wininet.dll", "winhttp.dll"):
+        if not os.path.exists(os.path.join(game, name)):
+            return name
+    sys.exit("no free proxy name in this folder (winmm, version, dbghelp, wininet, winhttp all taken)")
 MARKER = "optiscaler-nr-cache.installed.json"
 
 # section -> {key: value}. Everything else stays at the shipped default (auto).
@@ -33,6 +64,8 @@ SETTINGS = {
     "Upscalers": {"Dx12Upscaler": "dlss"},
     "Log": {"LogToFile": "true", "LogLevel": "2"},
     "DlssNr": {"Enabled": "true", "CacheEnabled": "true", "CacheInterval": "2", "CacheSpread": "false",
+               # Balanced preset, measured best trade-off: 67% model, edge-aware enlargement.
+               "WorkingScale": "0.67", "JbuUpsample": "true",
                "CacheRefreshBlend": "1.0",
                # No paper white to tune: measured from each scene, adapted per region.
                "WhitePointSource": "3"},
@@ -93,9 +126,14 @@ def install(game: str, model: str, overwrite_own: bool, name: str = "winmm.dll",
     model_dst = os.path.join(game, "nvngx_dlssnr.dll")
     keep_model = "nvngx_dlssnr.dll" not in previous and os.path.exists(model_dst) and sha(model_dst) == sha(model)
 
+    if name == "auto":
+        known = ("winmm.dll", "version.dll", "dbghelp.dll", "wininet.dll", "winhttp.dll", "OptiScaler.asi")
+        name = previous.get("__name__") or next((k for k in previous if k in known), None) or pick_name(game)
+        print(f"  OptiScaler will load as {name}")
+
     sources = {
-        name: os.path.join(ROOT, "x64", "Release", "OptiScaler.dll"),
-        "nvngx.dll_dlssnr.dll": os.path.join(ROOT, "x64", "Release", "a", "nvngx.dll_dlssnr.dll"),
+        name: built("OptiScaler.dll"),
+        "nvngx.dll_dlssnr.dll": built("nvngx.dll_dlssnr.dll"),
         "nvngx_dlssnr.dll": model,
     }
 
@@ -125,13 +163,14 @@ def install(game: str, model: str, overwrite_own: bool, name: str = "winmm.dll",
     if os.path.exists(ini_dst) and not overwrite_own:
         print(f"  OptiScaler.ini         kept (already installed; --reset-ini to rewrite it)")
     else:
-        with open(os.path.join(ROOT, "OptiScaler.ini"), "r", encoding="utf-8-sig") as f:
+        with open(os.path.join(HERE if PACKAGED else ROOT, "OptiScaler.ini"), "r", encoding="utf-8-sig") as f:
             text = configured_ini(f.read())
         with open(ini_dst, "w", encoding="utf-8", newline="") as f:
             f.write(text)
         print(f"  OptiScaler.ini         written ({', '.join(f'{s}.{k}={v}' for s, kv in SETTINGS.items() for k, v in kv.items())})")
     record["OptiScaler.ini"] = "config"
     record["__disabled__"] = disabled
+    record["__name__"] = name
 
     with open(marker, "w") as f:
         json.dump(record, f, indent=2)
@@ -144,7 +183,7 @@ def uninstall(game: str):
         sys.exit("nothing installed by this script here")
     record = json.load(open(marker))
     for fname in record:
-        if fname == "__disabled__":
+        if fname.startswith("__"):
             continue
         p = os.path.join(game, fname)
         if os.path.exists(p):
@@ -165,7 +204,9 @@ def main():
     ap.add_argument("--game", required=True, help="folder holding the game's executable")
     ap.add_argument("--model", help="nvngx_dlssnr.dll to install (install only)")
     ap.add_argument("--reset-ini", action="store_true", help="rewrite OptiScaler.ini even if already installed")
-    ap.add_argument("--name", default="winmm.dll", help="file name OptiScaler is installed as (default winmm.dll)")
+    ap.add_argument("--name", default="auto",
+                    help="file name OptiScaler is installed as (default: picked for the game -- OptiScaler.asi "
+                         "beside an ASI loader, else the first free of winmm/version/dbghelp/wininet/winhttp)")
     ap.add_argument("--disable", action="append", default=[], help="a file to switch off by renaming (repeatable)")
     ap.add_argument("--set", action="append", default=[], metavar="SECTION.KEY=VALUE",
                     help="an extra ini setting for this game, e.g. DlssNr.WhitePointSource=0 (repeatable)")
