@@ -187,6 +187,16 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
     ID3D12Resource* _histEdit[2] = {};
     ID3D12Resource* _histGuide[2] = {};
 
+    // Temporal stabiliser: this frame's edit before it, and the stabilised edits (ping-pong).
+    ID3D12Resource* _finalRaw = nullptr;
+    ID3D12Resource* _finalHist[2] = {};
+    unsigned int _finalCur = 0;
+    bool _finalValid = false;
+    float _temporal = 0.5f;
+
+    void TemporalPass(ID3D12GraphicsCommandList* cmd, ID3D12Resource* target, ID3D12Resource* original,
+                      const DlssNrCacheInputs& in);
+
     // Keyframe crossfade: the model's latest answer, carried alongside what is shown.
     ID3D12Resource* _histTarget[2] = {};
     bool _crossfadeOn = false;

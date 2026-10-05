@@ -53,6 +53,8 @@ cbuffer Params : register(b0)
     float gMapBlend;        // local luminance map: share of this frame's reading taken (1 on a reset)
     uint  gCrossfadeOn;     // keyframe crossfade: the shown edit walks toward the model's latest answer
     float gCrossfade;       // this frame's step: 1 / (frames left until the model runs again)
+    float gTemporal;        // temporal stabiliser: weight of the reprojected, clamped previous edit (0 off)
+    uint  gTemporalValid;   // the previous stabilised edit exists and belongs to this raster
 };
 
 Texture2D<float4>   gHistEdit  : register(t0); // rgb: log2 edit, a: high-band confidence
@@ -765,6 +767,13 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
         const float eps = Eps();
         float3 result = max((max(original.rgb, 0.0) + eps) * exp2(edit) - eps, 0.0);
 
+        // With the temporal stabiliser on, this pass only hands its edit on; mode 10 writes the frame.
+        if (gTemporal > 0.0 && gDebugView == 0)
+        {
+            gOut3[id.xy] = float4(edit, 1.0);
+            return;
+        }
+
         // Debug views, in the frame's own units.
         const float white = WhitePoint();
 
@@ -890,6 +899,75 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
         const float2 ms = float2(gMotionW, gMotionH) / float2(max(gDepthW, 1u), max(gDepthH, 1u));
         const int2 mt = min(int2((float2(src.xy) + 0.5) * ms), int2(gMotionW, gMotionH) - 1);
         gOut1[id.xy] = float4(gMotion.Load(int3(mt, 0)).xy / ms, 0.0, 0.0);
+        return;
+    }
+
+    if (gMode == 10)
+    {
+        // The temporal stabiliser: the shown edit, blended with last frame's shown edit reprojected --
+        // with that history clamped to the range this frame's own 3x3 neighbourhood spans (variance
+        // clipping, as every TAA does). Whatever the model re-decides from frame to frame within that
+        // range -- the flicker, the specks, the swimming of synthesised detail -- is averaged out; a
+        // history that no longer fits (a surface revealed, a light switched on) is pulled back to the
+        // present instead of trailing. The edit then moves with the motion vectors, which is also what
+        // frame generation assumes when it builds the frames in between.
+        const float4 original = gColour.Load(int3(id.xy, 0));
+        const float3 e = gAux0.Load(int3(id.xy, 0)).rgb;
+
+        float m1 = 0.0, m2 = 0.0;
+
+        [unroll] for (int k = 0; k < 9; ++k)
+        {
+            const int2 t = clamp(int2(id.xy) + int2(k % 3 - 1, k / 3 - 1), int2(0, 0), int2(gWidth, gHeight) - 1);
+            const float l = dot(gAux0.Load(int3(t, 0)).rgb, kLuma);
+            m1 += l;
+            m2 += l * l;
+        }
+
+        const float mu = m1 / 9.0;
+        const float sigma = sqrt(max(m2 / 9.0 - mu * mu, 0.0));
+
+        float3 outEdit = e;
+
+        if (gTemporalValid != 0)
+        {
+            const float linC = gHistGuide.Load(int3(id.xy, 0)).x;
+            const float2 q = uv + MotionUvOffset(uv);
+
+            if (all(q >= 0.0) && all(q <= 1.0))
+            {
+                const float2 pos = q * float2(gWidth, gHeight) - 0.5;
+                const int2 i0 = (int2) floor(pos);
+                const float2 f = pos - floor(pos);
+
+                float3 hist = 0.0;
+                float wsum = 0.0;
+
+                [unroll] for (int j = 0; j < 4; ++j)
+                {
+                    const int2 o = int2(j & 1, j >> 1);
+                    const int2 t = clamp(i0 + o, int2(0, 0), int2(gWidth, gHeight) - 1);
+                    const float wb = (o.x ? f.x : 1.0 - f.x) * (o.y ? f.y : 1.0 - f.y);
+                    const float rel = RelDepthDiff(gAux2.Load(int3(t, 0)).x, linC);
+                    const float w = wb * saturate((2.0 * gDepthTol - rel) / max(gDepthTol, 1e-6));
+                    hist += gAux1.Load(int3(t, 0)).rgb * w;
+                    wsum += w;
+                }
+
+                if (wsum > 0.25)
+                {
+                    hist /= wsum;
+                    const float lh = dot(hist, kLuma);
+                    const float lc = clamp(lh, mu - sigma - 0.02, mu + sigma + 0.02);
+                    hist += lc - lh;
+                    outEdit = lerp(e, hist, gTemporal * saturate(2.0 * wsum - 1.0));
+                }
+            }
+        }
+
+        const float eps = Eps();
+        gOut0[id.xy] = float4(max((max(original.rgb, 0.0) + eps) * exp2(outEdit) - eps, 0.0), original.a);
+        gOut3[id.xy] = float4(outEdit, 1.0);
         return;
     }
 

@@ -29,7 +29,8 @@ enum DlssNrCacheMode : uint32_t
     DlssNrCacheMode_JbuUpsample = 6,  // a below-size model answer -> full size, guided by the frame
     DlssNrCacheMode_DumpPack = 7,     // the measurement dump's per-frame images
     DlssNrCacheMode_CropGuides = 8,   // one band of depth and motion, for a model run on that band
-    DlssNrCacheMode_LocalMap = 9      // the automatic white point's smoothed local luminance map
+    DlssNrCacheMode_LocalMap = 9,     // the automatic white point's smoothed local luminance map
+    DlssNrCacheMode_Temporal = 10     // the temporal stabiliser: shown edit vs last frame's, clamped
 };
 
 // Spread refresh: at most this many bands, so a band never has too little of the picture around it.
@@ -130,4 +131,8 @@ struct alignas(256) DlssNrCacheConstants
     // Keyframe crossfade: on, and this frame's step toward the model's latest answer.
     uint32_t CrossfadeOn;
     float Crossfade;
+
+    // Temporal stabiliser: the weight of last frame's clamped edit, and whether it exists.
+    float Temporal;
+    uint32_t TemporalValid;
 };

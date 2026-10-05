@@ -537,6 +537,9 @@ class Config
     // Keyframe crossfade: between model runs, walk the shown edit toward the model's latest answer so it
     // arrives exactly at the next run -- no step when the model runs, nothing averaged away.
     CustomOptional<bool> DlssNrCacheCrossfade { true };
+    // Temporal stabiliser: the weight of last frame's edit, reprojected and clamped to this frame's local
+    // range (TAA-style variance clipping). Averages out flicker and specks without trails. 0 is off.
+    CustomOptional<float> DlssNrCacheTemporal { 0.5f };
     // What the model is told on a refresh: 0 the game's vectors, 1 motion accumulated since it last
     // ran, 2 reset its history every refresh.
     CustomOptional<uint32_t> DlssNrCacheModelHistory { 1 };

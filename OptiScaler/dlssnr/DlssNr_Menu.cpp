@@ -604,6 +604,19 @@ void RenderMenu(Config* config, float menuResScale)
                            "\n\nLower is steadier; too low and genuine changes (a light switching on) arrive"
                            "\nover a few frames instead of at once. 0 turns it off.");
 
+                float temporal = config->DlssNrCacheTemporal.value_or_default();
+
+                if (ImGui::SliderFloat("Temporal stability", &temporal, 0.0f, 0.9f, temporal <= 0.0f ? "off" : "%.2f"))
+                    config->DlssNrCacheTemporal = std::clamp(temporal, 0.0f, 0.9f);
+
+                HelpMarker("Blends what is shown with last frame's, moved along the motion vectors -- but only"
+                           "\nwithin the range this frame's own neighbourhood spans, as TAA does. What the model"
+                           "\nre-decides from frame to frame (flicker, dark specks, detail that swims) is averaged"
+                           "\nout; anything genuinely new is let through at once, so nothing trails."
+                           "\n\nWith frame generation it matters twice: the generated frames are built from two real"
+                           "\nones, and an edit that flickers between them becomes ghosting in every frame between."
+                           "\n0 is off; 0.5 is a good default; higher is steadier and slower to change.");
+
                 bool crossfade = config->DlssNrCacheCrossfade.value_or_default();
 
                 if (ImGui::Checkbox("Smooth model updates", &crossfade))

@@ -308,6 +308,10 @@ struct NrState
     LARGE_INTEGER autoWhiteLast {};
     bool autoWhiteSnap = true;
 
+    // How long the scene has read far darker than the value in use: a fade, a loading screen, a menu --
+    // or a genuinely dark place, if it lasts.
+    double autoWhiteDarkFor = 0.0;
+
     // Whether the setting was on last frame, so the off->on edge can be caught.
     //
     // Deliberately the SETTING and not `wantExposure`: the texture itself comes and goes between
@@ -521,6 +525,7 @@ void CheckCaptureTrigger()
             else if (k == "CacheStabilize") c->DlssNrCacheStabilize = v;
             else if (k == "CacheDespeckle") c->DlssNrCacheDespeckle = b;
             else if (k == "CacheCrossfade") c->DlssNrCacheCrossfade = b;
+            else if (k == "CacheTemporal") c->DlssNrCacheTemporal = v;
             else if (k == "CacheModelHistory") c->DlssNrCacheModelHistory = (uint32_t) v;
             else if (k == "CacheDumpFrames") c->DlssNrCacheDumpFrames = (uint32_t) v;
             else if (k == "WhitePointSource") c->DlssNrWhitePointSource = (uint32_t) v;
@@ -1179,24 +1184,51 @@ void ConsumeAutoWhite(bool snap)
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
 
-    if (!g_nr.autoWhiteValid || snap || g_nr.autoWhiteSnap)
+    // Only the very first reading is taken whole. A reset used to snap too, but a reset is where the
+    // fades are: the game cuts to black, the white point snapped to the black, and the next scene was
+    // shown to the model blown out while the value climbed back -- a flash at every cut.
+    (void) snap;
+
+    if (!g_nr.autoWhiteValid || g_nr.autoWhiteSnap)
     {
-        g_nr.autoWhiteLog = targetLog;
+        if (!g_nr.autoWhiteValid)
+            g_nr.autoWhiteLog = targetLog;
+
         g_nr.autoWhiteValid = true;
         g_nr.autoWhiteSnap = false;
+        g_nr.autoWhiteDarkFor = 0.0;
+        g_nr.autoWhiteLast = now;
+        return;
+    }
+
+    LARGE_INTEGER f;
+    QueryPerformanceFrequency(&f);
+    const double dt = std::clamp((double) (now.QuadPart - g_nr.autoWhiteLast.QuadPart) / f.QuadPart, 0.0, 0.25);
+    g_nr.autoWhiteLast = now;
+
+    // A scene suddenly five stops or more darker than the value in use is a fade, a loading screen or a
+    // menu far more often than a place: the value is held through it, and only follows once the dark
+    // has lasted two seconds (a real cave, a night interior).
+    if (targetLog < g_nr.autoWhiteLog - 5.0f)
+    {
+        g_nr.autoWhiteDarkFor += dt;
+
+        if (g_nr.autoWhiteDarkFor < 2.0)
+            return;
     }
     else
     {
-        // An eye adapting, not a meter jumping: about 0.4 s to cover most of a change, independent of
-        // the frame rate.
-        LARGE_INTEGER f;
-        QueryPerformanceFrequency(&f);
-        const double dt = std::clamp((double) (now.QuadPart - g_nr.autoWhiteLast.QuadPart) / f.QuadPart, 0.0, 0.25);
-        const float a = 1.0f - (float) std::exp(-dt / 0.4);
-        g_nr.autoWhiteLog += (targetLog - g_nr.autoWhiteLog) * a;
+        g_nr.autoWhiteDarkFor = 0.0;
     }
 
-    g_nr.autoWhiteLast = now;
+    // An eye adapting, not a meter jumping, and slower than it was (0.4 s): the white point decides what
+    // the model is shown for the whole frame, so every lunge of it -- the sky panning into view -- made
+    // the model's whole answer pump. About a second toward brighter, two toward darker, and never more
+    // than three stops a second whatever the scene does.
+    const float tau = targetLog > g_nr.autoWhiteLog ? 0.8f : 1.6f;
+    const float a = 1.0f - (float) std::exp(-dt / tau);
+    const float maxStep = 3.0f * (float) dt;
+    g_nr.autoWhiteLog += std::clamp((targetLog - g_nr.autoWhiteLog) * a, -maxStep, maxStep);
 }
 
 // Forget everything the meter knows, so nothing read before this moment can be believed after it.
