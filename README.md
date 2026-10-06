@@ -1,131 +1,132 @@
 # OptiScaler DLSS 5
 
-Fork d'[OptiScaler](https://github.com/optiscaler/OptiScaler), basé sur
-[OptiScaler_DLSSNR](https://github.com/Dagherbou/OptiScaler_DLSSNR) de Dagherbou, qui fait tourner
-DLSS 5 Neural Rendering pour beaucoup moins cher et avec moins de scintillement. Base OptiScaler :
-`master` du 6 octobre 2026.
+A fork of [OptiScaler](https://github.com/optiscaler/OptiScaler), built on Dagherbou's
+[OptiScaler_DLSSNR](https://github.com/Dagherbou/OptiScaler_DLSSNR), that runs DLSS 5 Neural Rendering
+for a fraction of its usual cost and with less flicker. OptiScaler base: `master` as of 6 October 2026.
 
-Le modèle NVIDIA (`nvngx_dlssnr.dll`) n'est pas fourni.
+NVIDIA's model (`nvngx_dlssnr.dll`) is not included.
 
-## Résultats
+## Results
 
-Control Resonant, RTX 4070, 2560x1440, DLSS Équilibré (rendu interne 1484x835). Les FPS sont les
-images calculées par le jeu, génération d'images exclue. Même scène, caméra fixe, 8 s de mesure par
-mode après 3 s de stabilisation.
+Control Resonant, RTX 4070, 2560x1440, DLSS Balanced (1484x835 internal). FPS is frames the game
+actually renders, frame generation excluded. Same scene, fixed camera, 3 s warm-up then 8 s measured
+per mode.
 
-| Mode | FPS | 1 % low | Coût DLSS 5 | Scintillement | Détail ajouté |
+| Mode | FPS | 1% low | DLSS 5 cost | Flicker | Added detail |
 |---|---:|---:|---:|---:|---:|
-| DLSS 5 désactivé | 62,2 | 28,3 | - | 0,30 % | - |
-| DLSS 5 d'origine (OptiScaler) | 34,4 | 15,1 | 13,0 ms | 0,57 % | +12 % |
-| **Quality** : pre-SR, modèle à chaque image | **46,7** (+36 %) | 23,3 | 5,5 ms | 0,40 % | +13 % |
-| Balanced : après SR, modèle à 67 %, 1 image sur 2 | 48,1 (+40 %) | 18,5 | 4,7 ms | 0,42 % | +15 % |
-| **Performance** : pre-SR, 1 image sur 2 | **55,3** (+61 %) | 24,3 | 2,9 ms | 0,47 % | +10 % |
+| DLSS 5 off | 62.2 | 28.3 | - | 0.30% | - |
+| DLSS 5 as OptiScaler ships it | 34.4 | 15.1 | 13.0 ms | 0.57% | +12% |
+| **Quality**: pre-SR, model every frame | **46.7** (+36%) | 23.3 | 5.5 ms | 0.40% | +13% |
+| Balanced: after SR, model at 67%, every other frame | 48.1 (+40%) | 18.5 | 4.7 ms | 0.42% | +15% |
+| **Performance**: pre-SR, every other frame | **55.3** (+61%) | 24.3 | 2.9 ms | 0.47% | +10% |
 
-- **Scintillement** : variation moyenne de luminosité d'une image à la suivante, caméra immobile,
-  sans les 5 % de pixels les plus animés (le mode désactivé donne le bruit propre au jeu).
-- **Détail ajouté** : micro-contraste de l'image par rapport à DLSS 5 désactivé, sur la partie fixe
-  de la scène.
+- **Flicker**: average frame-to-frame brightness change with the camera still, ignoring the 5% of
+  pixels that move the most (the "off" row is the game's own noise).
+- **Added detail**: local contrast of the image compared with DLSS 5 off, on the static part of the
+  scene.
 
-### Face aux autres DLSS 5
+### Against the other DLSS 5 builds
 
-Même scène, chaque outil sur ses réglages les plus rapides (coût journalisé par chaque outil, FPS
-estimés de la même façon pour tous) :
+Same scene, each tool on its fastest settings. Cost is what each tool logs for its own pass; FPS is
+estimated the same way for all of them (see the method in the comparison doc).
 
-| | Coût DLSS 5 | FPS estimés | Scintillement | Détail |
+| | DLSS 5 cost | Est. FPS | Flicker | Detail |
 |---|---:|---:|---:|---:|
-| **Ce fork, Performance** | **2,89 ms** | **52,7** | 0,40 % | x1,19 |
-| F5 v0.1.27, DetailReuse | 3,50 ms | 51,1 | 0,52 % | x1,23 |
-| ShyVortex v0.9.34, pre-SR 75 % | 3,74 ms | 50,5 | 0,37 % | x1,11 |
-| F5 v0.1.27, pre-SR | 4,85 ms | 47,8 | 0,41 % | x1,25 |
-| ShyVortex v0.9.34, pre-SR 100 % | 5,35 ms | 46,7 | 0,45 % | x1,34 |
-| **Ce fork, Quality** | 5,53 ms | 46,3 | **0,36 %** | x1,32 |
+| **This fork, Performance** | **2.89 ms** | **52.7** | 0.40% | x1.19 |
+| F5 v0.1.27, DetailReuse | 3.50 ms | 51.1 | 0.52% | x1.23 |
+| ShyVortex v0.9.34, pre-SR 75% | 3.74 ms | 50.5 | 0.37% | x1.11 |
+| F5 v0.1.27, pre-SR | 4.85 ms | 47.8 | 0.41% | x1.25 |
+| ShyVortex v0.9.34, pre-SR 100% | 5.35 ms | 46.7 | 0.45% | x1.34 |
+| **This fork, Quality** | 5.53 ms | 46.3 | 0.36% | x1.32 |
 
-L'addon RenoDX DLSS5 ne s'enclenche pas dans Control Resonant (ou fige le jeu avec les hooks
-Streamline), il n'a pas pu être mesuré.
+The RenoDX DLSS5 add-on (19 September build) never engaged in Control Resonant, or froze the game with
+its Streamline hooks on, so it could not be measured.
 
-### Styles et multi-pass
+### Model styles and multi-pass
 
-Même scène, réglage Quality (pre-SR, modèle à chaque image) :
+Same scene, Quality preset (pre-SR, model every frame):
 
-| | FPS | Coût DLSS 5 | Scintillement | Détail | Effet |
+| | FPS | DLSS 5 cost | Flicker | Detail | Effect |
 |---|---:|---:|---:|---:|---:|
-| DLSS 5 d'origine | 35,0 | 13,1 ms | 0,43-0,52 % | x1,11 | 0,29 stop |
-| Style Default, 1 passe | 47,7 | 5,5 ms | 0,38-0,40 % | x1,12 | 0,29 stop |
-| Style Natural | 47,6 | 5,6 ms | 0,36 % | x1,19 | 0,28 stop |
-| Style Cinematic | 47,1 | 5,6 ms | 0,42 % | x0,87 | 0,25 stop |
-| 2 passes | 37,6 | 10,8 ms | 0,47 % | x1,25 | 0,44 stop |
-| 2 passes, modèle 1 image sur 2 | 48,0 | 5,5 ms | 0,63 % | x1,18 | 0,43 stop |
+| DLSS 5 as OptiScaler ships it | 35.0 | 13.1 ms | 0.43-0.52% | x1.11 | 0.29 stop |
+| Style Default, 1 pass | 47.7 | 5.5 ms | 0.38-0.40% | x1.12 | 0.29 stop |
+| Style Natural | 47.6 | 5.6 ms | 0.36% | x1.19 | 0.28 stop |
+| Style Cinematic | 47.1 | 5.6 ms | 0.42% | x0.87 | 0.25 stop |
+| 2 passes | 37.6 | 10.8 ms | 0.47% | x1.25 | 0.44 stop |
+| 2 passes, model every other frame | 48.0 | 5.5 ms | 0.63% | x1.18 | 0.43 stop |
 
-Deux passes en mode Performance donnent l'effet renforcé du multi-pass pour le coût d'une passe
-classique, au prix d'un peu plus de scintillement.
+Two passes in Performance give you the stronger multi-pass look for the cost of a normal single pass,
+with a bit more flicker.
 
-Détail des mesures et méthode : [docs/comparaison.md](docs/comparaison.md).
+Full numbers and method: [docs/comparison.md](docs/comparison.md).
 
-![Comparaison](docs/benchmark/zoom.jpg)
+![Comparison](docs/benchmark/zoom.jpg)
 
-### Pourquoi le compteur du jeu ne montre pas toujours le gain
+### Why the in-game FPS counter may not show it
 
-Avec la génération d'images (MFG x2 à x6), le compteur affiché multiplie les images calculées puis
-plafonne à la fréquence de l'écran. En x6 sur un écran 240 Hz, 31 FPS de base donnent 186 et 48 en
-donneraient 288, mais l'écran coupe vers 225 : les deux semblent proches alors que l'un calcule 55 %
-d'images réelles en plus. La touche F6 affiche le vrai chiffre.
+With frame generation (MFG x2 to x6), the counter multiplies the frames the game renders and then
+stops at your refresh rate. At x6 on a 240 Hz screen, 31 base fps shows as 186 and 48 would be 288,
+but the screen caps around 225, so both look about the same even though one renders 55% more real
+frames. Dynamic MFG makes it worse: it picks the multiplier that hits its target no matter what. Press
+F6 in game to see the real number.
 
-## Ce qui change
+## What it changes
 
-- **Cache de correction** : le modèle ne tourne qu'une image sur N. Ce qu'il change (un rapport par
-  pixel, jamais l'image) est reprojeté avec les vecteurs de mouvement, validé pixel par pixel
-  (profondeur, couleur) et réappliqué sur l'image fraîche du jeu.
-- **Pre-SR** : le modèle tourne sur l'image en résolution de rendu, juste avant DLSS Super
-  Resolution, qui agrandit ensuite le résultat. Environ trois fois moins de pixels à traiter, et
-  l'accumulation temporelle de DLSS lisse ce que le modèle ajoute.
-- **Point blanc automatique** : mesuré sur chaque scène avant le passage du modèle, plus de
-  « paper white » à régler à la main.
-- **Anti-scintillement** : stabilisateur temporel de la correction, mises à jour lissées entre deux
-  passages du modèle, despeckle, stabilisation de luminance par zones (écrans OLED).
-- **Modèle à résolution réduite** avec agrandissement guidé par les contours (placement après SR).
-- **Multi-pass** (1 à 3 passes) : le modèle repasse sur sa propre réponse, chaque passe avec son
-  propre historique, et la composition se fait une seule fois. Chaque passe est créée une image avant
-  d'être utilisée, ce qui évite le blocage GPU qui l'avait fait retirer du fork d'origine.
-- **Style du modèle** (Default, Natural, Cinematic) choisi à côté des presets.
-- **Comparaison en direct** : F6 bascule optimisé / d'origine / désactivé sans toucher aux réglages,
-  avec les FPS réels à l'écran.
-- **Benchmark intégré** : les modes à la suite, une capture de chacun, et un rapport HTML.
+- **Edit cache**: the model only runs every N frames. What it changed (a per-pixel ratio, never the
+  image itself) is reprojected with the motion vectors, validated per pixel (depth, colour) and laid
+  back onto the game's fresh frame.
+- **Pre-SR**: the model runs on the render-resolution image right before DLSS Super Resolution, which
+  then upscales the result. About three times fewer pixels to process, and DLSS's own temporal
+  accumulation smooths what the model adds.
+- **Automatic white point**: measured from each scene before the model sees it. No more paper white
+  slider to babysit.
+- **Anti-flicker**: temporal stabiliser on the edit, smoothed updates between model runs, despeckle,
+  regional luminance stabilisation (helps a lot on OLED).
+- **Reduced model resolution** with edge-aware upscaling of the result (after-SR placement).
+- **Multi-pass** (1 to 3 passes): the model runs again on its own answer, each pass with its own
+  history, composed once. Each pass is built one frame before it is used, which avoids the GPU hang
+  that got multi-pass removed from the original fork.
+- **Model style** (Default, Natural, Cinematic) right next to the presets.
+- **Live comparison**: F6 cycles optimised / vanilla / off without touching your settings and shows
+  the real rendered FPS on screen.
+- **Built-in benchmark**: runs the modes back to back, captures each one and writes an HTML report.
 
-Tout s'active et se désactive dans le menu OptiScaler et dans `OptiScaler.ini`. Désactivé, le
-comportement est celui d'origine.
+Everything can be turned on and off from the OptiScaler menu and from `OptiScaler.ini`. Turned off,
+it behaves exactly like the original.
 
-## Installation
+## Install
 
-Avec le paquet de la page Releases : lancer `INSTALLER.bat` et glisser le dossier du jeu (celui de
-l'exécutable). L'installeur choisit un nom de fichier libre (`winmm.dll`, ou `OptiScaler.asi` si un
-ASI Loader est présent) et n'écrase rien. `DESINSTALLER.bat` remet tout comme avant.
+From the Releases page: run `INSTALLER.bat` and drop the game folder (the one with the exe) onto it.
+The installer picks a free file name (`winmm.dll`, or `OptiScaler.asi` if there is an ASI loader) and
+never overwrites anything. `DESINSTALLER.bat` puts everything back.
 
-Il faut une carte RTX, un pilote récent, Python, et `nvngx_dlssnr.dll` (l'installeur le cherche dans
-le dossier du jeu ou dans `%LOCALAPPDATA%\RHI\DLSS-NR`).
+You need an RTX card, a recent driver, Python, and `nvngx_dlssnr.dll` (the installer looks for it in
+the game folder and in `%LOCALAPPDATA%\RHI\DLSS-NR`).
 
-En jeu : activer DLSS, menu OptiScaler avec la touche Inser, section « DLSS Neural Rendering ».
+In game: turn DLSS on, open the OptiScaler menu with Insert, then the **DLSS 5** tab.
 
-## Compiler
+## Build
 
-Visual Studio 2026 Build Tools (toolset v145) :
+Visual Studio 2026 Build Tools (toolset v145):
 
 ```
 msbuild OptiScaler\OptiScaler.vcxproj /p:Configuration=Release /p:Platform=x64 /p:PlatformToolset=v145
 ```
 
-Le shader du cache se recompile avec `fxc`, celui de la composition avec `dxc` : voir
-[OptiScaler/dlssnr/README.md](OptiScaler/dlssnr/README.md) et
+The cache shader is compiled with `fxc`, the composition shader with `dxc`: see
+[OptiScaler/dlssnr/README.md](OptiScaler/dlssnr/README.md) and
 [OptiScaler/dlssnr/design/edit-cache.md](OptiScaler/dlssnr/design/edit-cache.md).
-`deploy/install.py` installe le build dans un jeu.
+`deploy/install.py` installs a build into a game.
 
-## Licence et crédits
+## License and credits
 
-GPL-3.0, comme OptiScaler. Le README d'origine est dans [README_OptiScaler.md](README_OptiScaler.md).
+GPL-3.0, like OptiScaler. The original OptiScaler README is in
+[README_OptiScaler.md](README_OptiScaler.md).
 
-- OptiScaler : cdozdil et l'équipe OptiScaler.
-- Intégration de DLSS 5 Neural Rendering : Dagherbou.
-- Composition couleur reprise de l'addon DLSS 5 de RenoDX (clshortfuse, licence MIT) : voir
+- OptiScaler: cdozdil and the OptiScaler team.
+- DLSS 5 Neural Rendering integration: Dagherbou.
+- Colour composition taken from the RenoDX DLSS 5 add-on (clshortfuse, MIT license): see
   [Licenses/RenoDX_ATTRIBUTION.txt](Licenses/RenoDX_ATTRIBUTION.txt).
 
-Projet non officiel, sans lien avec NVIDIA. Il utilise une fonction non documentée du pilote ;
-`nvngx_dlssnr.dll` appartient à NVIDIA et n'est pas redistribué ici.
+Unofficial project, not affiliated with NVIDIA. It uses an undocumented driver feature;
+`nvngx_dlssnr.dll` belongs to NVIDIA and is not redistributed here.
