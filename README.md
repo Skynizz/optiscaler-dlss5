@@ -1,5 +1,11 @@
 # OptiScaler DLSS 5
 
+<p align="center">
+  <a href="https://github.com/Skynizz/optiscaler-dlss5/releases/latest/download/DLSS5-Optimised.zip"><img src="https://img.shields.io/badge/Download-DLSS5--Optimised.zip-2ea44f?style=for-the-badge&logo=github" alt="Download"></a>
+  <a href="https://github.com/Skynizz/optiscaler-dlss5/releases"><img src="https://img.shields.io/github/downloads/Skynizz/optiscaler-dlss5/total?style=for-the-badge&label=Downloads&color=blue" alt="Downloads"></a>
+  <a href="https://github.com/Skynizz/optiscaler-dlss5/releases/latest"><img src="https://img.shields.io/github/v/release/Skynizz/optiscaler-dlss5?style=for-the-badge&label=Latest" alt="Latest release"></a>
+</p>
+
 A fork of [OptiScaler](https://github.com/optiscaler/OptiScaler), built on Dagherbou's
 [OptiScaler_DLSSNR](https://github.com/Dagherbou/OptiScaler_DLSSNR), that runs DLSS 5 Neural Rendering
 for a fraction of its usual cost and with less flicker. OptiScaler base: `master` as of 6 October 2026.
