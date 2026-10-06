@@ -203,6 +203,12 @@ struct NrState
     // every index here equal to the pass number it belongs to.
     void* passFeature[4] = {};
 
+    // Multi-pass: each extra pass's first evaluate resets its history, and the copy of the previous
+    // pass's answer the next pass reads (the model cannot read and write one resource).
+    bool passReset[4] = { true, true, true, true };
+    ID3D12Resource* passIn = nullptr;
+    unsigned int passesRun = 1;
+
     // The model cannot read and write one resource, so the frame is staged through these.
     ID3D12Resource* colorCopy = nullptr;
     ID3D12Resource* output = nullptr;
@@ -420,6 +426,26 @@ float EffWorkScale(const Config& cfg) { return ActiveCompare() == 1 ? 1.0f : cfg
 
 bool EffJbu(const Config& cfg) { return ActiveCompare() != 1 && cfg.DlssNrJbuUpsample.value_or_default(); }
 
+// The benchmark's style and pass-count phases override these two for the length of a phase.
+int g_benchStyle = -1;
+int g_benchPasses = -1;
+
+// The model's style: the user's, everywhere, vanilla included -- it is a look, not an optimisation.
+uint32_t EffStyle(const Config& cfg)
+{
+    return g_benchStyle >= 0 ? (uint32_t) g_benchStyle : std::min(cfg.DlssNrStyle.value_or_default(), 2u);
+}
+
+// How many times the model runs on a frame it runs on. Vanilla is one pass, as OptiScaler ships it.
+unsigned int EffPasses(const Config& cfg)
+{
+    if (ActiveCompare() == 1)
+        return 1;
+
+    const unsigned int p = g_benchPasses > 0 ? (unsigned int) g_benchPasses : cfg.DlssNrPasses.value_or_default();
+    return std::clamp(p, 1u, 3u);
+}
+
 // The state the upscaler leaves its output in, and every pass here hands it back in.
 D3D12_RESOURCE_STATES OutputRestState()
 {
@@ -595,6 +621,8 @@ void CheckCaptureTrigger()
             else if (k == "WhitePointScale") c->DlssNrWhitePointScale = v;
             else if (k == "WhitePointTrim") c->DlssNrWhitePointTrim = v;
             else if (k == "PreSr") c->DlssNrPreSr = b;
+            else if (k == "Passes") c->DlssNrPasses = (uint32_t) v;
+            else if (k == "Style") c->DlssNrStyle = (uint32_t) v;
             else if (k == "JitterSign") g_jitterSign = (int) v;
             else if (k == "ShowStats") c->DlssNrShowStats = b;
             else if (k == "Compare") DlssNr::SetCompareMode((DlssNr::CompareMode) (int) v);
@@ -621,8 +649,20 @@ void CheckCaptureTrigger()
 
     if (std::filesystem::exists(benchTrigger, ec))
     {
+        // Its content may ask for the extra phases: "styles" and/or "passes".
+        std::string wants;
+
+        if (FILE* tf = _wfopen(benchTrigger.wstring().c_str(), L"r"))
+        {
+            char buf[128] = {};
+            fread(buf, 1, sizeof(buf) - 1, tf);
+            fclose(tf);
+            wants = buf;
+        }
+
         std::filesystem::remove(benchTrigger, ec);
-        DlssNr::StartBenchmark(true, true, true);
+        DlssNr::StartBenchmark(true, wants.find("noother") == std::string::npos, true,
+                               wants.find("styles") != std::string::npos, wants.find("passes") != std::string::npos);
         LOG_INFO("DLSS-NR benchmark requested by trigger file");
     }
 }
@@ -931,7 +971,7 @@ void ReleaseSurfacesIfFormatChanged(DXGI_FORMAT needed)
         ParkNrFeature(f);
 
     for (ID3D12Resource** r :
-         { &g_nr.output, &g_nr.colorCopy, &g_nr.hdrCopy, &g_nr.colorSmall })
+         { &g_nr.output, &g_nr.passIn, &g_nr.colorCopy, &g_nr.hdrCopy, &g_nr.colorSmall })
         ParkNrResource(*r);
 
     g_nr.reset = true;
@@ -1664,7 +1704,7 @@ bool TuningMatchesFeature(const Config& cfg)
 {
     return g_nr.builtPreset == cfg.DlssNrPreset.value_or_default() &&
            g_nr.builtIntensity == cfg.DlssNrIntensity.value_or_default() &&
-           g_nr.builtStyle == cfg.DlssNrStyle.value_or_default() &&
+           g_nr.builtStyle == EffStyle(cfg) &&
            g_nr.builtLocalStructure == cfg.DlssNrLocalStructure.value_or_default() &&
            g_nr.builtLocalTone == cfg.DlssNrLocalTone.value_or_default() &&
            g_nr.builtSkinStructure == cfg.DlssNrSkinStructure.value_or_default() &&
@@ -1675,7 +1715,7 @@ void RecordBuiltTuning(const Config& cfg)
 {
     g_nr.builtPreset = cfg.DlssNrPreset.value_or_default();
     g_nr.builtIntensity = cfg.DlssNrIntensity.value_or_default();
-    g_nr.builtStyle = cfg.DlssNrStyle.value_or_default();
+    g_nr.builtStyle = EffStyle(cfg);
     g_nr.builtLocalStructure = cfg.DlssNrLocalStructure.value_or_default();
     g_nr.builtLocalTone = cfg.DlssNrLocalTone.value_or_default();
     g_nr.builtSkinStructure = cfg.DlssNrSkinStructure.value_or_default();
@@ -2064,6 +2104,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         if (resolutionChanged)
         {
             ParkNrResource(g_nr.output);
+            ParkNrResource(g_nr.passIn);
             ParkNrResource(g_nr.colorCopy);
             ParkNrResource(g_nr.hdrCopy);
             ParkNrResource(g_nr.colorSmall);
@@ -2142,7 +2183,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             g_nr.create(snippet->wstring().c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(),
                         device, cmdList, g_nr.capabilityParams, workWidth, workHeight,
                         (int) cfg.DlssNrPreset.value_or_default(),
-                        cfg.DlssNrIntensity.value_or_default(), (int) cfg.DlssNrStyle.value_or_default(),
+                        cfg.DlssNrIntensity.value_or_default(), (int) EffStyle(cfg),
                         cfg.DlssNrLocalStructure.value_or_default(), cfg.DlssNrLocalTone.value_or_default(),
                         cfg.DlssNrSkinStructure.value_or_default(),
                         cfg.DlssNrAutoMask.value_or_default() ? 1 : 0,
@@ -2729,16 +2770,105 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     if (g_ngxTime != nullptr)
         g_ngxTime->Start(cmdList);
 
-    // Multi-pass was removed: re-feeding the model its own output re-opened the same-command-list
-    // feature-creation hang, and the colour core is not settled enough to build on. One evaluate.
-    const int result = g_nr.evaluate(
+    // Multi-pass (DlssNrPasses, 1 to 3), as RenoDX and the other forks do it: each extra pass runs the
+    // model again on the previous pass's answer, on a feature of its own with its own temporal history,
+    // and the composition below happens once, against the untouched proxy -- detail builds up from
+    // pass to pass while colour and tone are composed a single time.
+    //
+    // It was removed from this fork because each pass's feature was created and evaluated on the same
+    // command list in the same frame, which is the GPU hang the main feature already avoids. Here a pass
+    // feature is built on one frame and first evaluated on the next, one at a time, exactly like the
+    // main feature; until it is ready the frame simply runs the passes that are.
+    const unsigned int passesWanted = EffPasses(cfg);
+
+    for (unsigned int p = passesWanted; p < 4; ++p)
+    {
+        if (p > 0 && g_nr.passFeature[p] != nullptr)
+        {
+            LOG_INFO("DLSS-NR: pass {} released", p + 1);
+            ParkNrFeature(g_nr.passFeature[p]);
+        }
+    }
+
+    unsigned int passesReady = 1;
+
+    for (unsigned int p = 1; p < passesWanted; ++p)
+    {
+        if (g_nr.passFeature[p] != nullptr)
+        {
+            passesReady = p + 1;
+            continue;
+        }
+
+        auto snip = Util::FindFilePath(g_dllDir, "nvngx_dlssnr.dll");
+
+        if (!snip.has_value())
+            snip = Util::FindFilePath(Util::ExePath().remove_filename(), "nvngx_dlssnr.dll");
+
+        if (snip.has_value())
+        {
+            // The same tuning as the first pass, so a later pass refines the same look rather than
+            // starting another one (RenoDX's default: passes 2+ follow pass 1).
+            g_nr.passFeature[p] =
+                g_nr.create(snip->wstring().c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(), device,
+                            cmdList, g_nr.capabilityParams, workWidth, workHeight,
+                            (int) cfg.DlssNrPreset.value_or_default(), cfg.DlssNrIntensity.value_or_default(),
+                            (int) EffStyle(cfg), cfg.DlssNrLocalStructure.value_or_default(),
+                            cfg.DlssNrLocalTone.value_or_default(), cfg.DlssNrSkinStructure.value_or_default(),
+                            cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, 1);
+            g_nr.passReset[p] = true;
+
+            LOG_INFO("DLSS-NR: pass {} {} at {}x{}, first evaluated next frame", p + 1,
+                     g_nr.passFeature[p] != nullptr ? "built" : "FAILED to build", workWidth, workHeight);
+        }
+
+        // One build per frame, and never evaluated on the frame it was built.
+        break;
+    }
+
+    if (passesReady > 1 && g_nr.passIn == nullptr)
+    {
+        g_nr.passIn = CreateScratch(device, desc.Format, workWidth, workHeight);
+
+        if (g_nr.passIn == nullptr)
+            passesReady = 1;
+    }
+
+    int result = g_nr.evaluate(
         cmdList, g_nr.feature, g_nr.capabilityParams, modelInput, depthIn, motionIn, g_nr.output,
         workWidth, workHeight, guideWidth, guideHeight, g_nr.guideDepthInverted ? 1 : 0,
         g_nr.reset ? 1 : 0, cfg.DlssNrIntensity.value_or_default(),
-        (int) cfg.DlssNrStyle.value_or_default(), cfg.DlssNrLocalStructure.value_or_default(),
+        (int) EffStyle(cfg), cfg.DlssNrLocalStructure.value_or_default(),
         cfg.DlssNrLocalTone.value_or_default(), cfg.DlssNrSkinStructure.value_or_default(),
         cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, g_nr.guideMvScaleX * mvToWork,
         g_nr.guideMvScaleY * mvToWork);
+
+    for (unsigned int p = 1; p < passesReady && result == NVSDK_NGX_Result_Success; ++p)
+    {
+        // The previous pass's answer becomes this pass's input; the proxy the resolve compares
+        // against is left untouched.
+        Barrier(cmdList, g_nr.output, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        Barrier(cmdList, g_nr.passIn, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
+        cmdList->CopyResource(g_nr.passIn, g_nr.output);
+        Barrier(cmdList, g_nr.passIn, D3D12_RESOURCE_STATE_COPY_DEST,
+                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+        Barrier(cmdList, g_nr.output, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+
+        result = g_nr.evaluate(
+            cmdList, g_nr.passFeature[p], g_nr.capabilityParams, g_nr.passIn, depthIn, motionIn, g_nr.output,
+            workWidth, workHeight, guideWidth, guideHeight, g_nr.guideDepthInverted ? 1 : 0,
+            (g_nr.reset || g_nr.passReset[p]) ? 1 : 0, cfg.DlssNrIntensity.value_or_default(),
+            (int) EffStyle(cfg), cfg.DlssNrLocalStructure.value_or_default(),
+            cfg.DlssNrLocalTone.value_or_default(), cfg.DlssNrSkinStructure.value_or_default(),
+            cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, g_nr.guideMvScaleX * mvToWork,
+            g_nr.guideMvScaleY * mvToWork);
+
+        g_nr.passReset[p] = false;
+        Barrier(cmdList, g_nr.passIn, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+    }
+
+    g_nr.passesRun = passesReady;
 
     if (g_ngxTime != nullptr)
         g_ngxTime->End(cmdList);
@@ -3113,9 +3243,12 @@ int ComparisonFor(int phase)
     case 0: return (int) DlssNr::CompareMode::Off;
     case 1: return (int) DlssNr::CompareMode::Vanilla;
     case 3: return kCompareOtherPlacement;
-    default: return (int) DlssNr::CompareMode::Yours;
+    default: return (int) DlssNr::CompareMode::Yours; // 2, and the style and pass phases 4 to 7
     }
 }
+
+// The other pass count the pass phase measures: 2 if yours run one, else 1.
+int OtherPasses() { return Config::Instance()->DlssNrPasses.value_or_default() > 1 ? 1 : 2; }
 
 std::string PictureName(int phase) { return std::format("mode{}.png", phase); }
 
@@ -3130,6 +3263,10 @@ const char* PageName(int phase)
     case 3:
         return Config::Instance()->DlssNrPreSr.value_or_default() ? "DLSS 5 optimis&eacute;, apr&egrave;s l'upscaler"
                                                                    : "DLSS 5 optimis&eacute; + pre-SR";
+    case 4: return "Style Default";
+    case 5: return "Style Natural";
+    case 6: return "Style Cin&eacute;matique";
+    case 7: return OtherPasses() > 1 ? "Multi-pass : 2 passes" : "Multi-pass : 1 passe";
     default: return "?";
     }
 }
@@ -3141,7 +3278,11 @@ const char* PageColour(int phase)
     case 0: return "#8b949e";
     case 1: return "#f0883e";
     case 2: return "#3fb950";
-    default: return "#58a6ff";
+    case 3: return "#58a6ff";
+    case 4: return "#d2a8ff";
+    case 5: return "#79c0ff";
+    case 6: return "#ffa657";
+    default: return "#f778ba";
     }
 }
 
@@ -3150,6 +3291,8 @@ void BenchApplyPhase()
     g_bench.phase = g_bench.plan[g_bench.step];
     g_bench.capturing = false;
     g_benchCompare = ComparisonFor(g_bench.phase);
+    g_benchStyle = (g_bench.phase >= 4 && g_bench.phase <= 6) ? g_bench.phase - 4 : -1;
+    g_benchPasses = g_bench.phase == 7 ? OtherPasses() : -1;
     g_bench.frames.clear();
     g_bench.gpuSum = 0.0;
     g_bench.gpuCount = 0;
@@ -3494,6 +3637,8 @@ void WriteReport()
 void BenchEnd()
 {
     g_benchCompare = -1;
+    g_benchStyle = -1;
+    g_benchPasses = -1;
     g_bench.active = false;
     g_bench.capturing = false;
 
@@ -3633,11 +3778,16 @@ const char* BenchmarkPhaseName(int phase)
     case 3:
         return Config::Instance()->DlssNrPreSr.value_or_default() ? "DLSS 5, your settings, after the upscaler"
                                                                    : "DLSS 5, your settings, pre-SR";
+    case 4: return "DLSS 5, your settings, style Default";
+    case 5: return "DLSS 5, your settings, style Natural";
+    case 6: return "DLSS 5, your settings, style Cinematic";
+    case 7: return OtherPasses() > 1 ? "DLSS 5, your settings, 2 passes" : "DLSS 5, your settings, 1 pass";
     default: return "?";
     }
 }
 
-void StartBenchmark(bool includeOff, bool includeOtherPlacement, bool captures)
+void StartBenchmark(bool includeOff, bool includeOtherPlacement, bool captures, bool includeStyles,
+                    bool includePasses)
 {
     if (g_bench.active)
         return;
@@ -3663,6 +3813,17 @@ void StartBenchmark(bool includeOff, bool includeOtherPlacement, bool captures)
     if (includeOtherPlacement)
         g_bench.plan.push_back(3);
 
+    // The three looks of the model, on your settings: each rebuilds the model, which the warm-up covers.
+    if (includeStyles)
+    {
+        g_bench.plan.push_back(4);
+        g_bench.plan.push_back(5);
+        g_bench.plan.push_back(6);
+    }
+
+    if (includePasses)
+        g_bench.plan.push_back(7);
+
     std::time_t t = std::time(nullptr);
     std::tm local {};
     localtime_s(&local, &t);
@@ -3675,8 +3836,10 @@ void StartBenchmark(bool includeOff, bool includeOtherPlacement, bool captures)
     g_bench.renderWidth = g_bench.renderHeight = 0;
 
     // What "your settings" is, written on the page so a result says what it measured.
+    static const char* kStyleNames[] = { "Default", "Natural", "Cin&eacute;matique" };
     g_bench.settings = std::format(
-        "Mod&egrave;le {:.0f}%{} &middot; {} &middot; cache {} &middot; point blanc {}",
+        "Style {} &middot; {} passe(s) &middot; mod&egrave;le {:.0f}%{} &middot; {} &middot; cache {} &middot; point blanc {}",
+        kStyleNames[std::min(cfg.DlssNrStyle.value_or_default(), 2u)], std::clamp(cfg.DlssNrPasses.value_or_default(), 1u, 3u),
         cfg.DlssNrWorkingScale.value_or_default() * 100.0f,
         cfg.DlssNrJbuUpsample.value_or_default() ? " + agrandissement guid&eacute;" : "",
         cfg.DlssNrPreSr.value_or_default() ? "avant l'upscaler (pre-SR)" : "apr&egrave;s l'upscaler",
@@ -3698,6 +3861,8 @@ void StartBenchmark(bool includeOff, bool includeOtherPlacement, bool captures)
 void CancelBenchmark()
 {
     g_benchCompare = -1;
+    g_benchStyle = -1;
+    g_benchPasses = -1;
     g_bench.active = false;
     g_bench.capturing = false;
 }
@@ -3779,6 +3944,8 @@ LiveStats GetLiveStats()
     s.cache = s.enabled && EffCache(cfg);
     s.nrMs = s.enabled && g_nr.feature != nullptr ? g_avgGpuTime : 0.0;
     s.modelWidth = g_nr.workWidth;
+    s.passes = s.enabled ? g_nr.passesRun : 0;
+    s.style = EffStyle(cfg);
     s.modelHeight = g_nr.workHeight;
     s.benchmark = g_bench.active;
     s.mode = g_bench.active ? BenchmarkPhaseName(g_bench.phase) : CompareModeName((CompareMode) g_userCompare);
@@ -4447,6 +4614,12 @@ void Shutdown()
     {
         g_preSr.tex->Release();
         g_preSr.tex = nullptr;
+    }
+
+    if (g_nr.passIn != nullptr)
+    {
+        g_nr.passIn->Release();
+        g_nr.passIn = nullptr;
     }
 
     g_preSr = {};

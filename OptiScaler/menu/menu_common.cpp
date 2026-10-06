@@ -8110,6 +8110,7 @@ void MenuCommon::RenderMainMenuTabs(RenderMenuContext& ctx)
     static const Tab tabs[] = {
         { "MAIN", "Custom", "Boxes picked in Menu > Custom Tab.", RenderCustomTab },
         { "MAIN", "Upscaling", "Backend, sharpness and output scaling.", RenderUpscalerStateMessage },
+        { "MAIN", "DLSS 5", "Neural Rendering: presets, live comparison (F6) and benchmark." },
         { "MAIN", "Frame Gen", "Frame generation source, output and pacing." },
         { "MAIN", "Latency & FPS", "Frame limiter, low latency and V-Sync." },
         { "SYSTEM", "Textures", "Mipmap bias and anisotropic filtering." },

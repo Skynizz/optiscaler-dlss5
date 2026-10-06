@@ -74,6 +74,8 @@ struct LiveStats
     double nrMs = 0.0;        // the pass on the GPU, averaged
     unsigned int modelWidth = 0;
     unsigned int modelHeight = 0;
+    unsigned int passes = 1;  // model passes run on the last frame the model ran
+    unsigned int style = 0;   // 0 default, 1 natural, 2 cinematic
 };
 
 LiveStats GetLiveStats();
@@ -202,7 +204,9 @@ void RequestCacheDump();
 // frames only -- frame generation is excluded on purpose. Each phase ends with a capture: a picture and
 // a flicker figure. The page goes to dlssnr-benchmark/<date>/rapport.html beside OptiScaler, and
 // dlssnr-benchmark.html always opens the latest.
-constexpr int kBenchmarkPhases = 4; // off, vanilla, yours, yours at the other placement
+// off, vanilla, yours, yours at the other placement, yours in styles Default / Natural / Cinematic,
+// yours with the other pass count (2 if yours run one, else 1)
+constexpr int kBenchmarkPhases = 8;
 
 struct BenchmarkResult
 {
@@ -234,7 +238,8 @@ struct BenchmarkStatus
     std::string report; // the page of the last finished run, empty until there is one
 };
 
-void StartBenchmark(bool includeOff, bool includeOtherPlacement, bool captures);
+void StartBenchmark(bool includeOff, bool includeOtherPlacement, bool captures, bool includeStyles = false,
+                    bool includePasses = false);
 void CancelBenchmark();
 BenchmarkStatus GetBenchmarkStatus();
 const char* BenchmarkPhaseName(int phase);

@@ -223,11 +223,14 @@ void RenderMenu(Config* config, float menuResScale)
                                     : live.compare == DlssNr::CompareMode::Vanilla ? ImVec4(0.95f, 0.6f, 0.3f, 1.0f)
                                                                                    : ImVec4(0.4f, 0.9f, 0.5f, 1.0f);
 
+                static const char* kStyleShort[] = { "Default", "Natural", "Cinematic" };
+
                 if (live.enabled)
-                    ImGui::TextColored(tint, "%.1f fps rendered - DLSS 5 pass %.2f ms - model %ux%u %s%s", live.renderedFps,
-                                       live.nrMs, live.modelWidth, live.modelHeight,
+                    ImGui::TextColored(tint, "%.1f fps rendered - DLSS 5 pass %.2f ms - model %ux%u %s%s - %s, %u pass%s",
+                                       live.renderedFps, live.nrMs, live.modelWidth, live.modelHeight,
                                        live.preSr ? "before the upscaler" : "after the upscaler",
-                                       live.cache ? ", edit cache on" : "");
+                                       live.cache ? ", edit cache on" : "", kStyleShort[std::min(live.style, 2u)],
+                                       live.passes, live.passes > 1 ? "es" : "");
                 else
                     ImGui::TextColored(tint, "%.1f fps rendered - Neural Rendering off", live.renderedFps);
             }
@@ -244,13 +247,15 @@ void RenderMenu(Config* config, float menuResScale)
         {
             static bool includeOff = true;
             static bool includeOther = true;
+            static bool includeStyles = false;
+            static bool includePasses = false;
             static bool captures = true;
             const auto bs = DlssNr::GetBenchmarkStatus();
 
             if (!bs.active)
             {
                 if (ImGui::Button("Run the benchmark"))
-                    DlssNr::StartBenchmark(includeOff, includeOther, captures);
+                    DlssNr::StartBenchmark(includeOff, includeOther, captures, includeStyles, includePasses);
 
                 ImGui::SameLine();
                 ImGui::Checkbox("NR off too", &includeOff);
@@ -259,6 +264,10 @@ void RenderMenu(Config* config, float menuResScale)
                                 &includeOther);
                 ImGui::SameLine();
                 ImGui::Checkbox("Captures", &captures);
+
+                ImGui::Checkbox("The 3 styles", &includeStyles);
+                ImGui::SameLine();
+                ImGui::Checkbox(config->DlssNrPasses.value_or_default() > 1 ? "1 pass too" : "2 passes too", &includePasses);
             }
             else
             {
@@ -431,6 +440,46 @@ void RenderMenu(Config* config, float menuResScale)
                        "\ntemporal accumulation steadies what the model adds. Model resolution and edge-aware"
                        "\nenlargement do not apply: the render resolution is already reduced."
                        "\n\nD3D12 games that go through DLSS Super Resolution. Switching rebuilds the model once.");
+
+            // The model's look. Moved up from the Model section: it changes the picture more than any
+            // other single setting, and it is the first thing to match when comparing with RenoDX.
+            int style = (int) std::min(config->DlssNrStyle.value_or_default(), 2u);
+            ImGui::TextUnformatted("Model style:");
+            ImGui::SameLine();
+
+            if (ImGui::RadioButton("Default##style", style == 0))
+                config->DlssNrStyle = 0u;
+
+            ImGui::SameLine();
+
+            if (ImGui::RadioButton("Natural##style", style == 1))
+                config->DlssNrStyle = 1u;
+
+            ImGui::SameLine();
+
+            if (ImGui::RadioButton("Cinematic##style", style == 2))
+                config->DlssNrStyle = 2u;
+
+            HelpMarker("The model's own processing profiles -- the biggest single difference in look."
+                       "\n\nDefault: the strongest. Boosts local contrast and deepens lighting, and can"
+                       "\noversaturate or look stylised."
+                       "\nNatural: the same detail work with a gentler hand; skin tones and tonal balance"
+                       "\nstay closer to what the game rendered. RenoDX setups often use this one."
+                       "\nCinematic: tones down the shine and over-processing for a film-like look."
+                       "\n\nRead when the model is built, so a change rebuilds it after a moment. The names"
+                       "\ncome from community testing; NVIDIA ships no names in the binaries.");
+
+            int passes = (int) std::clamp(config->DlssNrPasses.value_or_default(), 1u, 3u);
+
+            if (ImGui::SliderInt("Model passes", &passes, 1, 3))
+                config->DlssNrPasses = (uint32_t) std::clamp(passes, 1, 3);
+
+            HelpMarker("Multi-pass, as in RenoDX: the model runs again on its own answer, each pass on a"
+                       "\nmodel of its own with its own temporal history, and the result is composed once"
+                       "\nagainst the game's frame -- detail builds up, colour does not compound."
+                       "\n\nEach pass costs a full model run on the frames where the model runs (every frame,"
+                       "\nor one in N with the edit cache). A new pass is built on one frame and used from the"
+                       "\nnext, so raising this never hitches the GPU. 1 is the usual single pass.");
         }
 
         const bool preSrOn = config->DlssNrPreSr.value_or_default();
@@ -930,25 +979,6 @@ void RenderMenu(Config* config, float menuResScale)
         HelpMarker("Default leaves the choice to the model."
                        "\n\nNot the same scale as the super resolution or ray reconstruction presets --"
                        "\nthe same number means something different here.");
-
-        static const char* nrStyleNames[] = { "Default (standard)", "Natural", "Cinematic" };
-        int style = (int) config->DlssNrStyle.value_or_default();
-
-        if (style > 2)
-            style = 2;
-
-        if (ImGui::Combo("Style", &style, nrStyleNames, IM_ARRAYSIZE(nrStyleNames)))
-            config->DlssNrStyle = (uint32_t) style;
-
-        HelpMarker("The model's own processing profiles."
-                   "\n\nDefault (standard): the strongest. Boosts local contrast and deepens"
-                   "\nlighting, and can oversaturate or look stylised -- most of what reads as"
-                   "\n'the model changed my game's look' is this profile."
-                   "\n\nNatural: the same detail work with a gentler hand. Keeps skin tones and"
-                   "\ntonal balance closer to what the game rendered."
-                   "\n\nCinematic: tones down the shine and over-processing for a film-like look."
-                   "\n\nRead when the model is built, so a change rebuilds it after a moment. The"
-                   "\nnames come from community testing; NVIDIA ships no names in the binaries.");
 
         DeferredSlider("Intensity", &config->DlssNrIntensity, 0.0f, 2.0f, 1.0f);
 
