@@ -1,7 +1,7 @@
 # OptiScaler DLSS 5
 
 <p align="center">
-  <a href="https://github.com/Skynizz/optiscaler-dlss5/releases/latest/download/DLSS5-Optimised.zip"><img src="https://img.shields.io/badge/Download-DLSS5--Optimised.zip-2ea44f?style=for-the-badge&logo=github" alt="Download"></a>
+  <a href="https://github.com/Skynizz/optiscaler-dlss5/releases/download/v1.1.0/OptiScaler-DLSS5-1.1.0-win-x64.zip"><img src="https://img.shields.io/badge/Download-v1.1.0-2ea44f?style=for-the-badge&logo=github" alt="Download"></a>
   <a href="https://github.com/Skynizz/optiscaler-dlss5/releases"><img src="https://img.shields.io/github/downloads/Skynizz/optiscaler-dlss5/total?style=for-the-badge&label=Downloads&color=blue" alt="Downloads"></a>
   <a href="https://github.com/Skynizz/optiscaler-dlss5/releases/latest"><img src="https://img.shields.io/github/v/release/Skynizz/optiscaler-dlss5?style=for-the-badge&label=Latest" alt="Latest release"></a>
 </p>
@@ -102,7 +102,8 @@ it behaves exactly like the original.
 
 ## Install
 
-From the Releases page: run `INSTALLER.bat` and drop the game folder (the one with the exe) onto it.
+Download `OptiScaler-DLSS5-1.1.0-win-x64.zip` from the [Releases](https://github.com/Skynizz/optiscaler-dlss5/releases)
+page, unzip it, run `INSTALLER.bat` and drop the game folder (the one with the exe) onto it.
 The installer picks a free file name (`winmm.dll`, or `OptiScaler.asi` if there is an ASI loader) and
 never overwrites anything. `DESINSTALLER.bat` puts everything back.
 
@@ -112,6 +113,13 @@ the game folder and in `%LOCALAPPDATA%\RHI\DLSS-NR`).
 In game: turn DLSS on, open the OptiScaler menu with Insert, then the **DLSS 5** tab.
 
 ## Build
+
+Full source with every submodule: `OptiScaler-DLSS5-1.1.0-source.zip` on the release page (GitHub's
+own "Source code" archives leave the submodules out, so they will not build). Or clone it:
+
+```
+git clone --recursive https://github.com/Skynizz/optiscaler-dlss5.git
+```
 
 Visual Studio 2026 Build Tools (toolset v145):
 
