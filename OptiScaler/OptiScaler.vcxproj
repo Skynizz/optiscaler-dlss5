@@ -423,6 +423,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="dlssnr\DlssNrFeature_Vk.h" />
     <ClInclude Include="dlssnr\DlssNr_ExposureScan.h" />
     <ClInclude Include="shaders\dlssnr\DlssNr_EditCache_Dx12.h" />
+    <ClInclude Include="shaders\dlssnr\DlssNr_Shot_Dx12.h" />
     <ClInclude Include="shaders\dlssnr\DlssNr_CacheCommon.h" />
     <ClInclude Include="shaders\dlssnr\precompile\DlssNr_Cache_Shader.h" />
     <ClInclude Include="shaders\render_ui\precompile\render_ui_pm_PShader.h" />
@@ -832,6 +833,7 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="inputs\NVNGX_DLSS_Dx11.cpp" />
     <ClCompile Include="shaders\dlssnr\DlssNr_Dx12.cpp" />
     <ClCompile Include="shaders\dlssnr\DlssNr_EditCache_Dx12.cpp" />
+    <ClCompile Include="shaders\dlssnr\DlssNr_Shot_Dx12.cpp" />
     <ClCompile Include="shaders\dlssnr\DlssNr_Vk.cpp" />
     <ClCompile Include="dlssnr\DlssNrFeature_Vk.cpp" />
     <ClCompile Include="dlssnr\DlssNr_ExposureScan.cpp" />

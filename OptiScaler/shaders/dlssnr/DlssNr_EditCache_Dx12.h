@@ -39,7 +39,6 @@ struct DlssNrCacheInputs
 {
     ID3D12Resource* depth = nullptr;       // readable: the guide itself, or the main pass's typed clone
     ID3D12Resource* motion = nullptr;      // readable, likewise
-    ID3D12Resource* depthSource = nullptr; // the game's own depth, which may carry a stencil plane
 
     unsigned int depthWidth = 0; // the valid region of each, as the main pass worked it out
     unsigned int depthHeight = 0;
@@ -61,17 +60,10 @@ struct DlssNrCacheInputs
 
     // The composition's highlight guard: no carried edit may move a pixel further than it could.
     float maxRatio = 2.0f;
-};
 
-// Spread refresh: one band of this frame, already run through the model and resolved, to merge into the
-// carried history. resolved is band-local (row 0 = y0) and in NON_PIXEL_SHADER_RESOURCE.
-struct DlssNrCacheBand
-{
-    ID3D12Resource* resolved = nullptr;
-    unsigned int y0 = 0;
-    unsigned int height = 0;
-    unsigned int feather = 0;
-    unsigned int edges = 0; // bit 0 touches the top of the frame, bit 1 the bottom
+    // Pre-SR: the change of camera jitter since last frame, in uv (0 after the upscaler).
+    float jitterDeltaX = 0.0f;
+    float jitterDeltaY = 0.0f;
 };
 
 // Several dispatches a frame -- up to seven on a refresh with a dump -- and frame generation can keep
@@ -89,7 +81,6 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
         unsigned int framesSinceRefresh = 0;
         float lastRejected = 0.0f;       // the most recent frame's rejected fraction
         float cumulativeRejected = 0.0f; // since the last refresh
-        bool stencilAvailable = false;
         const char* lastRefreshReason = "";
         int regime = 1; // 0 still, 1 moving, 2 fast
         unsigned int dumpWritten = 0;
@@ -101,8 +92,9 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
 
     // Decides this frame. True means the model must run (a refresh); false means a cached frame.
     // Call once per frame while the cache is active, before anything else here.
+    // preSr: the frame is the game's jittered render, before its upscaler (see BeginFrame).
     bool BeginFrame(const Config& cfg, ID3D12Device* device, unsigned int width, unsigned int height,
-                    DXGI_FORMAT format, bool reset);
+                    DXGI_FORMAT format, bool reset, bool preSr = false);
 
     // Forget the history: the next active frame is a refresh.
     void Invalidate();
@@ -110,24 +102,7 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
     // A cached frame: target (UNORDERED_ACCESS, holding the upscaler's frame) is rewritten as that frame
     // times the carried edit. keep (UNORDERED_ACCESS) receives the untouched frame on the way.
     bool RunCached(ID3D12GraphicsCommandList* cmd, ID3D12Device* device, ID3D12Resource* target,
-                   ID3D12Resource* keep, const DlssNrCacheInputs& in, const DlssNrCacheBand* band = nullptr);
-
-    // Spread refresh: the model runs on one horizontal band of every frame instead of the whole frame
-    // one frame in N, so every frame costs about the same. Latched in BeginFrame.
-    bool Spread() const { return _spread; }
-    unsigned int Bands() const { return _bands; }
-    unsigned int NextBand() { return (unsigned int) (_bandCounter++ % _bands); }
-
-    // Spread refresh, every frame: keeps each band's accumulated motion current.
-    void AccumulateBands(ID3D12GraphicsCommandList* cmd, ID3D12Device* device, const DlssNrCacheInputs& in);
-
-    // Spread refresh: rows [offsetY, offsetY + height) of depth and of motion (the band's accumulated
-    // motion when the model history policy asks for it, else the game's), for the band's model. Both
-    // come back in NON_PIXEL_SHADER_RESOURCE; FinishCrop returns them to rest.
-    bool CropGuides(ID3D12GraphicsCommandList* cmd, ID3D12Device* device, const DlssNrCacheInputs& in,
-                    unsigned int band, unsigned int offsetY, unsigned int height, ID3D12Resource** depthOut,
-                    ID3D12Resource** motionOut);
-    void FinishCrop(ID3D12GraphicsCommandList* cmd);
+                   ID3D12Resource* keep, const DlssNrCacheInputs& in);
 
     // A refresh, before the model is evaluated: the motion vectors to hand it, so its own history is
     // reprojected across every frame it skipped. Returns nullptr to keep the game's own. resetModel is
@@ -155,10 +130,10 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
                                   ID3D12Resource* smallModel, bool passthrough, float sigma);
     void FinishUpsample(ID3D12GraphicsCommandList* cmd);
 
-    // The automatic white point's local map: this frame's tile means (meter, R32F 64x64, UNORDERED_ACCESS)
-    // smoothed into a log2 map, returned in NON_PIXEL_SHADER_RESOURCE where it stays until the next call.
-    ID3D12Resource* SmoothLocalMap(ID3D12GraphicsCommandList* cmd, ID3D12Device* device, ID3D12Resource* meter,
-                                   bool reset);
+    // Pre-SR: copies the game's render-resolution colour (src, readable as it is handed to DLSS) into dst
+    // (UNORDERED_ACCESS, the pass's own texture), which stays in UNORDERED_ACCESS. Nothing of the game's
+    // own is written or transitioned.
+    bool CopyIn(ID3D12GraphicsCommandList* cmd, ID3D12Resource* src, ID3D12Resource* dst);
 
     // Writes a run of consecutive frames for the offline measurement script. The model runs on every
     // one of them, so each frame has its own ground truth.
@@ -207,10 +182,10 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
     ID3D12Resource* _level[kDlssNrCachePyramidLevels] = {};
     ID3D12Resource* _levelGuide = nullptr;
 
-    // One accumulator per band (slot 0 is the whole frame's when not spreading), two textures each.
-    ID3D12Resource* _accMv[kDlssNrCacheMaxBands][2] = {};
-    unsigned int _accCur[kDlssNrCacheMaxBands] = {};
-    bool _accReset[kDlssNrCacheMaxBands] = { true, true, true, true };
+    // The motion since the model last ran, ping-ponged.
+    ID3D12Resource* _accMv[2] = {};
+    unsigned int _accCur = 0;
+    bool _accReset = true;
     bool _accInModelState = false;
     DXGI_FORMAT _accFormat = DXGI_FORMAT_UNKNOWN;
     unsigned int _accWidth = 0;
@@ -222,26 +197,10 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
     bool _statsPending[kDlssNrCacheStatSlots] = {};
     unsigned int _statsSlot = 0;
 
-    ID3D12Resource* _stencilClone = nullptr;
-    bool _stencilBound = false;
-
     ID3D12Resource* _modelUp = nullptr;
-
-    ID3D12Resource* _localMap[2] = {};
-    unsigned int _localCur = 0;
-    bool _localValid = false;
-
-    ID3D12Resource* _bandDepth = nullptr;
-    ID3D12Resource* _bandMotion = nullptr;
-    bool _cropInUse = false;
-
-    bool _spread = false;
-    unsigned int _bands = 2;
-    unsigned long long _bandCounter = 0;
 
     ID3D12Resource* _dummySrv = nullptr;
     ID3D12Resource* _dummyUav = nullptr;
-    ID3D12Resource* _dummyStencil = nullptr;
 
     // This frame's exposure texture, bound to every pass at t10 (a stand-in when there is none).
     ID3D12Resource* _exposure = nullptr;
@@ -273,10 +232,6 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
     bool _despeckle = true;
     unsigned int _debugView = 0;
     unsigned int _modelHistory = 1;
-    bool _stencilWanted = false;   // read the plane at all: priority on, or the stencil debug view
-    bool _stencilPriority = false; // treat matching pixels as priority
-    unsigned int _stencilMask = 0;
-    unsigned int _stencilRef = 0;
 
     // The measurement dump.
     struct DumpFrame
@@ -299,11 +254,8 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
     void Park(ID3D12Resource*& res);
     void TickRetired();
 
-    void PrepareStencil(ID3D12GraphicsCommandList* cmd, ID3D12Device* device, const DlssNrCacheInputs& in);
-    void RestoreStencil(ID3D12GraphicsCommandList* cmd);
-
-    void Accumulate(ID3D12GraphicsCommandList* cmd, const DlssNrCacheInputs& in, unsigned int slot);
-    bool EnsureAccumulatorSlot(ID3D12Device* device, ID3D12Resource* motion, unsigned int slot);
+    void Accumulate(ID3D12GraphicsCommandList* cmd, const DlssNrCacheInputs& in);
+    bool EnsureAccumulator(ID3D12Device* device, ID3D12Resource* motion);
     void BuildCoarseLevels(ID3D12GraphicsCommandList* cmd);
     void ApplyPass(ID3D12GraphicsCommandList* cmd, ID3D12Resource* target, ID3D12Resource* original,
                    const DlssNrCacheInputs& in);

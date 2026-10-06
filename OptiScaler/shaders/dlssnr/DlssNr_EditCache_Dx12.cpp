@@ -119,20 +119,6 @@ DXGI_FORMAT ReadableFormat(DXGI_FORMAT f)
     }
 }
 
-// The stencil plane's view format, when the depth buffer has one. Plane 1 of a planar depth format.
-DXGI_FORMAT StencilViewFormat(DXGI_FORMAT f)
-{
-    switch (f)
-    {
-    case DXGI_FORMAT_R24G8_TYPELESS:
-        return DXGI_FORMAT_X24_TYPELESS_G8_UINT;
-    case DXGI_FORMAT_R32G8X24_TYPELESS:
-        return DXGI_FORMAT_X32_TYPELESS_G8X24_UINT;
-    default:
-        return DXGI_FORMAT_UNKNOWN;
-    }
-}
-
 void MakeSrv(ID3D12Device* device, ID3D12Resource* res, D3D12_CPU_DESCRIPTOR_HANDLE handle,
              DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN, UINT plane = 0)
 {
@@ -244,9 +230,8 @@ DlssNrEditCache_Dx12::DlssNrEditCache_Dx12(ID3D12Device* device) : Shader_Dx12("
     // Stand-ins for the slots a mode does not use. An unbound descriptor is a read from nothing.
     _dummySrv = CreateTexture(device, DXGI_FORMAT_R16G16B16A16_FLOAT, 1, 1, false, kSrv);
     _dummyUav = CreateTexture(device, DXGI_FORMAT_R16G16B16A16_FLOAT, 1, 1, true, kUav);
-    _dummyStencil = CreateTexture(device, DXGI_FORMAT_R32G32_UINT, 1, 1, false, kSrv);
 
-    if (_dummySrv == nullptr || _dummyUav == nullptr || _dummyStencil == nullptr)
+    if (_dummySrv == nullptr || _dummyUav == nullptr)
     {
         LOG_ERROR("[{0}] Could not create the stand-in textures", _name);
         return;
@@ -268,7 +253,6 @@ DlssNrEditCache_Dx12::~DlssNrEditCache_Dx12()
 
     SAFE_RELEASE(_dummySrv);
     SAFE_RELEASE(_dummyUav);
-    SAFE_RELEASE(_dummyStencil);
 }
 
 void DlssNrEditCache_Dx12::Park(ID3D12Resource*& res)
@@ -298,19 +282,13 @@ void DlssNrEditCache_Dx12::TickRetired()
 
 void DlssNrEditCache_Dx12::ReleaseAll(bool immediately)
 {
-    // The local map is frame-size independent; it goes with the rest only at shutdown.
-    if (immediately)
-    {
-        SAFE_RELEASE(_localMap[0]);
-        SAFE_RELEASE(_localMap[1]);
-    }
-
     _finalValid = false;
 
-    ID3D12Resource** all[] = { &_finalRaw, &_finalHist[0], &_finalHist[1], &_histTarget[0], &_histTarget[1],
+    // The pre-SR copy target belongs to the caller and is not here.
+    ID3D12Resource** all[] = { &_finalRaw,  &_finalHist[0], &_finalHist[1], &_histTarget[0], &_histTarget[1],
                                &_histEdit[0], &_histEdit[1], &_histGuide[0], &_histGuide[1], &_level[0],
-                               &_level[1],    &_level[2],    &_levelGuide,   &_bandDepth,    &_bandMotion,
-                               &_stats,       &_stencilClone, &_modelUp };
+                               &_level[1],  &_level[2],     &_levelGuide,   &_stats,         &_modelUp,
+                               &_accMv[0],  &_accMv[1] };
 
     for (ID3D12Resource** r : all)
     {
@@ -321,21 +299,6 @@ void DlssNrEditCache_Dx12::ReleaseAll(bool immediately)
         else
         {
             Park(*r);
-        }
-    }
-
-    for (auto& slot : _accMv)
-    {
-        for (auto*& a : slot)
-        {
-            if (immediately)
-            {
-                SAFE_RELEASE(a);
-            }
-            else
-            {
-                Park(a);
-            }
         }
     }
 
@@ -424,16 +387,12 @@ bool DlssNrEditCache_Dx12::EnsureResources(ID3D12Device* device, unsigned int wi
     _height = height;
     _format = format;
     _historyValid = false;
-    for (bool& r : _accReset)
-        r = true;
+    _accReset = true;
     return true;
 }
 
-bool DlssNrEditCache_Dx12::EnsureAccumulatorSlot(ID3D12Device* device, ID3D12Resource* motion, unsigned int slot)
+bool DlssNrEditCache_Dx12::EnsureAccumulator(ID3D12Device* device, ID3D12Resource* motion)
 {
-    if (slot >= kDlssNrCacheMaxBands)
-        return false;
-
     const D3D12_RESOURCE_DESC md = motion->GetDesc();
     const DXGI_FORMAT readable = ReadableFormat(md.Format);
 
@@ -441,39 +400,36 @@ bool DlssNrEditCache_Dx12::EnsureAccumulatorSlot(ID3D12Device* device, ID3D12Res
     const DXGI_FORMAT want = (readable == DXGI_FORMAT_R32G32_FLOAT) ? DXGI_FORMAT_R32G32_FLOAT
                                                                     : DXGI_FORMAT_R16G16_FLOAT;
 
-    // Every slot accumulates the same motion texture, so a change of its shape retires all of them.
+    // A change of the motion texture's shape retires the accumulator.
     if (_accWidth != (unsigned int) md.Width || _accHeight != md.Height || _accFormat != want)
     {
-        for (auto& pair : _accMv)
-            for (auto*& a : pair)
-                Park(a);
+        for (auto*& a : _accMv)
+            Park(a);
 
         _accInModelState = false;
         _accWidth = (unsigned int) md.Width;
         _accHeight = md.Height;
         _accFormat = want;
-
-        for (bool& r : _accReset)
-            r = true;
+        _accReset = true;
     }
 
-    if (_accMv[slot][0] != nullptr && _accMv[slot][1] != nullptr)
+    if (_accMv[0] != nullptr && _accMv[1] != nullptr)
         return true;
 
-    for (auto*& a : _accMv[slot])
+    for (auto*& a : _accMv)
     {
         Park(a);
         a = CreateTexture(device, want, (unsigned int) md.Width, md.Height, true, kUav);
     }
 
-    if (_accMv[slot][0] == nullptr || _accMv[slot][1] == nullptr)
+    if (_accMv[0] == nullptr || _accMv[1] == nullptr)
     {
-        Park(_accMv[slot][0]);
-        Park(_accMv[slot][1]);
+        Park(_accMv[0]);
+        Park(_accMv[1]);
         return false;
     }
 
-    _accReset[slot] = true;
+    _accReset = true;
     return true;
 }
 
@@ -481,12 +437,11 @@ void DlssNrEditCache_Dx12::Invalidate()
 {
     _finalValid = false;
     _historyValid = false;
-    for (bool& r : _accReset)
-        r = true;
+    _accReset = true;
 }
 
 bool DlssNrEditCache_Dx12::BeginFrame(const Config& cfg, ID3D12Device* device, unsigned int width,
-                                      unsigned int height, DXGI_FORMAT format, bool reset)
+                                      unsigned int height, DXGI_FORMAT format, bool reset, bool preSr)
 {
     ++_frame;
     TickRetired();
@@ -506,35 +461,18 @@ bool DlssNrEditCache_Dx12::BeginFrame(const Config& cfg, ID3D12Device* device, u
     _bilateral = cfg.DlssNrCacheBilateral.value_or_default();
     _stabilize = std::clamp(cfg.DlssNrCacheStabilize.value_or_default(), 0.0f, 4.0f);
     _despeckle = cfg.DlssNrCacheDespeckle.value_or_default();
-    _temporal = std::clamp(cfg.DlssNrCacheTemporal.value_or_default(), 0.0f, 0.9f);
+    // Before the upscaler, the high band's temporal blend and the keyframe crossfade (below) stand aside.
+    // Each model answer there belongs to one jitter -- the scene sampled a fraction of a pixel elsewhere
+    // -- so blending two answers lays two copies of the detail a fraction of a pixel apart, and the
+    // upscaler, whose own accumulation already does this job properly, averages them into blur
+    // (measured in Control: detail x1.05 with them, x1.15 without, against x1.20 for vanilla).
+    // The regional light (luminance stability) is broad enough not to care, and stays.
+    _temporal = preSr ? 0.0f : std::clamp(cfg.DlssNrCacheTemporal.value_or_default(), 0.0f, 0.9f);
     _lowTemporal = std::clamp(cfg.DlssNrCacheLowTemporal.value_or_default(), 0.0f, 0.95f);
     _debugView = cfg.DlssNrCacheDebugView.value_or_default();
     _modelHistory = cfg.DlssNrCacheModelHistory.value_or_default();
-    _stencilPriority = cfg.DlssNrCacheStencil.value_or_default();
-    _stencilWanted = _stencilPriority || _debugView == 4;
-    _stencilMask = cfg.DlssNrCacheStencilMask.value_or_default();
-    _stencilRef = cfg.DlssNrCacheStencilRef.value_or_default();
 
     const unsigned int interval = std::clamp(cfg.DlssNrCacheInterval.value_or_default(), 1u, 16u);
-
-    // Spread refresh: the interval becomes the number of bands, so the model's cost per frame is
-    // about 1/N of a full run -- every frame, rather than all of it every Nth frame.
-    const bool spread = cfg.DlssNrCacheSpread.value_or_default() && interval >= 2;
-
-    if (spread != _spread)
-    {
-        for (bool& r : _accReset)
-            r = true;
-    }
-
-    _spread = spread;
-    _bands = std::clamp(interval, 2u, kDlssNrCacheMaxBands);
-
-    // Spreading, every pixel is refreshed every few frames, so its detail has no time to go stale. A
-    // decay then only makes each band's detail fade and snap back at the band rate -- a pulse of
-    // twenty-odd cycles a second, read as the bands stuttering. Validation still drops what moved.
-    if (_spread)
-        _highDecay = 1.0f;
     const bool adaptive = cfg.DlssNrCacheAdaptive.value_or_default();
     const float threshold = std::clamp(cfg.DlssNrCacheAdaptiveThreshold.value_or_default(), 0.001f, 1.0f);
 
@@ -546,15 +484,12 @@ bool DlssNrEditCache_Dx12::BeginFrame(const Config& cfg, ID3D12Device* device, u
         why = "the game or the model reset";
     else if (_dumpWanted > 0 && !_dumpObserve)
         why = "measurement dump";
-    else if (_spread)
-        why = nullptr; // every frame refreshes one band instead
     else if (_frame - _lastRefresh >= (_intervalNow = EffectiveInterval(interval, adaptive, threshold)))
         why = _regime == 0 ? "interval (still: slower)" : _regime == 2 ? "interval (fast motion: faster)" : "interval";
 
     // Keyframe crossfade step for this frame: the share of the remaining way to the model's latest answer,
-    // so the shown edit reaches it exactly when the model runs next. Not with spread refresh, where
-    // every frame already brings a band of fresh answer.
-    _crossfadeOn = cfg.DlssNrCacheCrossfade.value_or_default() && !_spread;
+    // so the shown edit reaches it exactly when the model runs next.
+    _crossfadeOn = cfg.DlssNrCacheCrossfade.value_or_default() && !preSr;
     const unsigned int intervalNow = std::max(1u, _intervalNow);
     const unsigned int since = (unsigned int) (_frame - _lastRefresh);
 
@@ -643,17 +578,14 @@ void DlssNrEditCache_Dx12::ConsumeStats()
         if (FAILED(_statsReadback[s]->Map(0, &range, &mapped)) || mapped == nullptr)
             continue;
 
-        const uint32_t* v = (const uint32_t*) mapped;
-        const uint32_t rejected = v[s * 2];
-        const uint32_t rejectedPriority = v[s * 2 + 1];
+        const uint32_t rejected = ((const uint32_t*) mapped)[s];
 
         D3D12_RANGE nothing { 0, 0 };
         _statsReadback[s]->Unmap(0, &nothing);
 
         const float total = (float) std::max(1u, _width * _height);
 
-        // Priority pixels count four times over: a revealed character matters more than revealed sky.
-        const float fraction = std::min(1.0f, (rejected + 3.0f * rejectedPriority) / total);
+        const float fraction = std::min(1.0f, rejected / total);
         _lastRejected = fraction;
 
         // How much is being revealed, smoothed over a few readings: the motion the regimes follow.
@@ -687,9 +619,6 @@ DlssNrCacheConstants DlssNrEditCache_Dx12::BaseConstants(const DlssNrCacheInputs
     c.HighGain = _highGain;
     c.Bilateral = _bilateral ? 1u : 0u;
     c.DebugView = _debugView;
-    c.StencilEnabled = (_stencilBound ? 1u : 0u) | (_stencilBound && _stencilPriority ? 2u : 0u);
-    c.StencilMask = _stencilMask;
-    c.StencilRef = _stencilRef;
     c.StatsSlot = _statsSlot;
     c.Passthrough = in.passthrough ? 1u : 0u;
     c.FrameIndex = (uint32_t) _frame;
@@ -703,6 +632,8 @@ DlssNrCacheConstants DlssNrEditCache_Dx12::BaseConstants(const DlssNrCacheInputs
     c.Temporal = _debugView == 0 ? _temporal : 0.0f;
     c.LowTemporal = _lowTemporal;
     c.TemporalValid = _finalValid ? 1u : 0u;
+    c.JitterDeltaX = in.jitterDeltaX;
+    c.JitterDeltaY = in.jitterDeltaY;
     return c;
 }
 
@@ -723,17 +654,6 @@ bool DlssNrEditCache_Dx12::Pass(ID3D12GraphicsCommandList* cmd, const DlssNrCach
         {
             MakeSrv(_device, srv[10] != nullptr ? srv[10] : (_exposure != nullptr ? _exposure : _dummySrv),
                     heap.GetSrvCPU(10));
-            continue;
-        }
-
-        if (i == 9)
-        {
-            // The stencil plane: plane 1 of the depth buffer's own typeless format.
-            if (srv[9] != nullptr)
-                MakeSrv(_device, srv[9], heap.GetSrvCPU(9), StencilViewFormat(srv[9]->GetDesc().Format), 1);
-            else
-                MakeSrv(_device, _dummyStencil, heap.GetSrvCPU(9));
-
             continue;
         }
 
@@ -762,78 +682,13 @@ bool DlssNrEditCache_Dx12::Pass(ID3D12GraphicsCommandList* cmd, const DlssNrCach
     return true;
 }
 
-void DlssNrEditCache_Dx12::PrepareStencil(ID3D12GraphicsCommandList* cmd, ID3D12Device* device,
-                                          const DlssNrCacheInputs& in)
+void DlssNrEditCache_Dx12::Accumulate(ID3D12GraphicsCommandList* cmd, const DlssNrCacheInputs& in)
 {
-    _stencilBound = false;
-
-    if (!_stencilWanted || in.depthSource == nullptr)
+    if (_modelHistory != 1 || _accMv[0] == nullptr || in.motion == nullptr)
         return;
 
-    const D3D12_RESOURCE_DESC sd = in.depthSource->GetDesc();
-
-    if (StencilViewFormat(sd.Format) == DXGI_FORMAT_UNKNOWN)
-    {
-        static bool said = false;
-
-        if (!said)
-        {
-            said = true;
-            LOG_INFO("DLSS-NR edit cache: the depth buffer ({}) has no stencil plane, priority is off",
-                     (int) sd.Format);
-        }
-
-        return;
-    }
-
-    if (_stencilClone != nullptr)
-    {
-        const D3D12_RESOURCE_DESC have = _stencilClone->GetDesc();
-
-        if (have.Width != sd.Width || have.Height != sd.Height || have.Format != sd.Format)
-            Park(_stencilClone);
-    }
-
-    if (_stencilClone == nullptr)
-    {
-        D3D12_RESOURCE_DESC desc = sd;
-        desc.Flags &= ~D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE;
-
-        D3D12_HEAP_PROPERTIES heap {};
-        heap.Type = D3D12_HEAP_TYPE_DEFAULT;
-
-        if (FAILED(device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &desc, D3D12_RESOURCE_STATE_COPY_DEST,
-                                                   nullptr, IID_PPV_ARGS(&_stencilClone))))
-        {
-            _stencilClone = nullptr;
-            return;
-        }
-
-        LOG_INFO("DLSS-NR edit cache: reading the stencil plane of a {}x{} depth buffer (format {})",
-                 (unsigned int) sd.Width, sd.Height, (int) sd.Format);
-    }
-
-    // The same contract the main pass relies on: NGX inputs sit in NON_PIXEL_SHADER_RESOURCE.
-    Barrier(cmd, in.depthSource, kSrv, D3D12_RESOURCE_STATE_COPY_SOURCE);
-    cmd->CopyResource(_stencilClone, in.depthSource);
-    Barrier(cmd, in.depthSource, D3D12_RESOURCE_STATE_COPY_SOURCE, kSrv);
-    Barrier(cmd, _stencilClone, D3D12_RESOURCE_STATE_COPY_DEST, kSrv);
-    _stencilBound = true;
-}
-
-void DlssNrEditCache_Dx12::RestoreStencil(ID3D12GraphicsCommandList* cmd)
-{
-    if (_stencilBound && _stencilClone != nullptr)
-        Barrier(cmd, _stencilClone, kSrv, D3D12_RESOURCE_STATE_COPY_DEST);
-}
-
-void DlssNrEditCache_Dx12::Accumulate(ID3D12GraphicsCommandList* cmd, const DlssNrCacheInputs& in, unsigned int slot)
-{
-    if (_modelHistory != 1 || slot >= kDlssNrCacheMaxBands || _accMv[slot][0] == nullptr || in.motion == nullptr)
-        return;
-
-    ID3D12Resource* prev = _accMv[slot][_accCur[slot]];
-    ID3D12Resource* next = _accMv[slot][1 - _accCur[slot]];
+    ID3D12Resource* prev = _accMv[_accCur];
+    ID3D12Resource* next = _accMv[1 - _accCur];
 
     DlssNrCacheConstants c = BaseConstants(in);
     c.Mode = DlssNrCacheMode_AccumulateMv;
@@ -841,7 +696,7 @@ void DlssNrEditCache_Dx12::Accumulate(ID3D12GraphicsCommandList* cmd, const Dlss
     c.Height = std::min(in.motionHeight, _accHeight);
     c.SourceWidth = _accWidth;
     c.SourceHeight = _accHeight;
-    c.AccumulateReset = _accReset[slot] ? 1u : 0u;
+    c.AccumulateReset = _accReset ? 1u : 0u;
 
     Barrier(cmd, prev, kUav, kSrv);
     ID3D12Resource* srv[kSrvCount] = { nullptr, nullptr, nullptr, nullptr, in.motion, prev };
@@ -849,111 +704,8 @@ void DlssNrEditCache_Dx12::Accumulate(ID3D12GraphicsCommandList* cmd, const Dlss
     Pass(cmd, c, srv, uav, Groups(c.Width), Groups(c.Height));
     Barrier(cmd, prev, kSrv, kUav);
 
-    _accCur[slot] = 1 - _accCur[slot];
-    _accReset[slot] = false;
-}
-
-void DlssNrEditCache_Dx12::AccumulateBands(ID3D12GraphicsCommandList* cmd, ID3D12Device* device,
-                                           const DlssNrCacheInputs& in)
-{
-    if (_modelHistory != 1 || in.motion == nullptr)
-        return;
-
-    for (unsigned int b = 0; b < _bands; ++b)
-    {
-        if (EnsureAccumulatorSlot(device, in.motion, b))
-            Accumulate(cmd, in, b);
-    }
-}
-
-bool DlssNrEditCache_Dx12::CropGuides(ID3D12GraphicsCommandList* cmd, ID3D12Device* device,
-                                      const DlssNrCacheInputs& in, unsigned int band, unsigned int offsetY,
-                                      unsigned int height, ID3D12Resource** depthOut, ID3D12Resource** motionOut)
-{
-    if (!_init || in.depth == nullptr || in.motion == nullptr || height == 0)
-        return false;
-
-    const unsigned int width = std::max(in.depthWidth, 1u);
-
-    // The band's own accumulated motion when the policy is to accumulate; the game's otherwise.
-    ID3D12Resource* motion = in.motion;
-    DXGI_FORMAT motionFormat = DXGI_FORMAT_R16G16_FLOAT;
-
-    if (_modelHistory == 1 && band < kDlssNrCacheMaxBands && _accMv[band][_accCur[band]] != nullptr)
-    {
-        motion = _accMv[band][_accCur[band]];
-        motionFormat = _accFormat;
-        Barrier(cmd, motion, kUav, kSrv);
-    }
-    else if (ReadableFormat(in.motion->GetDesc().Format) == DXGI_FORMAT_R32G32_FLOAT)
-    {
-        motionFormat = DXGI_FORMAT_R32G32_FLOAT;
-    }
-
-    auto fits = [&](ID3D12Resource* r, DXGI_FORMAT f)
-    {
-        if (r == nullptr)
-            return false;
-
-        const D3D12_RESOURCE_DESC d = r->GetDesc();
-        return (unsigned int) d.Width == width && d.Height == height && d.Format == f;
-    };
-
-    if (!fits(_bandDepth, DXGI_FORMAT_R32_FLOAT))
-    {
-        Park(_bandDepth);
-        _bandDepth = CreateTexture(device, DXGI_FORMAT_R32_FLOAT, width, height, true, kUav);
-    }
-
-    if (!fits(_bandMotion, motionFormat))
-    {
-        Park(_bandMotion);
-        _bandMotion = CreateTexture(device, motionFormat, width, height, true, kUav);
-    }
-
-    bool ok = _bandDepth != nullptr && _bandMotion != nullptr;
-
-    if (ok)
-    {
-        DlssNrCacheConstants c = BaseConstants(in);
-        c.Mode = DlssNrCacheMode_CropGuides;
-        c.Width = width;
-        c.Height = height;
-        c.CropOffsetY = offsetY;
-
-        ID3D12Resource* srv[kSrvCount] = { nullptr, nullptr, nullptr, in.depth, motion };
-        ID3D12Resource* uav[kUavCount] = { _bandDepth, _bandMotion };
-        ok = Pass(cmd, c, srv, uav, Groups(width), Groups(height));
-    }
-
-    if (motion != in.motion)
-    {
-        Barrier(cmd, motion, kSrv, kUav);
-
-        // The band's model sees everything up to this frame; its accumulation starts again.
-        _accReset[band] = true;
-    }
-
-    if (!ok)
-        return false;
-
-    Barrier(cmd, _bandDepth, kUav, kSrv);
-    Barrier(cmd, _bandMotion, kUav, kSrv);
-    _cropInUse = true;
-
-    *depthOut = _bandDepth;
-    *motionOut = _bandMotion;
-    return true;
-}
-
-void DlssNrEditCache_Dx12::FinishCrop(ID3D12GraphicsCommandList* cmd)
-{
-    if (!_cropInUse)
-        return;
-
-    Barrier(cmd, _bandDepth, kSrv, kUav);
-    Barrier(cmd, _bandMotion, kSrv, kUav);
-    _cropInUse = false;
+    _accCur = 1 - _accCur;
+    _accReset = false;
 }
 
 void DlssNrEditCache_Dx12::BuildCoarseLevels(ID3D12GraphicsCommandList* cmd)
@@ -993,8 +745,7 @@ void DlssNrEditCache_Dx12::ApplyPass(ID3D12GraphicsCommandList* cmd, ID3D12Resou
     const bool stabilise = c.Temporal > 0.0f;
 
     ID3D12Resource* srv[kSrvCount] = { _histEdit[_cur], _histGuide[_cur], original, in.depth, nullptr,
-                                       _level[0],       _levelGuide,      _level[1], _level[2],
-                                       _stencilBound ? _stencilClone : nullptr };
+                                       _level[0],       _levelGuide,      _level[1], _level[2] };
     ID3D12Resource* uav[kUavCount] = { target, nullptr, nullptr, stabilise ? _finalRaw : nullptr };
     Pass(cmd, c, srv, uav, Groups(_width), Groups(_height));
 
@@ -1041,21 +792,15 @@ void DlssNrEditCache_Dx12::TemporalPass(ID3D12GraphicsCommandList* cmd, ID3D12Re
 }
 
 bool DlssNrEditCache_Dx12::RunCached(ID3D12GraphicsCommandList* cmd, ID3D12Device* device, ID3D12Resource* target,
-                                     ID3D12Resource* keep, const DlssNrCacheInputs& in, const DlssNrCacheBand* band)
+                                     ID3D12Resource* keep, const DlssNrCacheInputs& in)
 {
     if (!_init || target == nullptr || keep == nullptr || in.depth == nullptr || in.motion == nullptr)
         return false;
 
     _exposure = in.useGameExposure ? in.exposure : nullptr;
 
-    // Spread mode keeps its per-band accumulators current itself (AccumulateBands).
-    if (_modelHistory == 1 && !_spread)
-    {
-        if (EnsureAccumulatorSlot(device, in.motion, 0))
-            Accumulate(cmd, in, 0);
-    }
-
-    PrepareStencil(cmd, device, in);
+    if (_modelHistory == 1 && EnsureAccumulator(device, in.motion))
+        Accumulate(cmd, in);
 
     const unsigned int prev = _cur;
     const unsigned int next = 1 - _cur;
@@ -1085,21 +830,10 @@ bool DlssNrEditCache_Dx12::RunCached(ID3D12GraphicsCommandList* cmd, ID3D12Devic
 
     c.Mode = DlssNrCacheMode_Reproject;
 
-    const bool bandActive = band != nullptr && band->resolved != nullptr && band->height > 0;
-
-    if (bandActive)
     {
-        c.BandActive = 1;
-        c.BandY0 = band->y0;
-        c.BandHeight = band->height;
-        c.BandFeather = band->feather;
-        c.BandEdges = band->edges;
-    }
-
-    {
-        ID3D12Resource* srv[kSrvCount] = { _histEdit[prev], _histGuide[prev], target, in.depth, in.motion,
-                                           bandActive ? band->resolved : nullptr, nullptr, nullptr, nullptr,
-                                           _stencilBound ? _stencilClone : nullptr, nullptr, _histTarget[prev] };
+        ID3D12Resource* srv[kSrvCount] = { _histEdit[prev], _histGuide[prev], target,  in.depth,
+                                           in.motion,       nullptr,          nullptr, nullptr,
+                                           nullptr,         nullptr,          nullptr, _histTarget[prev] };
         ID3D12Resource* uav[kUavCount] = { _histEdit[next], _histGuide[next], keep, _level[0], _levelGuide, _stats,
                                            _histTarget[next] };
         Pass(cmd, c, srv, uav, Groups(_width), Groups(_height));
@@ -1151,8 +885,6 @@ bool DlssNrEditCache_Dx12::RunCached(ID3D12GraphicsCommandList* cmd, ID3D12Devic
     }
 
     Barrier(cmd, keep, kSrv, kUav);
-
-    RestoreStencil(cmd);
     return true;
 }
 
@@ -1167,26 +899,18 @@ ID3D12Resource* DlssNrEditCache_Dx12::ModelMotion(ID3D12GraphicsCommandList* cmd
         return nullptr;
     }
 
-    // Spread mode: a whole-frame run only happens after a cut or a reset, when the full model's history
-    // is from long ago anyway. The band accumulators belong to the bands.
-    if (_spread)
-    {
-        resetModel = true;
-        return nullptr;
-    }
-
-    if (_modelHistory != 1 || in.motion == nullptr || !EnsureAccumulatorSlot(device, in.motion, 0))
+    if (_modelHistory != 1 || in.motion == nullptr || !EnsureAccumulator(device, in.motion))
         return nullptr;
 
-    Accumulate(cmd, in, 0);
+    Accumulate(cmd, in);
 
     // Read by the model now; EndFrame puts it back.
-    Barrier(cmd, _accMv[0][_accCur[0]], kUav, kSrv);
+    Barrier(cmd, _accMv[_accCur], kUav, kSrv);
     _accInModelState = true;
 
     // The model has seen everything up to this frame; the next accumulation starts again from zero.
-    _accReset[0] = true;
-    return _accMv[0][_accCur[0]];
+    _accReset = true;
+    return _accMv[_accCur];
 }
 
 bool DlssNrEditCache_Dx12::CaptureRefresh(ID3D12GraphicsCommandList* cmd, ID3D12Device* device,
@@ -1197,8 +921,6 @@ bool DlssNrEditCache_Dx12::CaptureRefresh(ID3D12GraphicsCommandList* cmd, ID3D12
         return false;
 
     _exposure = in.useGameExposure ? in.exposure : nullptr;
-
-    PrepareStencil(cmd, device, in);
 
     const unsigned int prev = _cur;
     const unsigned int next = 1 - _cur;
@@ -1211,9 +933,9 @@ bool DlssNrEditCache_Dx12::CaptureRefresh(ID3D12GraphicsCommandList* cmd, ID3D12
     DlssNrCacheConstants c = BaseConstants(in);
     c.Mode = DlssNrCacheMode_Capture;
     {
-        ID3D12Resource* srv[kSrvCount] = { _histEdit[prev], _histGuide[prev], original, in.depth, in.motion,
-                                           target, nullptr, nullptr, nullptr,
-                                           _stencilBound ? _stencilClone : nullptr, nullptr, _histTarget[prev] };
+        ID3D12Resource* srv[kSrvCount] = { _histEdit[prev], _histGuide[prev], original, in.depth,
+                                           in.motion,       target,           nullptr,  nullptr,
+                                           nullptr,         nullptr,          nullptr,  _histTarget[prev] };
         ID3D12Resource* uav[kUavCount] = { _histEdit[next], _histGuide[next], nullptr, _level[0], _levelGuide, nullptr,
                                            _histTarget[next] };
         Pass(cmd, c, srv, uav, Groups(_width), Groups(_height));
@@ -1253,16 +975,13 @@ bool DlssNrEditCache_Dx12::CaptureRefresh(ID3D12GraphicsCommandList* cmd, ID3D12
         Barrier(cmd, target, kSrv, kUav);
     }
 
-    RestoreStencil(cmd);
     return true;
 }
 
 void DlssNrEditCache_Dx12::EndFrame(ID3D12GraphicsCommandList* cmd)
 {
-    if (_accInModelState && _accMv[0][_accCur[0]] != nullptr)
-        Barrier(cmd, _accMv[0][_accCur[0]], kSrv, kUav);
-
-    FinishCrop(cmd);
+    if (_accInModelState && _accMv[_accCur] != nullptr)
+        Barrier(cmd, _accMv[_accCur], kSrv, kUav);
 
     _accInModelState = false;
 
@@ -1316,52 +1035,30 @@ ID3D12Resource* DlssNrEditCache_Dx12::UpsampleModel(ID3D12GraphicsCommandList* c
     return _modelUp;
 }
 
-ID3D12Resource* DlssNrEditCache_Dx12::SmoothLocalMap(ID3D12GraphicsCommandList* cmd, ID3D12Device* device,
-                                                     ID3D12Resource* meter, bool reset)
+bool DlssNrEditCache_Dx12::CopyIn(ID3D12GraphicsCommandList* cmd, ID3D12Resource* src, ID3D12Resource* dst)
 {
-    if (!_init || meter == nullptr)
-        return nullptr;
+    if (!_init || cmd == nullptr || src == nullptr || dst == nullptr)
+        return false;
 
-    if (_localMap[0] == nullptr)
-    {
-        // Both start as readable: the one about to be written is moved to UAV below, the other is read.
-        for (auto& m : _localMap)
-            m = CreateTexture(device, DXGI_FORMAT_R32_FLOAT, 64, 64, true, kSrv);
-
-        if (_localMap[0] == nullptr || _localMap[1] == nullptr)
-        {
-            Park(_localMap[0]);
-            Park(_localMap[1]);
-            return nullptr;
-        }
-
-        _localValid = false;
-    }
-
-    ID3D12Resource* prev = _localMap[_localCur];
-    ID3D12Resource* next = _localMap[1 - _localCur];
+    const D3D12_RESOURCE_DESC dd = dst->GetDesc();
 
     DlssNrCacheConstants c {};
-    c.Mode = DlssNrCacheMode_LocalMap;
-    c.Width = 64;
-    c.Height = 64;
-    // About three frames to follow a change: steady under small motion, quick enough for a cut to read
-    // as a cut (a reset takes the new reading whole).
-    c.MapBlend = (reset || !_localValid) ? 1.0f : 0.3f;
+    c.Mode = DlssNrCacheMode_Copy;
+    c.Width = (unsigned int) dd.Width;
+    c.Height = dd.Height;
 
-    Barrier(cmd, meter, kUav, kSrv);
-    Barrier(cmd, next, kSrv, kUav);
+    ID3D12Resource* srv[kSrvCount] = { nullptr, nullptr, src };
+    ID3D12Resource* uav[kUavCount] = { dst };
 
-    ID3D12Resource* srv[kSrvCount] = { nullptr, nullptr, nullptr, nullptr, nullptr, meter, prev };
-    ID3D12Resource* uav[kUavCount] = { next };
-    Pass(cmd, c, srv, uav, Groups(64), Groups(64));
+    if (!Pass(cmd, c, srv, uav, Groups(c.Width), Groups(c.Height)))
+        return false;
 
-    Barrier(cmd, next, kUav, kSrv);
-    Barrier(cmd, meter, kSrv, kUav);
-
-    _localCur = 1 - _localCur;
-    _localValid = true;
-    return next;
+    // What follows reads it, as a UAV or after a transition.
+    D3D12_RESOURCE_BARRIER b {};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    b.UAV.pResource = dst;
+    cmd->ResourceBarrier(1, &b);
+    return true;
 }
 
 void DlssNrEditCache_Dx12::FinishUpsample(ID3D12GraphicsCommandList* cmd)
@@ -1548,7 +1245,6 @@ DlssNrEditCache_Dx12::Status DlssNrEditCache_Dx12::GetStatus() const
     s.framesSinceRefresh = (unsigned int) (_frame - _lastRefresh);
     s.lastRejected = _lastRejected;
     s.cumulativeRejected = _cumulativeRejected;
-    s.stencilAvailable = _stencilBound;
     s.lastRefreshReason = _refreshReason;
     s.regime = _regime;
     s.dumpWritten = _dumpWritten;

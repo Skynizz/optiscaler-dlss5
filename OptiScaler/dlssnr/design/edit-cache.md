@@ -54,10 +54,9 @@ ClearStats -> Reproject (history -> this frame, validated; first pyramid level i
 | AccumulateMv | Motion since the model last ran, chained frame to frame at the motion texture's resolution, in the game's own units. Handed to the model on a refresh so its own history lands where the scene went (`CacheModelHistory` = 1). |
 
 Refresh triggers, in order: no history; the game's reset or a feature rebuild; a measurement dump;
-the interval; adaptive -- the fraction of pixels rejected (depth) summed since the last refresh, read
-back three frames late, priority (stencil) pixels counted 4x. An early run never comes sooner than
-`max(2, interval / 2)` frames after the last: otherwise a steady pan triggers one every frame and the
-cache saves nothing exactly when frame rate matters.
+the interval. With `CacheAdaptive` the interval follows three steady motion regimes -- still (twice the
+interval, up to 8), moving (as set), fast (half) -- decided from the share of pixels rejected, read back
+three frames late, with hysteresis so the cadence never hops (an irregular cadence flickers by itself).
 
 ## Robustness: vegetation, water, hair
 
@@ -67,13 +66,38 @@ similar depth and luma. They keep the model's lighting and lose its synthesised 
 next refresh. That trade is deliberate: smearing the model's grass detail over moving grass is the
 artefact this must not produce.
 
-## Character priority (stencil)
+## Pre-SR placement (`PreSr`)
 
-If the game's depth buffer is `R24G8_TYPELESS` / `R32G8X24_TYPELESS`, the cache copies it and reads the
-stencil plane. Pixels with `(stencil & CacheStencilMask) == CacheStencilRef` get half the tolerances and
-count 4x toward an adaptive refresh. Which bits a game uses is undocumented: cache debug view 4 colours
-each stencil value so it can be found by looking. Whether The Witcher 3's DLSS depth carries stencil at
-all is logged on first use.
+Off by default. On, the pass runs before the game's DLSS Super Resolution instead of after it: in
+`NVSDK_NGX_D3D12_EvaluateFeature`, ahead of the SuperSampling evaluate, `EvaluateBeforeUpscale` copies the
+game's render-resolution colour into a texture of ours (cache shader mode 11, read as an SRV where DLSS
+reads it -- the game's resource is never written or transitioned), runs the whole pass on the copy and
+swaps the copy into the parameter block; `EndBeforeUpscale` puts the game's pointer back after the
+evaluate. `EvaluateAfterUpscale` then only times the frame and feeds the benchmark capture.
+
+The model works on the render resolution (1484x835 instead of 2560x1440 for DLSS Balanced at 1440p) and
+the upscaler's temporal accumulation steadies what it adds. Model resolution and JBU do not apply.
+
+The frame is then the jittered render: each frame samples the scene a fraction of a pixel elsewhere and
+the motion vectors leave that out. The cache adds the change of the game's `Jitter_Offset` (in uv) to
+every reprojection (`JitterDeltaX/Y`); without it the high band lands up to a pixel off each frame and the
+upscaler averages it away (measured in Control: detail x1.05 with the cache, x1.12 without it).
+
+## Hot-swap comparison (`CompareKey`, menu)
+
+`ActiveCompare()` overrides what the pass runs as -- the saved settings, as OptiScaler ships it (model
+every frame, full size, after the upscaler), or off -- without writing any setting, so nothing of it can
+reach the ini. The key cycles it, the menu has radio buttons, and a line on screen (`RenderOverlay`) says
+which mode runs and how many frames the game renders per second: with frame generation and a refresh cap
+the game's own counter hides the difference.
+
+## Benchmark with captures
+
+Off / vanilla / your settings / your settings pre-SR (optional), 3 s warm-up and 8 s measured each,
+through the same override. After each phase `DlssNr_Shot_Dx12` copies 6 consecutive output frames on the
+game's list, reads them back 8 frames later, measures the frame-to-frame brightness change (trimmed mean
+and p95, still camera) and writes the first frame as a PNG (WIC, one exposure for the whole run). The
+page goes to `dlssnr-benchmark/<date>/rapport.html`; `dlssnr-benchmark.html` opens the latest.
 
 ## Multi-pass approximation
 
@@ -118,9 +142,12 @@ reprojection and low band only.
 The cache also stands aside -- running the model every frame, unchanged -- while Hold frame, Compare, a
 Debug view, the proxy path or a capture is active.
 
-Removal: delete `DlssNr_EditCache_Dx12.*`, `DlssNr_CacheCommon.h`, `precompile/dlssnr_cache.hlsl` and
-`DlssNr_Cache_Shader.h`, the `Cache*`/`Jbu*` keys in Config, the menu section, and the call sites in
-`DlssNr_Dx12.cpp` (search `g_cache`).
+`PreSr = false` (the default) never swaps anything; `CompareKey` can be unbound (-1).
+
+Removal: delete `DlssNr_EditCache_Dx12.*`, `DlssNr_CacheCommon.h`, `DlssNr_Shot_Dx12.*`,
+`precompile/dlssnr_cache.hlsl` and `DlssNr_Cache_Shader.h`, the `Cache*`/`Jbu*`/`PreSr`/`CompareKey`/
+`ShowStats` keys in Config, the menu sections, the two calls in `NVNGX_DLSS_Dx12.cpp` and the call sites
+in `DlssNr_Dx12.cpp` (search `g_cache`, `g_preSr`, `ActiveCompare`).
 
 Rebuild the shader after editing `dlssnr_cache.hlsl`:
 

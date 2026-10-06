@@ -161,6 +161,7 @@ static float lastMenuScale = 0.0f;
 static CustomOptional<uint32_t> comboPreset { 0 };
 static int lastKey = 0;
 static bool inputDlssNr = false;
+static bool inputDlssNrCompare = false;
 static bool capturingKey = false;
 
 template <typename T, size_t N> struct RingBuffer
@@ -280,6 +281,8 @@ void MenuCommon::UpdateManualInput(HWND targetHwnd)
                       "Menu key pressed, will be switching FPS mode");
         CheckShortcut(config->DlssNrToggleKey.value_or_default(), inputDlssNr,
                       "Neural Rendering key pressed, will be toggling the pass");
+        CheckShortcut(config->DlssNrCompareKey.value_or_default(), inputDlssNrCompare,
+                      "Neural Rendering comparison key pressed, will be switching what it runs as");
     }
     else if (capturingKey)
     {
@@ -1330,6 +1333,13 @@ void MenuCommon::HandleMenuShortcuts(RenderMenuContext& ctx)
             ImGui::InsertNotification(toast);
         }
 
+        // Optimised -> vanilla -> off, live; the line on screen says which (DlssNr::RenderOverlay).
+        if (inputDlssNrCompare)
+        {
+            inputDlssNrCompare = false;
+            DlssNr::CycleCompareMode();
+        }
+
         if (inputFpsCycle && config->ShowFps.value_or_default())
             config->FpsOverlayType = (FpsOverlay) ((config->FpsOverlayType.value_or_default() + 1) % FpsOverlay_COUNT);
 
@@ -1478,6 +1488,7 @@ void MenuCommon::BeginMenuFrameIfNeeded(RenderMenuContext& ctx)
 
     if ((!config->DisableSplash.value_or_default() && now > splashStart && now < splashLimit) ||
         config->ShowFps.value_or_default() || _isVisible || ImGui::notifications.size() > 0 || scanIndicator ||
+        DlssNr::OverlayWanted() ||
         (config->DlssNrCompare.value_or_default() != 0 && config->DlssNrCompareTags.value_or_default()))
     {
         if (!_isUWP)
@@ -6978,12 +6989,14 @@ void MenuCommon::RenderKeybindSettings(RenderMenuContext& ctx)
         static auto fpsOverlayCycle = Keybind("FPS Overlay Cycle", 12);
         static auto fgEnable = Keybind("Frame Generation", 13);
         static auto dlssNrToggle = Keybind("Neural Rendering", 14);
+        static auto dlssNrCompare = Keybind("DLSS 5 compare (optimised / vanilla / off)", 15);
 
         menu.Render(config->ShortcutKey);
         fpsOverlay.Render(config->FpsShortcutKey);
         fpsOverlayCycle.Render(config->FpsCycleShortcutKey);
         fgEnable.Render(config->FGShortcutKey);
         dlssNrToggle.Render(config->DlssNrToggleKey);
+        dlssNrCompare.Render(config->DlssNrCompareKey);
     }
 }
 
@@ -7725,6 +7738,7 @@ bool MenuCommon::RenderMenu()
     UpdateFrameTimeAverages(ctx);
     RenderPerformanceOverlay(ctx);
     RenderExposureScanIndicator(ctx.config->FpsOverlayAlpha.value_or_default());
+    DlssNr::RenderOverlay(ctx.config->FpsOverlayAlpha.value_or_default());
 
     // 4) Draw the full settings menu last so popups and child windows keep their existing behavior.
     RenderMainMenuWindow(ctx);

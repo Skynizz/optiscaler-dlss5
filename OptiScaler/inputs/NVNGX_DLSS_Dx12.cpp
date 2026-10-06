@@ -1189,8 +1189,16 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCom
     if (lastDlssgCameraFar.has_value())
         InParameters->Set("DLSSG.CameraFar", lastDlssgCameraFar.value());
 
+    // Pre-SR (DlssNrPreSr, off by default): Neural Rendering first, on the render-resolution colour the
+    // upscaler is about to read, which is swapped for the enhanced copy and put back right after.
+    const bool nrPreSr =
+        feature == NVSDK_NGX_Feature_SuperSampling && DlssNr::EvaluateBeforeUpscale(InCmdList, InParameters);
+
     // OptiScaler internal handling
     const NVSDK_NGX_Result optiResult = TryEvaluateOptiFeature(InCmdList, InFeatureHandle, InParameters, InCallback);
+
+    if (nrPreSr)
+        DlssNr::EndBeforeUpscale(InParameters);
 
     // Same pass, for OptiScaler's own upscalers rather than native DLSS.
     if (optiResult == NVSDK_NGX_Result_Success && feature != NVSDK_NGX_Feature_FrameGeneration)

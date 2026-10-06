@@ -65,6 +65,11 @@ struct DlssNrFrameInfo
     // Throw away the model's history. Set it on a cut, a teleport, or the first frame of a feature.
     bool Reset = false;
 
+    // The camera jitter of this frame, in render pixels, as the game hands it to its upscaler. Only
+    // meaningful before the upscaler (pre-SR), where the frame is the jittered render itself.
+    float JitterX = 0.0f;
+    float JitterY = 0.0f;
+
     // Whether the colour buffer holds linear, open-ended light or a frame that has already been
     // through a tonemapper. Getting this wrong encodes an encoded frame a second time, which looks
     // washed out and banded.

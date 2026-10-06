@@ -11,6 +11,7 @@
 
 #include "DlssNr_Dx12.h"
 #include "DlssNr_EditCache_Dx12.h"
+#include "DlssNr_Shot_Dx12.h"
 
 #include <Config.h>
 #include <State.h>
@@ -23,6 +24,8 @@
 #include <mutex>
 #include <algorithm>
 #include <cstring>
+#include <ctime>
+#include <format>
 #include "precompile/DlssNr_Shader.h"
 #include "../output_scaling/OS_Dx12.h"
 
@@ -199,18 +202,6 @@ struct NrState
     // Indexed by pass, so [0] is unused and the first extra pass is [1]. Wasting one pointer keeps
     // every index here equal to the pass number it belongs to.
     void* passFeature[4] = {};
-
-    // Spread refresh (edit cache): one feature per horizontal band, each with its own temporal
-    // history, since each sees its band every N frames. Built at the band's size; the band's
-    // staging surfaces alongside.
-    void* bandFeature[4] = {};
-    bool bandReset[4] = { true, true, true, true };
-    unsigned int bandFeatureWidth = 0;
-    unsigned int bandFeatureHeight = 0;
-    ID3D12Resource* bandIn = nullptr;       // the proxy's band, at the model's working size
-    ID3D12Resource* bandOut = nullptr;      // the model's answer for it
-    ID3D12Resource* bandOrig = nullptr;     // the untouched frame's band, at frame size
-    ID3D12Resource* bandResolved = nullptr; // the composed band, at frame size
 
     // The model cannot read and write one resource, so the frame is staged through these.
     ID3D12Resource* colorCopy = nullptr;
@@ -395,6 +386,75 @@ std::unique_ptr<DlssNrEditCache_Dx12> g_cache;
 // different amounts and the last reading alone says little.
 double g_avgGpuTime = 0.0;
 
+// What the pass runs as right now. The saved settings, unless the comparison key or the benchmark says
+// otherwise for the moment; neither ever writes a setting, so nothing of this can end up in the ini.
+//   0 your settings, 1 as OptiScaler ships it (the model every frame, full size, after the upscaler),
+//   2 off, 3 your settings at the other placement (the benchmark's last phase: before the upscaler if
+//   yours run after it, after it if yours run before)
+int g_userCompare = 0;
+int g_benchCompare = -1;
+constexpr int kCompareOtherPlacement = 3;
+
+int ActiveCompare() { return g_benchCompare >= 0 ? g_benchCompare : g_userCompare; }
+
+bool EffEnabled(const Config& cfg)
+{
+    const int m = ActiveCompare();
+
+    if (m == 2)
+        return false;
+
+    return m == 1 || m == kCompareOtherPlacement || cfg.DlssNrEnabled.value_or_default();
+}
+
+bool EffPreSr(const Config& cfg)
+{
+    const int m = ActiveCompare();
+    const bool saved = cfg.DlssNrPreSr.value_or_default();
+    return m != 1 && (m == kCompareOtherPlacement ? !saved : saved);
+}
+
+bool EffCache(const Config& cfg) { return ActiveCompare() != 1 && cfg.DlssNrCacheEnabled.value_or_default(); }
+
+float EffWorkScale(const Config& cfg) { return ActiveCompare() == 1 ? 1.0f : cfg.DlssNrWorkingScale.value_or_default(); }
+
+bool EffJbu(const Config& cfg) { return ActiveCompare() != 1 && cfg.DlssNrJbuUpsample.value_or_default(); }
+
+// The state the upscaler leaves its output in, and every pass here hands it back in.
+D3D12_RESOURCE_STATES OutputRestState()
+{
+    return Config::Instance()->OutputResourceBarrier.has_value()
+               ? (D3D12_RESOURCE_STATES) Config::Instance()->OutputResourceBarrier.value()
+               : D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+}
+
+// Pre-SR: the pass runs on a copy of the game's render-resolution colour, and the upscaler is handed the
+// copy instead. The game's own colour is never written.
+struct PreSrState
+{
+    ID3D12Resource* tex = nullptr; // the copy the pass rewrites; the upscaler reads it
+    D3D12_RESOURCE_STATES texState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+    ID3D12Resource* original = nullptr; // the game's colour, put back after the upscaler
+    bool typed = true;                  // which slot of the parameter block it came through
+    bool swapped = false;
+    bool ranThisFrame = false;
+    bool wasOn = false;
+};
+
+PreSrState g_preSr;
+
+// Set around the pre-SR dispatch, so the pass knows its target is the copy rather than the output.
+bool g_preSrDispatch = false;
+
+// The last pre-SR frame's jitter, for the change the cache moves its edit by; and which way the game's
+// jitter runs against the image (+1 the sample sits at the pixel centre plus the jitter, -1 minus it,
+// 0 no compensation). -1 measured steadiest in Control (flicker 0.47% against 0.54% uncompensated and
+// 0.59% the other way); settable with JitterSign in dlssnr-set.txt for testing.
+float g_lastJitterX = 0.0f;
+float g_lastJitterY = 0.0f;
+bool g_jitterValid = false;
+int g_jitterSign = -1;
+
 // What the pass costs on the GPU, for the breakdown in the overlay.
 std::unique_ptr<GpuTime_Dx12> g_gpuTime;
 
@@ -454,7 +514,10 @@ unsigned long long g_captureWriteAtFrame = 0;
 // be asked for one from outside the game -- no alt-tab, no menu. Checked once a second, effectively.
 void CheckCaptureTrigger()
 {
-    if ((g_frames % 60) != 0)
+    // Every rendered frame reaches here, the pass on or off, so it keeps its own count.
+    static unsigned long long calls = 0;
+
+    if ((calls++ % 60) != 0)
         return;
 
     std::error_code ec;
@@ -515,7 +578,6 @@ void CheckCaptureTrigger()
 
             if (k == "CacheEnabled") c->DlssNrCacheEnabled = b;
             else if (k == "CacheInterval") c->DlssNrCacheInterval = (uint32_t) v;
-            else if (k == "CacheSpread") c->DlssNrCacheSpread = b;
             else if (k == "CacheAdaptive") c->DlssNrCacheAdaptive = b;
             else if (k == "CacheAdaptiveThreshold") c->DlssNrCacheAdaptiveThreshold = v;
             else if (k == "CacheDepthTolerance") c->DlssNrCacheDepthTolerance = v;
@@ -532,8 +594,10 @@ void CheckCaptureTrigger()
             else if (k == "WhitePointSource") c->DlssNrWhitePointSource = (uint32_t) v;
             else if (k == "WhitePointScale") c->DlssNrWhitePointScale = v;
             else if (k == "WhitePointTrim") c->DlssNrWhitePointTrim = v;
-            else if (k == "AutoLocal") c->DlssNrAutoLocal = v;
-            else if (k == "AutoLocalShadows") c->DlssNrAutoLocalShadows = v;
+            else if (k == "PreSr") c->DlssNrPreSr = b;
+            else if (k == "JitterSign") g_jitterSign = (int) v;
+            else if (k == "ShowStats") c->DlssNrShowStats = b;
+            else if (k == "Compare") DlssNr::SetCompareMode((DlssNr::CompareMode) (int) v);
             else if (k == "WorkingScale") c->DlssNrWorkingScale = v;
             else if (k == "JbuUpsample") c->DlssNrJbuUpsample = b;
             else if (k == "Enabled") c->DlssNrEnabled = b;
@@ -558,7 +622,7 @@ void CheckCaptureTrigger()
     if (std::filesystem::exists(benchTrigger, ec))
     {
         std::filesystem::remove(benchTrigger, ec);
-        DlssNr::StartBenchmark(true);
+        DlssNr::StartBenchmark(true, true, true);
         LOG_INFO("DLSS-NR benchmark requested by trigger file");
     }
 }
@@ -864,9 +928,6 @@ void ReleaseSurfacesIfFormatChanged(DXGI_FORMAT needed)
 
     // The extras go with it: they were built for this raster and this tuning too.
     for (void*& f : g_nr.passFeature)
-        ParkNrFeature(f);
-
-    for (void*& f : g_nr.bandFeature)
         ParkNrFeature(f);
 
     for (ID3D12Resource** r :
@@ -1429,6 +1490,13 @@ DXGI_FORMAT TypedGuideFormat(DXGI_FORMAT f)
         return DXGI_FORMAT_R8G8B8A8_UNORM;
     case DXGI_FORMAT_R16G16B16A16_TYPELESS:
         return DXGI_FORMAT_R16G16B16A16_FLOAT;
+    // Colour formats, for pre-SR's copy of the game's colour.
+    case DXGI_FORMAT_R32G32B32A32_TYPELESS:
+        return DXGI_FORMAT_R32G32B32A32_FLOAT;
+    case DXGI_FORMAT_R10G10B10A2_TYPELESS:
+        return DXGI_FORMAT_R10G10B10A2_UNORM;
+    case DXGI_FORMAT_B8G8R8A8_TYPELESS:
+        return DXGI_FORMAT_B8G8R8A8_UNORM;
     default:
         return f;
     }
@@ -1820,10 +1888,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // did not. This pass then reads and writes the output as a UAV, so it normalises to that here and
     // restores the arrival state before every exit. When the config is unset the two states are equal
     // and Barrier() skips the no-op, so the default path is byte-identical.
+    //
+    // Pre-SR hands the pass its own copy of the colour instead, which arrives as a UAV.
     const D3D12_RESOURCE_STATES outputArrival =
-        Config::Instance()->OutputResourceBarrier.has_value()
-            ? (D3D12_RESOURCE_STATES) Config::Instance()->OutputResourceBarrier.value()
-            : D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+        g_preSrDispatch ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : OutputRestState();
 
     Barrier(cmdList, target, outputArrival, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
@@ -1962,7 +2030,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // the model runs reduced and cheaper; above 1 it SUPERSAMPLES -- the proxy is upscaled to a larger
     // working size so the model denoises a super-native input, which the resolve then samples back down.
     // Capped at 2x: cost grows with the area and NGX acceptance above native is what this probe tests.
-    float workScale = cfg.DlssNrWorkingScale.value_or_default();
+    //
+    // Pre-SR runs at the render resolution, which the upscaler already made small: the model takes it
+    // whole. The comparison key's vanilla mode is the model at full size.
+    float workScale = g_preSrDispatch ? 1.0f : EffWorkScale(cfg);
     workScale = workScale < 0.25f ? 0.25f : (workScale > 2.0f ? 2.0f : workScale);
     const auto workWidth = (unsigned int) (width * workScale + 0.5f);
     const auto workHeight = (unsigned int) (height * workScale + 0.5f);
@@ -1986,9 +2057,6 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         ParkNrFeature(g_nr.feature);
 
         for (void*& f : g_nr.passFeature)
-            ParkNrFeature(f);
-
-        for (void*& f : g_nr.bandFeature)
             ParkNrFeature(f);
 
         // Only a resolution change invalidates the scratch textures. Tuning does not, and throwing
@@ -2155,7 +2223,6 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // 1.8 and 185 have all been seen in this one game.
     ++g_frames;
     TickNrRetired();
-    CheckCaptureTrigger();
 
     if (g_captureWriteAtFrame != 0 && g_frames >= g_captureWriteAtFrame)
     {
@@ -2255,9 +2322,6 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         ConsumeMeterReadback();
     }
 
-    // The automatic source's local luminance map for this frame, when local adaptation is on.
-    ID3D12Resource* localMap = nullptr;
-
     // The automatic white point measures the frame as the upscaler wrote it, every frame, on the full
     // 64 x 64 grid. Exclusive with the exposure courier above: they share the meter and its readback.
     if (g_nr.meter != nullptr && cfg.DlssNrWhitePointSource.value_or_default() == 3 && !wantExposure)
@@ -2278,16 +2342,6 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
         // A cut or a reset starts from the new scene rather than easing in from the old one.
         ConsumeAutoWhite(frame.Reset);
-
-        // Local adaptation: the same grid, smoothed into a log2 map the encode and the resolve read.
-        if (cfg.DlssNrAutoLocal.value_or_default() > 0.0f && g_nr.autoWhiteValid)
-        {
-            if (g_cache == nullptr)
-                g_cache = std::make_unique<DlssNrEditCache_Dx12>(device);
-
-            if (g_cache != nullptr && g_cache->IsInit())
-                localMap = g_cache->SmoothLocalMap(cmdList, device, g_nr.meter, frame.Reset);
-        }
     }
     else
     {
@@ -2314,20 +2368,6 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         const float trim = std::clamp(cfg.DlssNrWhitePointTrim.value_or_default(), 0.25f, 4.0f);
         exposurePreMul = g_nr.gamePreExposure * trim;
     }
-
-    // Local adaptation's constants, the same for the encode and the resolve so the two agree per pixel.
-    // The reference is the scene average the automatic white point was derived from.
-    auto applyLocal = [&](DlssNrConstants& c)
-    {
-        if (localMap == nullptr || exposureTex != nullptr || !isHdrBuffer)
-            return;
-
-        const float encoded = powf(kTargetEncodedMean, 2.2f);
-        c.UseLocalMap = 1;
-        c.LocalStrength = std::clamp(cfg.DlssNrAutoLocal.value_or_default(), 0.0f, 1.0f);
-        c.LocalMeanLog = g_nr.autoWhiteLog + std::log2(encoded / (1.0f - encoded));
-        c.LocalShadows = std::clamp(cfg.DlssNrAutoLocalShadows.value_or_default(), 0.0f, 1.0f);
-    };
 
     // Frame hold. Freeze the encode's input so a live setting change re-renders the same frame. This
     // is self-contained on purpose: it copies the output aside on hold-on and copies it BACK over the
@@ -2404,7 +2444,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // It stands aside whenever something else wants to see the model's own output on this frame: a
     // held frame, a comparison, a debug view, the proxy path, a capture. Those are instruments, and an
     // instrument reading a carried edit would be measuring the cache rather than the model.
-    const bool cacheWanted = cfg.DlssNrCacheEnabled.value_or_default() && !cfg.DlssNrHoldFrame.value_or_default() &&
+    const bool cacheWanted = EffCache(cfg) && !cfg.DlssNrHoldFrame.value_or_default() &&
                              cfg.DlssNrCompare.value_or_default() == 0 && cfg.DlssNrDebugView.value_or_default() == 0 &&
                              !cfg.DlssNrUseProxy.value_or_default() && !g_capture.isActive();
     bool cacheActive = false;
@@ -2418,7 +2458,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         if (g_cache != nullptr && g_cache->IsInit())
         {
             cacheActive = true;
-            cacheRefresh = g_cache->BeginFrame(cfg, device, width, height, desc.Format, frame.Reset || g_nr.reset);
+            cacheRefresh = g_cache->BeginFrame(cfg, device, width, height, desc.Format, frame.Reset || g_nr.reset,
+                                               g_preSrDispatch);
         }
         else
         {
@@ -2431,13 +2472,36 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         g_cache->Invalidate();
     }
 
+    // Pre-SR: the frame is the game's jittered render, a different sub-pixel sample of the scene every
+    // frame, and the game's motion vectors leave the jitter out. A carried edit is moved by the change
+    // of jitter as well, or its fine detail lands up to a pixel off every frame and the upscaler averages
+    // it away (measured in Control: detail x1.05 with the cache against x1.12 without it).
+    float jitterDeltaX = 0.0f;
+    float jitterDeltaY = 0.0f;
+
+    if (g_preSrDispatch)
+    {
+        if (g_jitterValid && !frame.Reset)
+        {
+            jitterDeltaX = (float) g_jitterSign * (frame.JitterX - g_lastJitterX) / (float) std::max(width, 1u);
+            jitterDeltaY = (float) g_jitterSign * (frame.JitterY - g_lastJitterY) / (float) std::max(height, 1u);
+        }
+
+        g_lastJitterX = frame.JitterX;
+        g_lastJitterY = frame.JitterY;
+        g_jitterValid = true;
+    }
+    else
+    {
+        g_jitterValid = false;
+    }
+
     // What the cache needs to know about this frame's guides, once they have been made readable.
     auto cacheInputs = [&](ID3D12Resource* depthReadable, ID3D12Resource* motionReadable)
     {
         DlssNrCacheInputs in {};
         in.depth = depthReadable;
         in.motion = motionReadable;
-        in.depthSource = depth;
         in.depthWidth = guideWidth;
         in.depthHeight = guideHeight;
 
@@ -2462,10 +2526,12 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         in.useGameExposure = useGameExposure != 0;
         in.exposurePreMul = exposurePreMul;
         in.maxRatio = cfg.DlssNrMaxRatio.value_or_default();
+        in.jitterDeltaX = jitterDeltaX;
+        in.jitterDeltaY = jitterDeltaY;
         return in;
     };
 
-    if (cacheActive && !cacheRefresh && !g_cache->Spread())
+    if (cacheActive && !cacheRefresh)
     {
         // A cached frame: no encode, no model, no resolve. The carried edit is laid on the frame the
         // upscaler just wrote, which stays the game's own.
@@ -2502,7 +2568,6 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     encodeParams.WhitePoint = whitePoint;
     encodeParams.UseGameExposure = useGameExposure;
     encodeParams.ExposurePreMul = exposurePreMul;
-    applyLocal(encodeParams);
     encodeParams.ReversibleMode = cfg.DlssNrReversibleMode.value_or_default();
     // Match only takes effect once a fit exists; until then the table is empty and the shader would
     // read a curve of zeros, so it falls back to the plain proxy.
@@ -2511,8 +2576,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
             D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-    DispatchPass(cmdList, encodeParams, target, nullptr, nullptr, nullptr, exposureTex != nullptr ? exposureTex : localMap,
-                        g_nr.colorCopy, g_nr.hdrCopy);
+    DispatchPass(cmdList, encodeParams, target, nullptr, nullptr, nullptr, exposureTex, g_nr.colorCopy, g_nr.hdrCopy);
 
     Barrier(cmdList, target, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
@@ -2607,270 +2671,6 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, outputArrival);
         device->Release();
         return;
-    }
-
-    // Spread refresh (edit cache): instead of the whole frame one frame in N, the model runs on one
-    // horizontal band of every frame -- about 1/N of the cost, every frame. Uneven frame times are what
-    // frame pacing, Reflex and frame generation handle worst; this keeps them even. The band's answer is
-    // merged into the carried edit, which covers the rest of the frame.
-    if (cacheActive && !cacheRefresh && g_cache->Spread())
-    {
-        const DlssNrCacheInputs in = cacheInputs(depthIn, motionIn);
-        g_cache->AccumulateBands(cmdList, device, in);
-
-        const unsigned int bands = g_cache->Bands();
-        const unsigned int band = g_cache->NextBand();
-        const unsigned int featureIndex = g_cache->ModelHistory() == 2 ? 0u : band;
-
-        // Geometry, in the model's working space first. Every band has the same size, so one feature
-        // size serves all of them: the core share plus a context margin above and below, rounded up to
-        // a multiple of 32 rows (the transformer works in windows), and slid inside the frame at the
-        // edges rather than cut.
-        constexpr unsigned int kContext = 32;
-        const unsigned int core = (workHeight + bands - 1) / bands;
-        const unsigned int bandH = std::min<unsigned int>(workHeight, ((core + 2 * kContext + 31) / 32) * 32);
-        const unsigned int y0 = (unsigned int) std::clamp<int>((int) (band * core) - (int) kContext, 0,
-                                                               (int) (workHeight - bandH));
-
-        // The same rows at the guides' and at the frame's resolution, fixed sizes again.
-        const unsigned int gH = std::min<unsigned int>(guideHeight, (bandH * guideHeight + workHeight - 1) / workHeight);
-        const unsigned int gy0 = std::min<unsigned int>((unsigned int) ((unsigned long long) y0 * guideHeight / workHeight),
-                                                        guideHeight - gH);
-        const unsigned int fH = std::min<unsigned int>(height, (bandH * height + workHeight - 1) / workHeight);
-        const unsigned int fy0 = std::min<unsigned int>((unsigned int) ((unsigned long long) y0 * height / workHeight),
-                                                        height - fH);
-
-        DlssNrCacheBand merged {};
-        bool evaluated = false;
-        bool copied = false;
-
-        auto ensureSurface = [&](ID3D12Resource*& r, unsigned int w, unsigned int h)
-        {
-            if (r != nullptr)
-            {
-                const D3D12_RESOURCE_DESC d = r->GetDesc();
-
-                if ((unsigned int) d.Width == w && d.Height == h && d.Format == desc.Format)
-                    return r != nullptr;
-
-                ParkNrResource(r);
-            }
-
-            r = CreateScratch(device, desc.Format, w, h);
-            return r != nullptr;
-        };
-
-        // The band features are built for one size; a different one retires them all.
-        if (g_nr.bandFeatureWidth != workWidth || g_nr.bandFeatureHeight != bandH)
-        {
-            for (void*& f : g_nr.bandFeature)
-                ParkNrFeature(f);
-
-            g_nr.bandFeatureWidth = workWidth;
-            g_nr.bandFeatureHeight = bandH;
-        }
-
-        if (frame.Reset)
-        {
-            for (bool& r : g_nr.bandReset)
-                r = true;
-        }
-
-        auto snippet = Util::FindFilePath(g_dllDir, "nvngx_dlssnr.dll");
-
-        if (!snippet.has_value())
-            snippet = Util::FindFilePath(Util::ExePath().remove_filename(), "nvngx_dlssnr.dll");
-
-        if (g_nr.bandFeature[featureIndex] == nullptr && snippet.has_value())
-        {
-            // Built this frame and first evaluated next, like the whole-frame feature: creating and
-            // evaluating on one command list is what hung the GPU before.
-            SetExtras(cfg, nullptr, nullptr, 0, 0, 0, 0);
-            g_nr.bandFeature[featureIndex] = g_nr.create(
-                snippet->wstring().c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(), device, cmdList,
-                g_nr.capabilityParams, workWidth, bandH, (int) cfg.DlssNrPreset.value_or_default(),
-                cfg.DlssNrIntensity.value_or_default(), (int) cfg.DlssNrStyle.value_or_default(),
-                cfg.DlssNrLocalStructure.value_or_default(), cfg.DlssNrLocalTone.value_or_default(),
-                cfg.DlssNrSkinStructure.value_or_default(), cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, 1);
-
-            if (g_nr.bandFeature[featureIndex] == nullptr)
-            {
-                // Without its band models the spread mode cannot refresh anything, so it turns itself
-                // off and the cache carries on one frame in N.
-                LOG_ERROR("DLSS-NR spread refresh: the model would not build at {}x{}; spread refresh off", workWidth,
-                          bandH);
-                Config::Instance()->DlssNrCacheSpread = false;
-            }
-            else
-            {
-                g_nr.bandReset[featureIndex] = true;
-                LOG_INFO("DLSS-NR spread refresh: band model {} built at {}x{} ({} bands, guides {} rows)",
-                         featureIndex, workWidth, bandH, bands, gH);
-            }
-        }
-        else if (g_nr.bandFeature[featureIndex] != nullptr &&
-                 ensureSurface(g_nr.bandIn, workWidth, bandH) && ensureSurface(g_nr.bandOut, workWidth, bandH) &&
-                 ensureSurface(g_nr.bandOrig, width, fH) && ensureSurface(g_nr.bandResolved, width, fH))
-        {
-            ID3D12Resource* bandDepth = nullptr;
-            ID3D12Resource* bandMotion = nullptr;
-
-            if (g_cache->CropGuides(cmdList, device, in, band, gy0, gH, &bandDepth, &bandMotion))
-            {
-                // The band of the proxy the model is shown, and of the untouched frame the resolve
-                // composes against. Both sources sit in NON_PIXEL_SHADER_RESOURCE after the encode.
-                auto copyRows = [&](ID3D12Resource* src, ID3D12Resource* dst, unsigned int srcY, unsigned int w,
-                                    unsigned int h)
-                {
-                    D3D12_TEXTURE_COPY_LOCATION s {};
-                    s.pResource = src;
-                    s.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-
-                    D3D12_TEXTURE_COPY_LOCATION d {};
-                    d.pResource = dst;
-                    d.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
-
-                    D3D12_BOX box { 0, srcY, 0, w, srcY + h, 1 };
-
-                    Barrier(cmdList, src, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                            D3D12_RESOURCE_STATE_COPY_SOURCE);
-                    Barrier(cmdList, dst, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_DEST);
-                    cmdList->CopyTextureRegion(&d, 0, 0, 0, &s, &box);
-                    Barrier(cmdList, dst, D3D12_RESOURCE_STATE_COPY_DEST,
-                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-                    Barrier(cmdList, src, D3D12_RESOURCE_STATE_COPY_SOURCE,
-                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-                };
-
-                copyRows(modelInput, g_nr.bandIn, y0, workWidth, bandH);
-                copyRows(g_nr.hdrCopy, g_nr.bandOrig, fy0, width, fH);
-                copied = true;
-
-                const float mvToWorkBand = width != 0 ? (float) workWidth / (float) width : 1.0f;
-                const bool resetBand = g_nr.bandReset[featureIndex] || g_cache->ModelHistory() == 2;
-
-                SetExtras(cfg, nullptr, nullptr, 0, 0, 0, 0);
-
-                if (g_ngxTime != nullptr)
-                    g_ngxTime->Start(cmdList);
-
-                const int result = g_nr.evaluate(
-                    cmdList, g_nr.bandFeature[featureIndex], g_nr.capabilityParams, g_nr.bandIn, bandDepth, bandMotion,
-                    g_nr.bandOut, workWidth, bandH, guideWidth, gH, g_nr.guideDepthInverted ? 1 : 0, resetBand ? 1 : 0,
-                    cfg.DlssNrIntensity.value_or_default(), (int) cfg.DlssNrStyle.value_or_default(),
-                    cfg.DlssNrLocalStructure.value_or_default(), cfg.DlssNrLocalTone.value_or_default(),
-                    cfg.DlssNrSkinStructure.value_or_default(), cfg.DlssNrAutoMask.value_or_default() ? 1 : 0,
-                    g_nr.guideMvScaleX * mvToWorkBand, g_nr.guideMvScaleY * mvToWorkBand);
-
-                if (g_ngxTime != nullptr)
-                    g_ngxTime->End(cmdList);
-
-                g_nr.bandReset[featureIndex] = false;
-
-                if (result == NVSDK_NGX_Result_Success)
-                {
-                    // Composed exactly as the model path composes a whole frame, on the band.
-                    DlssNrConstants bandParams {};
-                    bandParams.Mode = DlssNrMode_Resolve;
-                    bandParams.WhitePoint = whitePoint;
-                    bandParams.UseGameExposure = useGameExposure;
-                    bandParams.ExposurePreMul = exposurePreMul;
-                    bandParams.Width = width;
-                    bandParams.Height = fH;
-                    bandParams.TransferStrength = cfg.DlssNrTransferStrength.value_or_default();
-                    bandParams.ColourStrength = cfg.DlssNrColourStrength.value_or_default();
-                    bandParams.DebugView = 0;
-                    bandParams.MaxRatio = cfg.DlssNrMaxRatio.value_or_default();
-                    bandParams.Transfer = cfg.DlssNrTransfer.value_or_default();
-                    bandParams.DebugScale = cfg.DlssNrWhitePointScale.value_or_default();
-                    bandParams.Passthrough = isHdrBuffer ? 0u : 1u;
-                    bandParams.ReversibleMode = cfg.DlssNrReversibleMode.value_or_default();
-                    bandParams.ApplyModel = cfg.DlssNrApplyModel.value_or_default() ? 1u : 0u;
-                    bandParams.CompareMode = 0;
-                    bandParams.CompareZoom = 1.0f;
-                    applyLocal(bandParams);
-                    bandParams.UvOffsetY = (float) fy0 / (float) std::max(height, 1u);
-                    bandParams.UvScaleY = (float) fH / (float) std::max(height, 1u);
-
-                    Barrier(cmdList, g_nr.bandOut, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-                    DispatchPass(cmdList, bandParams, g_nr.bandIn, g_nr.bandOut, g_nr.bandOrig, bandMotion,
-                                 exposureTex != nullptr ? exposureTex : localMap, g_nr.bandResolved, nullptr);
-                    Barrier(cmdList, g_nr.bandResolved, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
-                            D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
-
-                    merged.resolved = g_nr.bandResolved;
-                    merged.y0 = fy0;
-                    merged.height = fH;
-                    merged.feather = std::max(1u, kContext * height / std::max(workHeight, 1u));
-                    merged.edges = (y0 == 0 ? 1u : 0u) | (y0 + bandH >= workHeight ? 2u : 0u);
-                    evaluated = true;
-                }
-                else
-                {
-                    LOG_ERROR("DLSS-NR spread refresh: band evaluate returned 0x{:X} ({}); spread refresh off",
-                              (uint32_t) result, NgxResultName((unsigned int) result));
-                    Config::Instance()->DlssNrCacheSpread = false;
-                }
-            }
-        }
-
-        // The carried edit, with this frame's band merged in, laid on the frame. keep goes back to rest
-        // first: the cache rewrites it with the same untouched frame on its way.
-        Barrier(cmdList, g_nr.hdrCopy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        g_cache->RunCached(cmdList, device, target, g_nr.hdrCopy, in, evaluated ? &merged : nullptr);
-        g_cache->EndFrame(cmdList);
-
-        if (evaluated)
-        {
-            Barrier(cmdList, g_nr.bandOut, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-            Barrier(cmdList, g_nr.bandResolved, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        }
-
-        // The staging bands rest as UAVs, like every other scratch surface here.
-        if (g_nr.bandIn != nullptr && copied)
-            Barrier(cmdList, g_nr.bandIn, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-
-        if (g_nr.bandOrig != nullptr && copied)
-            Barrier(cmdList, g_nr.bandOrig, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-
-        FinishPassTiming(cmdList, timingQueue);
-
-        // The same hand-back as the end of the model path (hdrCopy is already back at rest).
-        if (g_nr.depthClone != nullptr)
-            Barrier(cmdList, g_nr.depthClone, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                    D3D12_RESOURCE_STATE_COPY_DEST);
-
-        if (g_nr.motionClone != nullptr)
-            Barrier(cmdList, g_nr.motionClone, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                    D3D12_RESOURCE_STATE_COPY_DEST);
-
-        if (reduced && g_nr.colorSmall != nullptr)
-            Barrier(cmdList, g_nr.colorSmall, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                    D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-
-        Barrier(cmdList, g_nr.colorCopy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
-                D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, outputArrival);
-        device->Release();
-        return;
-    }
-
-    // Spread refresh off: its band models are a whole model's worth of memory, so they do not linger.
-    if (!(cacheActive && g_cache->Spread()))
-    {
-        for (void*& f : g_nr.bandFeature)
-            ParkNrFeature(f);
-
-        g_nr.bandFeatureWidth = g_nr.bandFeatureHeight = 0;
-
-        for (ID3D12Resource** r : { &g_nr.bandIn, &g_nr.bandOut, &g_nr.bandOrig, &g_nr.bandResolved })
-            ParkNrResource(*r);
     }
 
     // On a refresh with the cache on, the model has not seen the frames since it last ran. Its own
@@ -3010,7 +2810,6 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         resolveParams.WhitePoint = whitePoint;
         resolveParams.UseGameExposure = useGameExposure;
         resolveParams.ExposurePreMul = exposurePreMul;
-        applyLocal(resolveParams);
         resolveParams.Width = width;
         resolveParams.Height = height;
         resolveParams.TransferStrength = cfg.DlssNrTransferStrength.value_or_default();
@@ -3113,7 +2912,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // resolve exactly as it was.
         bool jbuOk = false;
 
-        if (!superDownOk && reduced && workScale < 1.0f && cfg.DlssNrJbuUpsample.value_or_default())
+        if (!superDownOk && reduced && workScale < 1.0f && EffJbu(cfg))
         {
             if (g_cache == nullptr)
                 g_cache = std::make_unique<DlssNrEditCache_Dx12>(device);
@@ -3130,8 +2929,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             }
         }
 
-        DispatchPass(cmdList, resolveParams, resolveProxy, resolveAnswer, g_nr.hdrCopy, motionIn,
-                            exposureTex != nullptr ? exposureTex : localMap, target, nullptr);
+        DispatchPass(cmdList, resolveParams, resolveProxy, resolveAnswer, g_nr.hdrCopy, motionIn, exposureTex, target,
+                     nullptr);
         Barrier(cmdList, g_nr.output, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
 
@@ -3241,7 +3040,7 @@ void FinishPassTiming(ID3D12GraphicsCommandList* cmdList, ID3D12CommandQueue* ti
             // Skipped with the edit cache on: the model's timer then belongs to some earlier frame
             // while the total belongs to this one, and the difference means nothing.
             if (g_lastGpuTime.has_value() && g_lastNgxTime.has_value() && g_frames - lastSplitLog > 600 &&
-                !Config::Instance()->DlssNrCacheEnabled.value_or_default())
+                !EffCache(*Config::Instance()))
             {
                 lastSplitLog = g_frames;
                 const double total = g_lastGpuTime.value();
@@ -3255,39 +3054,50 @@ void FinishPassTiming(ID3D12GraphicsCommandList* cmdList, ID3D12CommandQueue* ti
 } // namespace
 
 // ---------------------------------------------------------------------------------------------
-// The A/B benchmark: the same scene with Neural Rendering off, as it ships (the model every frame),
-// and with the edit cache on, one after the other, measured the same way.
+// The A/B benchmark: the same scene with Neural Rendering off, as OptiScaler ships it (the model every
+// frame, full size), with the user's settings and -- when asked -- with those settings run before the
+// upscaler (pre-SR), one after the other and measured the same way. Each phase ends with a short
+// capture: a picture of the frame and how much it flickers from one frame to the next. The result is a
+// page beside OptiScaler, pictures included.
 //
 // Frame time is the interval between upscaler evaluates -- the frames the game actually renders. With
 // frame generation the screen shows more than that, but generated frames cost nothing here and would
 // only hide the difference being measured.
+//
+// No setting is written: each phase is a comparison override (see ActiveCompare), so the "your
+// settings" phases run exactly what the user has, and cancelling leaves nothing behind.
 // ---------------------------------------------------------------------------------------------
 namespace
 {
 struct BenchState
 {
     bool active = false;
-    bool includeOff = true;
-    int phase = 0; // 0 off, 1 vanilla, 2 cache
+    bool captures = true;
+    std::vector<int> plan; // the phases to run, in order
+    size_t step = 0;
+    int phase = 0;
+    bool capturing = false;
     LARGE_INTEGER phaseStart {};
     LARGE_INTEGER last {};
     std::vector<float> frames;
     double gpuSum = 0.0;
     unsigned int gpuCount = 0;
 
-    // What the user had, put back at the end whatever happens.
-    bool savedEnabled = false;
-    bool savedCache = false;
-    float savedScale = 1.0f;
-    bool savedJbu = false;
+    DlssNr::BenchmarkResult results[DlssNr::kBenchmarkPhases];
+    std::vector<float> series[DlssNr::kBenchmarkPhases];
 
-    DlssNr::BenchmarkResult results[3];
+    std::filesystem::path folder;
+    std::string report;
+    std::string settings;
+    unsigned int renderWidth = 0;
+    unsigned int renderHeight = 0;
 };
 
 BenchState g_bench;
 
 constexpr double kBenchWarmup = 3.0;  // seconds: model rebuilds, history settles
 constexpr double kBenchMeasure = 8.0; // seconds measured per phase
+constexpr unsigned int kBenchShotFrames = 10;
 
 double Seconds(LARGE_INTEGER a, LARGE_INTEGER b)
 {
@@ -3296,15 +3106,50 @@ double Seconds(LARGE_INTEGER a, LARGE_INTEGER b)
     return (double) (b.QuadPart - a.QuadPart) / (double) f.QuadPart;
 }
 
+int ComparisonFor(int phase)
+{
+    switch (phase)
+    {
+    case 0: return (int) DlssNr::CompareMode::Off;
+    case 1: return (int) DlssNr::CompareMode::Vanilla;
+    case 3: return kCompareOtherPlacement;
+    default: return (int) DlssNr::CompareMode::Yours;
+    }
+}
+
+std::string PictureName(int phase) { return std::format("mode{}.png", phase); }
+
+// The names on the page, in French: the page is read by the person who plays, not by the code.
+const char* PageName(int phase)
+{
+    switch (phase)
+    {
+    case 0: return "DLSS 5 d&eacute;sactiv&eacute;";
+    case 1: return "DLSS 5 d'origine (OptiScaler)";
+    case 2: return "DLSS 5 optimis&eacute; (tes r&eacute;glages)";
+    case 3:
+        return Config::Instance()->DlssNrPreSr.value_or_default() ? "DLSS 5 optimis&eacute;, apr&egrave;s l'upscaler"
+                                                                   : "DLSS 5 optimis&eacute; + pre-SR";
+    default: return "?";
+    }
+}
+
+const char* PageColour(int phase)
+{
+    switch (phase)
+    {
+    case 0: return "#8b949e";
+    case 1: return "#f0883e";
+    case 2: return "#3fb950";
+    default: return "#58a6ff";
+    }
+}
+
 void BenchApplyPhase()
 {
-    // Vanilla is the pass as it ships: the model every frame, full size, nothing carried. The last
-    // phase is exactly what the user has set, whichever road to speed that is.
-    Config* cfg = Config::Instance();
-    cfg->DlssNrEnabled = g_bench.phase != 0;
-    cfg->DlssNrCacheEnabled = g_bench.phase == 2 ? g_bench.savedCache : false;
-    cfg->DlssNrWorkingScale = g_bench.phase == 2 ? g_bench.savedScale : 1.0f;
-    cfg->DlssNrJbuUpsample = g_bench.phase == 2 ? g_bench.savedJbu : false;
+    g_bench.phase = g_bench.plan[g_bench.step];
+    g_bench.capturing = false;
+    g_benchCompare = ComparisonFor(g_bench.phase);
     g_bench.frames.clear();
     g_bench.gpuSum = 0.0;
     g_bench.gpuCount = 0;
@@ -3345,21 +3190,314 @@ void BenchFinishPhase()
         r.frames = (unsigned int) sorted.size();
     }
 
+    g_bench.series[g_bench.phase] = g_bench.frames;
+
+    if (g_bench.phase != 0 && g_nr.guideWidth != 0)
+    {
+        g_bench.renderWidth = g_nr.guideWidth;
+        g_bench.renderHeight = g_nr.guideHeight;
+    }
+
     LOG_INFO("DLSS-NR benchmark: {} -> {:.1f} fps, 1% low {:.1f}, frame {:.2f} ms, NR pass {:.2f} ms ({} frames)",
              DlssNr::BenchmarkPhaseName(g_bench.phase), r.fps, r.low1, r.frameMs, r.nrMs, r.frames);
 }
 
+// The frame times of one phase as an SVG polyline, averaged down to at most `points` points.
+std::string Polyline(const std::vector<float>& series, double maxMs, double width, double height, size_t points)
+{
+    if (series.empty() || maxMs <= 0.0)
+        return {};
+
+    const size_t n = std::min(points, series.size());
+    std::string out;
+
+    for (size_t i = 0; i < n; ++i)
+    {
+        const size_t a = i * series.size() / n;
+        const size_t b = std::max(a + 1, (i + 1) * series.size() / n);
+        double sum = 0.0;
+
+        for (size_t k = a; k < b; ++k)
+            sum += series[k];
+
+        const double v = sum / (double) (b - a);
+        const double x = n > 1 ? width * (double) i / (double) (n - 1) : 0.0;
+        const double y = height - std::min(v / maxMs, 1.0) * height;
+        out += std::format("{:.1f},{:.1f} ", x, y);
+    }
+
+    return out;
+}
+
+void WriteReport()
+{
+    const auto& vanilla = g_bench.results[1];
+    const auto& yours = g_bench.results[2];
+
+    std::time_t t = std::time(nullptr);
+    std::tm local {};
+    localtime_s(&local, &t);
+    char when[64];
+    std::strftime(when, sizeof(when), "%d/%m/%Y %H:%M", &local);
+
+    unsigned int outW = 0, outH = 0;
+
+    for (int p : g_bench.plan)
+    {
+        if (g_bench.results[p].shotWidth != 0)
+        {
+            outW = g_bench.results[p].shotWidth;
+            outH = g_bench.results[p].shotHeight;
+            break;
+        }
+    }
+
+    std::string game = Util::ExePath().filename().string();
+    std::string h;
+    h.reserve(64 * 1024);
+
+    h += "<!doctype html><html lang=\"fr\"><head><meta charset=\"utf-8\">"
+         "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+         "<title>Benchmark DLSS 5</title><style>"
+         ":root{--bg:#0d1117;--card:#161b22;--line:#30363d;--text:#e6edf3;--dim:#8b949e;--good:#3fb950;--bad:#f85149}"
+         "@media (prefers-color-scheme: light){:root{--bg:#f6f8fa;--card:#fff;--line:#d0d7de;--text:#1f2328;--dim:#59636e}}"
+         "*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);"
+         "font:15px/1.5 system-ui,-apple-system,'Segoe UI',sans-serif}"
+         "main{max-width:1180px;margin:0 auto;padding:28px 16px 60px}"
+         "h1{font-size:26px;margin:0 0 4px}h2{font-size:18px;margin:34px 0 12px}"
+         ".dim{color:var(--dim)}.card{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:16px}"
+         ".hero{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:12px;margin-top:20px}"
+         ".big{font-size:34px;font-weight:700;line-height:1.1}.good{color:var(--good)}.bad{color:var(--bad)}"
+         "table{width:100%;border-collapse:collapse;font-variant-numeric:tabular-nums}"
+         "th,td{padding:9px 10px;border-bottom:1px solid var(--line);text-align:right;white-space:nowrap}"
+         "th:first-child,td:first-child{text-align:left}th{color:var(--dim);font-weight:600;font-size:13px}"
+         ".scroll{overflow-x:auto}.bar{height:22px;border-radius:5px;min-width:2px}"
+         ".bars div.row{display:grid;grid-template-columns:260px 1fr 70px;gap:10px;align-items:center;margin:8px 0}"
+         ".shots{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:14px}"
+         ".shots img{width:100%;border-radius:8px;display:block;border:1px solid var(--line)}"
+         ".dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:7px}"
+         "svg{width:100%;height:auto;display:block}.note{border-left:3px solid #58a6ff;padding:10px 14px;margin-top:16px}"
+         "@media (max-width:640px){.bars div.row{grid-template-columns:1fr 60px}.bars div.row>span:first-child{grid-column:1/-1}}"
+         "</style></head><body><main>";
+
+    h += std::format("<h1>Benchmark DLSS 5</h1><div class=\"dim\">{} &middot; {}", game, when);
+
+    if (outW != 0)
+        h += std::format(" &middot; sortie {}x{}", outW, outH);
+
+    if (g_bench.renderWidth != 0)
+        h += std::format(" &middot; rendu {}x{}", g_bench.renderWidth, g_bench.renderHeight);
+
+    h += "</div>";
+
+    // The answer first.
+    h += "<div class=\"hero\">";
+
+    for (int p : g_bench.plan)
+    {
+        const auto& r = g_bench.results[p];
+
+        if (!r.valid)
+            continue;
+
+        std::string delta;
+
+        if (p != 1 && vanilla.valid && vanilla.fps > 0.0)
+        {
+            const double pct = 100.0 * (r.fps / vanilla.fps - 1.0);
+            delta = std::format("<div class=\"{}\">{:+.0f}% vs d'origine</div>", pct >= 0.0 ? "good" : "bad", pct);
+        }
+        else if (p == 1)
+        {
+            delta = "<div class=\"dim\">r&eacute;f&eacute;rence</div>";
+        }
+
+        h += std::format("<div class=\"card\"><div class=\"dim\"><span class=\"dot\" style=\"background:{}\"></span>{}</div>"
+                         "<div class=\"big\">{:.1f} <span class=\"dim\" style=\"font-size:16px\">FPS</span></div>{}</div>",
+                         PageColour(p), PageName(p), r.fps, delta);
+    }
+
+    h += "</div>";
+
+    h += "<div class=\"card note\"><b>Pourquoi le compteur du jeu ne montre pas toujours la diff&eacute;rence&nbsp;:</b> "
+         "ces chiffres sont les images que le jeu <i>calcule</i>. Avec la g&eacute;n&eacute;ration d'images (MFG x2 &agrave; x6), "
+         "le compteur affich&eacute; multiplie ce nombre puis plafonne &agrave; la fr&eacute;quence de l'&eacute;cran "
+         "(Reflex / V-Sync). Exemple en x6 sur un &eacute;cran 240&nbsp;Hz&nbsp;: 31&nbsp;FPS de base donnent 186, 48 en "
+         "donneraient 288 mais l'&eacute;cran coupe vers 225&nbsp;: les deux semblent proches alors que l'un calcule 55% "
+         "d'images r&eacute;elles en plus. Le gain se voit dans la latence, la fluidit&eacute; de base et le ghosting "
+         "du MFG (moins d'images invent&eacute;es entre deux vraies). Pour le voir en jeu&nbsp;: la touche de comparaison "
+         "(F6 par d&eacute;faut) bascule optimis&eacute; / d'origine / d&eacute;sactiv&eacute; et affiche ces FPS "
+         "r&eacute;els.</div>";
+
+    // The numbers.
+    h += "<h2>Mesures</h2><div class=\"card scroll\"><table><tr><th>Mode</th><th>FPS</th><th>1% low</th>"
+         "<th>Temps d'image</th><th>Co&ucirc;t DLSS 5</th><th>vs d'origine</th><th>Scintillement moyen</th>"
+         "<th>Scintillement p90</th></tr>";
+
+    for (int p : g_bench.plan)
+    {
+        const auto& r = g_bench.results[p];
+
+        if (!r.valid)
+            continue;
+
+        std::string versus = "&mdash;";
+
+        if (p != 1 && vanilla.valid && vanilla.fps > 0.0)
+        {
+            const double pct = 100.0 * (r.fps / vanilla.fps - 1.0);
+            versus = std::format("<span class=\"{}\">{:+.0f}%</span>", pct >= 0.0 ? "good" : "bad", pct);
+        }
+
+        h += std::format("<tr><td><span class=\"dot\" style=\"background:{}\"></span>{}</td><td><b>{:.1f}</b></td>"
+                         "<td>{:.1f}</td><td>{:.2f} ms</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                         PageColour(p), PageName(p), r.fps, r.low1, r.frameMs,
+                         p == 0 ? std::string("&mdash;") : std::format("{:.2f} ms", r.nrMs), versus,
+                         r.flickerValid ? std::format("{:.2f}%", r.flickerMean) : std::string("&mdash;"),
+                         r.flickerValid ? std::format("{:.2f}%", r.flickerP95) : std::string("&mdash;"));
+    }
+
+    h += "</table></div><p class=\"dim\">FPS et 1% low&nbsp;: images calcul&eacute;es par le jeu pendant 8&nbsp;s apr&egrave;s "
+         "3&nbsp;s de stabilisation, sans la g&eacute;n&eacute;ration d'images. Co&ucirc;t DLSS 5&nbsp;: la passe enti&egrave;re "
+         "sur le GPU, en moyenne. Scintillement&nbsp;: variation de luminosit&eacute; d'une image &agrave; la suivante sur 10 "
+         "images cons&eacute;cutives, cam&eacute;ra immobile, sans les 5% de pixels qui bougent le plus (objets anim&eacute;s, "
+         "particules)&nbsp;; plus bas = plus stable, le mode d&eacute;sactiv&eacute; donne le bruit propre au jeu.</p>";
+
+    // Bars.
+    double best = 0.0;
+
+    for (int p : g_bench.plan)
+        best = std::max(best, g_bench.results[p].fps);
+
+    h += "<h2>Images calcul&eacute;es par seconde</h2><div class=\"card bars\">";
+
+    for (int p : g_bench.plan)
+    {
+        const auto& r = g_bench.results[p];
+
+        if (!r.valid || best <= 0.0)
+            continue;
+
+        h += std::format("<div class=\"row\"><span>{}</span><div class=\"bar\" style=\"width:{:.1f}%;background:{}\"></div>"
+                         "<span><b>{:.1f}</b></span></div>",
+                         PageName(p), 100.0 * r.fps / best, PageColour(p), r.fps);
+    }
+
+    h += "</div>";
+
+    // Frame times.
+    std::vector<float> all;
+
+    for (int p : g_bench.plan)
+        all.insert(all.end(), g_bench.series[p].begin(), g_bench.series[p].end());
+
+    if (!all.empty())
+    {
+        std::sort(all.begin(), all.end());
+        const double top = std::max(10.0, std::ceil(all[(size_t) (all.size() * 0.995)] * 1.15 / 5.0) * 5.0);
+        const double W = 1000.0, H = 260.0;
+
+        h += "<h2>Temps de chaque image (plus bas = plus rapide, plus plat = plus r&eacute;gulier)</h2><div class=\"card\">";
+        h += std::format("<svg viewBox=\"-40 -10 {} {}\" role=\"img\" aria-label=\"temps d'image\">", W + 50, H + 34);
+
+        for (int g = 0; g <= 4; ++g)
+        {
+            const double y = H * g / 4.0;
+            h += std::format("<line x1=\"0\" x2=\"{}\" y1=\"{:.1f}\" y2=\"{:.1f}\" stroke=\"currentColor\" opacity=\"0.12\"/>"
+                             "<text x=\"-6\" y=\"{:.1f}\" font-size=\"12\" text-anchor=\"end\" fill=\"currentColor\" "
+                             "opacity=\"0.6\">{:.0f} ms</text>",
+                             W, y, y, y + 4, top * (1.0 - g / 4.0));
+        }
+
+        for (int p : g_bench.plan)
+        {
+            const std::string pts = Polyline(g_bench.series[p], top, W, H, 400);
+
+            if (!pts.empty())
+                h += std::format("<polyline fill=\"none\" stroke=\"{}\" stroke-width=\"2\" points=\"{}\"/>", PageColour(p), pts);
+        }
+
+        h += std::format("<text x=\"{}\" y=\"{}\" font-size=\"12\" text-anchor=\"end\" fill=\"currentColor\" opacity=\"0.6\">"
+                         "8 secondes de mesure par mode</text></svg></div>",
+                         W, H + 26);
+    }
+
+    // Pictures.
+    bool anyPicture = false;
+
+    for (int p : g_bench.plan)
+        anyPicture = anyPicture || g_bench.results[p].picture;
+
+    if (anyPicture)
+    {
+        h += "<h2>Captures (m&ecirc;me sc&egrave;ne, apr&egrave;s chaque mesure)</h2><div class=\"shots\">";
+
+        for (int p : g_bench.plan)
+        {
+            const auto& r = g_bench.results[p];
+
+            if (!r.picture)
+                continue;
+
+            const std::string file = PictureName(p);
+            h += std::format("<figure class=\"card\" style=\"margin:0\"><a href=\"{0}\" target=\"_blank\"><img src=\"{0}\" "
+                             "alt=\"{1}\" loading=\"lazy\"></a><figcaption style=\"margin-top:8px\"><span class=\"dot\" "
+                             "style=\"background:{2}\"></span><b>{1}</b> &middot; {3:.1f} FPS</figcaption></figure>",
+                             file, PageName(p), PageColour(p), r.fps);
+        }
+
+        h += "</div><p class=\"dim\">Image de sortie de l'upscaler apr&egrave;s DLSS&nbsp;5, avant l'interface, "
+             "d&eacute;velopp&eacute;e avec la m&ecirc;me exposition pour tous les modes (les couleurs peuvent diff&eacute;rer "
+             "un peu du rendu final du jeu). Clique pour la taille r&eacute;elle.</p>";
+    }
+
+    if (!g_bench.settings.empty())
+        h += std::format("<h2>R&eacute;glages test&eacute;s</h2><div class=\"card dim\">{}</div>", g_bench.settings);
+
+    if (vanilla.valid && yours.valid)
+        h += std::format("<p class=\"dim\" style=\"margin-top:30px\">En r&eacute;sum&eacute;&nbsp;: {:.1f} &rarr; {:.1f} FPS "
+                         "calcul&eacute;s ({:+.0f}%), co&ucirc;t de DLSS&nbsp;5 {:.1f} &rarr; {:.1f} ms par image.</p>",
+                         vanilla.fps, yours.fps, 100.0 * (yours.fps / vanilla.fps - 1.0), vanilla.nrMs, yours.nrMs);
+
+    h += "</main></body></html>";
+
+    std::error_code ec;
+    std::filesystem::create_directories(g_bench.folder, ec);
+    const auto page = g_bench.folder / "rapport.html";
+    FILE* f = _wfopen(page.wstring().c_str(), L"wb");
+
+    if (f != nullptr)
+    {
+        fwrite(h.data(), 1, h.size(), f);
+        fclose(f);
+        g_bench.report = page.string();
+
+        // And a fixed name for the latest one, beside OptiScaler.
+        const auto latest = Util::DllPath().remove_filename() / "dlssnr-benchmark.html";
+        const std::string rel = std::filesystem::relative(page, latest.parent_path(), ec).generic_string();
+        FILE* l = _wfopen(latest.wstring().c_str(), L"wb");
+
+        if (l != nullptr)
+        {
+            const std::string redirect = std::format(
+                "<!doctype html><meta charset=\"utf-8\"><meta http-equiv=\"refresh\" content=\"0; url={0}\">"
+                "<title>Benchmark DLSS 5</title><a href=\"{0}\">Dernier rapport</a>",
+                rel.empty() ? page.generic_string() : rel);
+            fwrite(redirect.data(), 1, redirect.size(), l);
+            fclose(l);
+        }
+
+        LOG_INFO("DLSS-NR benchmark report written to {}", g_bench.report);
+    }
+}
+
 void BenchEnd()
 {
-    Config* cfg = Config::Instance();
-    cfg->DlssNrEnabled = g_bench.savedEnabled;
-    cfg->DlssNrCacheEnabled = g_bench.savedCache;
-    cfg->DlssNrWorkingScale = g_bench.savedScale;
-    cfg->DlssNrJbuUpsample = g_bench.savedJbu;
+    g_benchCompare = -1;
     g_bench.active = false;
+    g_bench.capturing = false;
 
     // A copy on disk, so a result can be compared with the next build's.
-    std::error_code ec;
     const auto path = Util::DllPath().remove_filename() / "dlssnr-benchmark.txt";
     FILE* f = _wfopen(path.wstring().c_str(), L"a");
 
@@ -3367,23 +3505,55 @@ void BenchEnd()
     {
         fprintf(f, "--- DLSS-NR benchmark (rendered frames, frame generation excluded)\n");
 
-        for (int p = 0; p < 3; ++p)
+        for (int p : g_bench.plan)
         {
             const auto& r = g_bench.results[p];
 
             if (r.valid)
-                fprintf(f, "%-34s %7.1f fps  1%% low %7.1f  frame %6.2f ms  NR pass %6.2f ms\n",
-                        DlssNr::BenchmarkPhaseName(p), r.fps, r.low1, r.frameMs, r.nrMs);
+                fprintf(f, "%-44s %7.1f fps  1%% low %7.1f  frame %6.2f ms  NR pass %6.2f ms  flicker %5.2f%%\n",
+                        DlssNr::BenchmarkPhaseName(p), r.fps, r.low1, r.frameMs, r.nrMs,
+                        r.flickerValid ? r.flickerMean : 0.0f);
         }
 
         fclose(f);
     }
+
+    WriteReport();
+}
+
+void BenchAdvance()
+{
+    if (++g_bench.step >= g_bench.plan.size())
+    {
+        BenchEnd();
+        return;
+    }
+
+    BenchApplyPhase();
 }
 
 void BenchTick()
 {
     if (!g_bench.active)
         return;
+
+    // The capture after a phase: wait for it, picture written and all, before the next phase starts.
+    if (g_bench.capturing)
+    {
+        if (DlssNrShot::Busy())
+            return;
+
+        const auto shot = DlssNrShot::Get(g_bench.phase);
+        auto& r = g_bench.results[g_bench.phase];
+        r.flickerValid = shot.valid;
+        r.flickerMean = shot.flickerMean;
+        r.flickerP95 = shot.flickerP95;
+        r.picture = shot.picture;
+        r.shotWidth = shot.width;
+        r.shotHeight = shot.height;
+        BenchAdvance();
+        return;
+    }
 
     LARGE_INTEGER now;
     QueryPerformanceCounter(&now);
@@ -3407,15 +3577,47 @@ void BenchTick()
     {
         BenchFinishPhase();
 
-        if (g_bench.phase >= 2)
+        if (g_bench.captures)
         {
-            BenchEnd();
+            DlssNrShot::Request(g_bench.phase, kBenchShotFrames, g_bench.folder / PictureName(g_bench.phase));
+            g_bench.capturing = true;
             return;
         }
 
-        g_bench.phase++;
-        BenchApplyPhase();
+        BenchAdvance();
     }
+}
+
+// The frames the game renders per second, for the line on screen: a ring of recent frame times.
+struct LiveState
+{
+    LARGE_INTEGER last {};
+    float ring[120] = {};
+    unsigned int count = 0;
+    unsigned int head = 0;
+    LARGE_INTEGER lastSwitch {};
+};
+
+LiveState g_live;
+
+void LiveTick()
+{
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+
+    if (g_live.last.QuadPart != 0)
+    {
+        const double ms = Seconds(g_live.last, now) * 1000.0;
+
+        if (ms > 0.0 && ms < 500.0)
+        {
+            g_live.ring[g_live.head] = (float) ms;
+            g_live.head = (g_live.head + 1) % 120;
+            g_live.count = std::min(g_live.count + 1, 120u);
+        }
+    }
+
+    g_live.last = now;
 }
 } // namespace
 
@@ -3426,44 +3628,78 @@ const char* BenchmarkPhaseName(int phase)
     switch (phase)
     {
     case 0: return "Neural Rendering off";
-    case 1: return "DLSS 5 vanilla (model every frame)";
+    case 1: return "DLSS 5 as OptiScaler ships it";
     case 2: return "DLSS 5, your settings";
+    case 3:
+        return Config::Instance()->DlssNrPreSr.value_or_default() ? "DLSS 5, your settings, after the upscaler"
+                                                                   : "DLSS 5, your settings, pre-SR";
     default: return "?";
     }
 }
 
-void StartBenchmark(bool includeOff)
+void StartBenchmark(bool includeOff, bool includeOtherPlacement, bool captures)
 {
     if (g_bench.active)
         return;
 
-    Config* cfg = Config::Instance();
-    g_bench.savedEnabled = cfg->DlssNrEnabled.value_or_default();
-    g_bench.savedCache = cfg->DlssNrCacheEnabled.value_or_default();
-    g_bench.savedScale = cfg->DlssNrWorkingScale.value_or_default();
-    g_bench.savedJbu = cfg->DlssNrJbuUpsample.value_or_default();
-    g_bench.includeOff = includeOff;
+    const Config& cfg = *Config::Instance();
 
     for (auto& r : g_bench.results)
         r = {};
 
-    g_bench.phase = includeOff ? 0 : 1;
+    for (auto& s : g_bench.series)
+        s.clear();
+
+    g_bench.plan.clear();
+
+    if (includeOff)
+        g_bench.plan.push_back(0);
+
+    g_bench.plan.push_back(1);
+    g_bench.plan.push_back(2);
+
+    // The same settings at the other placement: before the upscaler if yours run after it, and after
+    // it if yours run before -- so the page always shows what the placement is worth.
+    if (includeOtherPlacement)
+        g_bench.plan.push_back(3);
+
+    std::time_t t = std::time(nullptr);
+    std::tm local {};
+    localtime_s(&local, &t);
+    char stamp[32];
+    std::strftime(stamp, sizeof(stamp), "%Y-%m-%d_%H-%M-%S", &local);
+
+    g_bench.folder = Util::DllPath().remove_filename() / "dlssnr-benchmark" / stamp;
+    g_bench.report.clear();
+    g_bench.captures = captures;
+    g_bench.renderWidth = g_bench.renderHeight = 0;
+
+    // What "your settings" is, written on the page so a result says what it measured.
+    g_bench.settings = std::format(
+        "Mod&egrave;le {:.0f}%{} &middot; {} &middot; cache {} &middot; point blanc {}",
+        cfg.DlssNrWorkingScale.value_or_default() * 100.0f,
+        cfg.DlssNrJbuUpsample.value_or_default() ? " + agrandissement guid&eacute;" : "",
+        cfg.DlssNrPreSr.value_or_default() ? "avant l'upscaler (pre-SR)" : "apr&egrave;s l'upscaler",
+        cfg.DlssNrCacheEnabled.value_or_default()
+            ? std::format("1 image sur {}{}{}", cfg.DlssNrCacheInterval.value_or_default(),
+                          cfg.DlssNrCacheAdaptive.value_or_default() ? ", adaptatif" : "",
+                          cfg.DlssNrCacheCrossfade.value_or_default() ? ", transitions douces" : "")
+            : std::string("d&eacute;sactiv&eacute; (mod&egrave;le &agrave; chaque image)"),
+        cfg.DlssNrWhitePointSource.value_or_default() == 3 ? "automatique" : "manuel");
+
+    DlssNrShot::Reset();
+
+    g_bench.step = 0;
     g_bench.active = true;
     BenchApplyPhase();
-    LOG_INFO("DLSS-NR benchmark started");
+    LOG_INFO("DLSS-NR benchmark started ({} phases, captures {})", g_bench.plan.size(), captures ? "on" : "off");
 }
 
 void CancelBenchmark()
 {
-    if (g_bench.active)
-    {
-        Config* cfg = Config::Instance();
-        cfg->DlssNrEnabled = g_bench.savedEnabled;
-        cfg->DlssNrCacheEnabled = g_bench.savedCache;
-        cfg->DlssNrWorkingScale = g_bench.savedScale;
-        cfg->DlssNrJbuUpsample = g_bench.savedJbu;
-        g_bench.active = false;
-    }
+    g_benchCompare = -1;
+    g_bench.active = false;
+    g_bench.capturing = false;
 }
 
 BenchmarkStatus GetBenchmarkStatus()
@@ -3471,8 +3707,11 @@ BenchmarkStatus GetBenchmarkStatus()
     BenchmarkStatus s {};
     s.active = g_bench.active;
     s.phase = g_bench.phase;
+    s.capturing = g_bench.capturing;
+    s.step = (int) g_bench.step;
+    s.steps = (int) g_bench.plan.size();
 
-    if (g_bench.active)
+    if (g_bench.active && !g_bench.capturing)
     {
         LARGE_INTEGER now;
         QueryPerformanceCounter(&now);
@@ -3481,9 +3720,69 @@ BenchmarkStatus GetBenchmarkStatus()
         s.warmingUp = Seconds(g_bench.phaseStart, now) < kBenchWarmup;
     }
 
-    for (int p = 0; p < 3; ++p)
+    for (int p = 0; p < kBenchmarkPhases; ++p)
         s.results[p] = g_bench.results[p];
 
+    s.report = g_bench.report;
+    return s;
+}
+
+CompareMode GetCompareMode() { return (CompareMode) g_userCompare; }
+
+void SetCompareMode(CompareMode m)
+{
+    g_userCompare = std::clamp((int) m, 0, 2);
+    QueryPerformanceCounter(&g_live.lastSwitch);
+    LOG_INFO("DLSS-NR comparison: {}", CompareModeName((CompareMode) g_userCompare));
+}
+
+void CycleCompareMode() { SetCompareMode((CompareMode) ((g_userCompare + 1) % 3)); }
+
+const char* CompareModeName(CompareMode m)
+{
+    switch (m)
+    {
+    case CompareMode::Vanilla: return "Vanilla (as OptiScaler ships it)";
+    case CompareMode::Off: return "Off";
+    default: return "Optimised (your settings)";
+    }
+}
+
+double SecondsSinceCompareSwitch()
+{
+    if (g_live.lastSwitch.QuadPart == 0)
+        return 1e9;
+
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+    return Seconds(g_live.lastSwitch, now);
+}
+
+LiveStats GetLiveStats()
+{
+    const Config& cfg = *Config::Instance();
+    LiveStats s {};
+
+    if (g_live.count > 0)
+    {
+        double sum = 0.0;
+
+        for (unsigned int i = 0; i < g_live.count; ++i)
+            sum += g_live.ring[i];
+
+        s.renderedFps = sum > 0.0 ? 1000.0 * g_live.count / sum : 0.0;
+    }
+
+    s.valid = g_live.count > 0;
+    s.enabled = EffEnabled(cfg);
+    s.preSr = s.enabled && EffPreSr(cfg);
+    s.cache = s.enabled && EffCache(cfg);
+    s.nrMs = s.enabled && g_nr.feature != nullptr ? g_avgGpuTime : 0.0;
+    s.modelWidth = g_nr.workWidth;
+    s.modelHeight = g_nr.workHeight;
+    s.benchmark = g_bench.active;
+    s.mode = g_bench.active ? BenchmarkPhaseName(g_bench.phase) : CompareModeName((CompareMode) g_userCompare);
+    s.compare = (CompareMode) g_userCompare;
     return s;
 }
 } // namespace DlssNr
@@ -3498,65 +3797,13 @@ void RetryAfterFailure()
 
 }
 
-// Reads the game's parameter block and runs the pass on what it finds.
-//
-// This is the call site's job, not the pass's. A caller that has the resources in hand -- a
-// reprojection stage, a frame generation path, anything that is not the upscaler seam -- calls
-// RunPass directly and never touches an NGX parameter block.
-void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
-                          ID3D12CommandQueue* timingQueue)
+// What the game says about this frame, from its parameter block: the depth convention, HDR, a reset,
+// the real render size, the motion vector scale and its exposure. The same for either placement.
+static void ReadFrameInfo(NVSDK_NGX_Parameter* params, DlssNrFrameInfo& frame)
 {
-    // Every rendered frame reaches here, Neural Rendering on or off, which is what lets the benchmark
-    // time the off phase the same way as the others.
-    BenchTick();
-
-    if (!Config::Instance()->DlssNrEnabled.value_or_default())
-    {
-        ReportSkipOnce("it is switched off");
-        return;
-    }
-
-    if (cmdList == nullptr || params == nullptr)
-    {
-        ReportSkipOnce("no command list or no parameter block");
-        return;
-    }
-
-    // Which of the game's APIs this evaluate arrived through.
-    //
-    // Says out loud what was previously only reasoned about: an FSR or XeSS title reaches this pass
-    // transitively, because those shims call OptiScaler's own NVSDK_NGX_D3D12_EvaluateFeature and
-    // this pass hangs off that. Nothing needed adding to the shims -- a call there would run the
-    // model twice -- but "nothing needed adding" is a claim, and this is the line that checks it.
-    {
-        static ApiUpscalerInput saidApi = (ApiUpscalerInput) -1;
-        const ApiUpscalerInput api = State::Instance().currentInputApiName;
-
-        if (saidApi != api)
-        {
-            saidApi = api;
-            LOG_INFO("DLSS-NR reached through the game's {} input", ApiUpscalerInputName(api));
-        }
-    }
-
-    ID3D12Resource* target = GetResource(params, NVSDK_NGX_Parameter_Output, "DLSSD.Output");
-    ID3D12Resource* depth = GetResource(params, NVSDK_NGX_Parameter_Depth, "DLSSD.Depth");
-    ID3D12Resource* motion = GetResource(params, NVSDK_NGX_Parameter_MotionVectors, "DLSSD.MotionVectors");
-
-    // Without all three there is nothing to run on. This is not a failure -- some evaluates legitimately
-    // carry none of it -- so it stays quiet and tries again next frame.
-    if (target == nullptr || depth == nullptr || motion == nullptr)
-    {
-        ReportSkipOnce(target == nullptr    ? "the parameters carried no output texture"
-                       : depth == nullptr   ? "the parameters carried no depth"
-                                            : "the parameters carried no motion vectors");
-        return;
-    }
-
     unsigned int createFlags = 0;
     params->Get(NVSDK_NGX_Parameter_DLSS_Feature_Create_Flags, &createFlags);
 
-    DlssNrFrameInfo frame {};
     frame.DepthInverted = (createFlags & NVSDK_NGX_DLSS_Feature_Flags_DepthInverted) != 0;
     frame.ColourIsLinearHdr = (createFlags & NVSDK_NGX_DLSS_Feature_Flags_IsHDR) != 0;
 
@@ -3581,6 +3828,12 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
 
     if (params->Get(NVSDK_NGX_Parameter_MV_Scale_X, &frame.MvScaleX) != NVSDK_NGX_Result_Success)
         frame.MvScaleX = 1.0f;
+
+    if (params->Get(NVSDK_NGX_Parameter_Jitter_Offset_X, &frame.JitterX) != NVSDK_NGX_Result_Success)
+        frame.JitterX = 0.0f;
+
+    if (params->Get(NVSDK_NGX_Parameter_Jitter_Offset_Y, &frame.JitterY) != NVSDK_NGX_Result_Success)
+        frame.JitterY = 0.0f;
 
     if (params->Get(NVSDK_NGX_Parameter_MV_Scale_Y, &frame.MvScaleY) != NVSDK_NGX_Result_Success)
         frame.MvScaleY = 1.0f;
@@ -3684,6 +3937,86 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
             }
         }
     }
+}
+
+// Reads the game's parameter block and runs the pass on what it finds.
+//
+// This is the call site's job, not the pass's. A caller that has the resources in hand -- a
+// reprojection stage, a frame generation path, anything that is not the upscaler seam -- calls
+// RunPass directly and never touches an NGX parameter block.
+void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
+                          ID3D12CommandQueue* timingQueue)
+{
+    // Every rendered frame reaches here, Neural Rendering on or off, which is what lets the benchmark
+    // time the off phase the same way as the others -- and what the line on screen counts.
+    BenchTick();
+    LiveTick();
+    CheckCaptureTrigger();
+
+    if (cmdList == nullptr || params == nullptr)
+    {
+        ReportSkipOnce("no command list or no parameter block");
+        return;
+    }
+
+    ID3D12Resource* target = GetResource(params, NVSDK_NGX_Parameter_Output, "DLSSD.Output");
+
+    // The benchmark's capture looks at the finished frame, whatever made it.
+    auto lookAtResult = [&]()
+    {
+        if (target != nullptr)
+            DlssNrShot::Tick(cmdList, target, OutputRestState());
+    };
+
+    // Pre-SR already ran on this frame, before the upscaler, which then upscaled its result.
+    const bool preSrRan = g_preSr.ranThisFrame;
+    g_preSr.ranThisFrame = false;
+
+    if (preSrRan)
+    {
+        lookAtResult();
+        return;
+    }
+
+    if (!EffEnabled(*Config::Instance()))
+    {
+        ReportSkipOnce("it is switched off");
+        lookAtResult();
+        return;
+    }
+
+    // Which of the game's APIs this evaluate arrived through.
+    //
+    // Says out loud what was previously only reasoned about: an FSR or XeSS title reaches this pass
+    // transitively, because those shims call OptiScaler's own NVSDK_NGX_D3D12_EvaluateFeature and
+    // this pass hangs off that. Nothing needed adding to the shims -- a call there would run the
+    // model twice -- but "nothing needed adding" is a claim, and this is the line that checks it.
+    {
+        static ApiUpscalerInput saidApi = (ApiUpscalerInput) -1;
+        const ApiUpscalerInput api = State::Instance().currentInputApiName;
+
+        if (saidApi != api)
+        {
+            saidApi = api;
+            LOG_INFO("DLSS-NR reached through the game's {} input", ApiUpscalerInputName(api));
+        }
+    }
+
+    ID3D12Resource* depth = GetResource(params, NVSDK_NGX_Parameter_Depth, "DLSSD.Depth");
+    ID3D12Resource* motion = GetResource(params, NVSDK_NGX_Parameter_MotionVectors, "DLSSD.MotionVectors");
+
+    // Without all three there is nothing to run on. This is not a failure -- some evaluates legitimately
+    // carry none of it -- so it stays quiet and tries again next frame.
+    if (target == nullptr || depth == nullptr || motion == nullptr)
+    {
+        ReportSkipOnce(target == nullptr    ? "the parameters carried no output texture"
+                       : depth == nullptr   ? "the parameters carried no depth"
+                                            : "the parameters carried no motion vectors");
+        return;
+    }
+
+    DlssNrFrameInfo frame {};
+    ReadFrameInfo(params, frame);
 
     // The upscaler's inputs are at render resolution while colour and output are at display
     // resolution; the model takes that as a subrect per resource, which the pass reads from the
@@ -3709,6 +4042,170 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
     }
 
     g_compose->Dispatch(cmdList, target, depth, motion, target, frame, timingQueue);
+    lookAtResult();
+}
+
+// Pre-SR. The game's render-resolution colour is copied into a texture of ours, the whole pass runs on
+// that copy -- cache, stabiliser, white point and all -- and the game's upscaler is handed the copy in
+// place of its own colour, so it upscales the enhanced frame. The model works on the render resolution
+// instead of the output's: 1484x835 rather than 2560x1440 for DLSS Balanced at 1440p, 2.9 times fewer
+// pixels, and the upscaler's own temporal accumulation then steadies what it adds.
+//
+// The game's colour is read where the upscaler would read it and never written or transitioned; the
+// parameter block gets its own pointer back after the upscaler (EndBeforeUpscale).
+bool EvaluateBeforeUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
+                           ID3D12CommandQueue* timingQueue)
+{
+    const Config& cfg = *Config::Instance();
+    g_preSr.swapped = false;
+    g_preSr.ranThisFrame = false;
+
+    if (cmdList == nullptr || params == nullptr || !EffEnabled(cfg) || !EffPreSr(cfg))
+    {
+        if (g_preSr.wasOn)
+        {
+            g_preSr.wasOn = false;
+            LOG_INFO("DLSS-NR: running after the upscaler again");
+        }
+
+        return false;
+    }
+
+    // Through whichever slot the game used: typed by a D3D12 game, untyped by OptiScaler's bridges.
+    ID3D12Resource* colour = nullptr;
+    bool typed = true;
+
+    if (params->Get(NVSDK_NGX_Parameter_Color, &colour) != NVSDK_NGX_Result_Success || colour == nullptr)
+    {
+        void* untyped = nullptr;
+        colour = nullptr;
+        typed = false;
+
+        if (params->Get(NVSDK_NGX_Parameter_Color, &untyped) == NVSDK_NGX_Result_Success)
+            colour = (ID3D12Resource*) untyped;
+    }
+
+    ID3D12Resource* depth = GetResource(params, NVSDK_NGX_Parameter_Depth, "DLSSD.Depth");
+    ID3D12Resource* motion = GetResource(params, NVSDK_NGX_Parameter_MotionVectors, "DLSSD.MotionVectors");
+
+    if (colour == nullptr || depth == nullptr || motion == nullptr)
+    {
+        ReportSkipOnce("pre-SR: the parameters carried no colour, depth or motion vectors");
+        return false;
+    }
+
+    const D3D12_RESOURCE_DESC cd = colour->GetDesc();
+
+    if (cd.Dimension != D3D12_RESOURCE_DIMENSION_TEXTURE2D || cd.SampleDesc.Count != 1)
+    {
+        ReportSkipOnce("pre-SR: the game's colour is not a plain 2D texture");
+        return false;
+    }
+
+    DlssNrFrameInfo frame {};
+    ReadFrameInfo(params, frame);
+
+    ID3D12Device* device = nullptr;
+
+    if (FAILED(colour->GetDevice(IID_PPV_ARGS(&device))) || device == nullptr)
+        return false;
+
+    if (g_compose == nullptr)
+        g_compose = std::make_unique<DlssNr_Dx12>("Neural Rendering", device);
+
+    bool ready = false;
+
+    {
+        std::lock_guard<std::mutex> nrLock(g_nrMutex);
+
+        // The edit cache's shader does the copy.
+        if (g_cache == nullptr)
+            g_cache = std::make_unique<DlssNrEditCache_Dx12>(device);
+
+        ready = g_compose != nullptr && g_cache != nullptr && g_cache->IsInit() && !g_nr.failed;
+
+        // Our copy: the colour's size, a typed member of its format family, with unordered access.
+        const DXGI_FORMAT format = TypedGuideFormat(cd.Format);
+
+        if (ready && g_preSr.tex != nullptr)
+        {
+            const D3D12_RESOURCE_DESC td = g_preSr.tex->GetDesc();
+
+            if (td.Width != cd.Width || td.Height != cd.Height || td.Format != format)
+                ParkNrResource(g_preSr.tex);
+        }
+
+        if (ready && g_preSr.tex == nullptr)
+        {
+            g_preSr.tex = CreateScratch(device, format, (unsigned int) cd.Width, cd.Height);
+            g_preSr.texState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+
+            if (g_preSr.tex != nullptr)
+                LOG_INFO("DLSS-NR pre-SR: running before the upscaler on its {}x{} colour (format {})",
+                         (unsigned int) cd.Width, cd.Height, (int) format);
+        }
+
+        ready = ready && g_preSr.tex != nullptr;
+
+        if (ready)
+        {
+            ScopedNrStateEnvelope envelope(cmdList);
+            Barrier(cmdList, g_preSr.tex, g_preSr.texState, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            g_preSr.texState = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            ready = g_cache->CopyIn(cmdList, colour, g_preSr.tex);
+        }
+    }
+
+    if (!ready)
+    {
+        ReportSkipOnce("pre-SR: could not prepare its copy of the colour");
+        device->Release();
+        return false;
+    }
+
+    // The pass, on the copy. Whatever it does or declines to do this frame, the copy holds at least the
+    // game's own colour, so handing it over is always safe.
+    g_preSrDispatch = true;
+    g_compose->Dispatch(cmdList, g_preSr.tex, depth, motion, g_preSr.tex, frame, timingQueue);
+    g_preSrDispatch = false;
+
+    // Readable the way the upscaler reads its inputs: as a shader resource, or the state the user told
+    // OptiScaler the game leaves its colour in.
+    const D3D12_RESOURCE_STATES readState =
+        cfg.ColorResourceBarrier.has_value()
+            ? (D3D12_RESOURCE_STATES) cfg.ColorResourceBarrier.value()
+            : (D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE | D3D12_RESOURCE_STATE_PIXEL_SHADER_RESOURCE);
+
+    Barrier(cmdList, g_preSr.tex, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, readState);
+    g_preSr.texState = readState;
+
+    g_preSr.original = colour;
+    g_preSr.typed = typed;
+
+    if (typed)
+        params->Set(NVSDK_NGX_Parameter_Color, g_preSr.tex);
+    else
+        params->Set(NVSDK_NGX_Parameter_Color, (void*) g_preSr.tex);
+
+    g_preSr.swapped = true;
+    g_preSr.ranThisFrame = true;
+    g_preSr.wasOn = true;
+    device->Release();
+    return true;
+}
+
+void EndBeforeUpscale(NVSDK_NGX_Parameter* params)
+{
+    if (!g_preSr.swapped || params == nullptr)
+        return;
+
+    if (g_preSr.typed)
+        params->Set(NVSDK_NGX_Parameter_Color, g_preSr.original);
+    else
+        params->Set(NVSDK_NGX_Parameter_Color, (void*) g_preSr.original);
+
+    g_preSr.swapped = false;
+    g_preSr.original = nullptr;
 }
 
 // The pass. Resources in, nothing read from anywhere the caller cannot see.
@@ -3898,7 +4395,6 @@ CacheStatus GetCacheStatus()
     s.framesSinceRefresh = c.framesSinceRefresh;
     s.lastRejected = c.lastRejected;
     s.cumulativeRejected = c.cumulativeRejected;
-    s.stencilAvailable = c.stencilAvailable;
     s.lastRefreshReason = c.lastRefreshReason;
     s.regime = c.regime;
     s.dumpWritten = c.dumpWritten;
@@ -3947,24 +4443,14 @@ void Shutdown()
         f = nullptr;
     }
 
-    for (void*& f : g_nr.bandFeature)
+    if (g_preSr.tex != nullptr)
     {
-        if (f != nullptr && g_nr.release != nullptr)
-            g_nr.release(f);
-
-        f = nullptr;
+        g_preSr.tex->Release();
+        g_preSr.tex = nullptr;
     }
 
-    g_nr.bandFeatureWidth = g_nr.bandFeatureHeight = 0;
-
-    for (ID3D12Resource** r : { &g_nr.bandIn, &g_nr.bandOut, &g_nr.bandOrig, &g_nr.bandResolved })
-    {
-        if (*r != nullptr)
-        {
-            (*r)->Release();
-            *r = nullptr;
-        }
-    }
+    g_preSr = {};
+    DlssNrShot::Shutdown();
 
     if (g_nr.output != nullptr)
     {

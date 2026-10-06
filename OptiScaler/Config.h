@@ -260,6 +260,17 @@ class Config
     // Toggles the pass in game. Unbound by default -- a key that does something unexpected is worse
     // than one that does nothing.
     CustomOptional<int> DlssNrToggleKey { UnboundKey };
+    // Hot-swap comparison key: cycles what Neural Rendering runs as -- your settings, as OptiScaler ships
+    // it (the model every frame, full size), off -- live, without touching the saved settings. F6 by
+    // default; unbind it (Keybinds, or -1 here) to turn it off.
+    CustomOptional<int> DlssNrCompareKey { VK_F6 };
+    // A line on screen with what is running and the frames the game actually renders per second (frame
+    // generation excluded). Shown for a few seconds after every switch whatever this says.
+    CustomOptional<bool> DlssNrShowStats { false };
+    // Pre-SR: run the model on the game's render-resolution colour before its upscaler, which then
+    // upscales the result -- the model works on far fewer pixels. Off runs it after the upscaler, as
+    // it always has.
+    CustomOptional<bool> DlssNrPreSr { false };
     CustomOptional<uint32_t> DlssNrPreset { 0 };
     CustomOptional<float> DlssNrIntensity { 1.0f };
     // 0 default (standard), 1 natural, 2 cinematic -- the model's own processing profiles.
@@ -494,14 +505,6 @@ class Config
     // Higher means highlights sit lower on the curve and the model treats them as less extreme.
     CustomOptional<float> DlssNrWhitePointScale { 1.0f };
 
-    // Automatic white point (source 3), local adaptation: how much of each region's own brightness the
-    // white point follows (0 = one value for the whole frame, 1 = fully local). What the model is shown
-    // is evened out; the frame keeps its own contrast, since the edit comes back as a ratio.
-    CustomOptional<float> DlssNrAutoLocal { 0.0f };
-    // ...in regions darker than the average, as a share of it. 0 leaves them as dark as the scene has
-    // them, which keeps the model steady there; above 0 shows it more of the shadows.
-    CustomOptional<float> DlssNrAutoLocalShadows { 0.0f };
-
     // The temporal edit cache (shaders/dlssnr/DlssNr_EditCache_Dx12). Off by default, and off is the
     // pass exactly as it was: the model runs every frame and none of the cache's code is reached.
     //
@@ -510,9 +513,6 @@ class Config
     CustomOptional<bool> DlssNrCacheEnabled { false };
     // At most this many frames between model runs. 1 runs it every frame (useful with the gains below).
     CustomOptional<uint32_t> DlssNrCacheInterval { 3 };
-    // Spread the model's cost evenly: one horizontal band of every frame instead of the whole frame one
-    // frame in N (N = CacheInterval bands, 2-4). Even frame times are kinder to pacing, Reflex and FG.
-    CustomOptional<bool> DlssNrCacheSpread { false };
     // Run the model early once this fraction of the frame has been revealed since it last ran.
     CustomOptional<bool> DlssNrCacheAdaptive { true };
     CustomOptional<float> DlssNrCacheAdaptiveThreshold { 0.10f };
@@ -546,11 +546,7 @@ class Config
     // What the model is told on a refresh: 0 the game's vectors, 1 motion accumulated since it last
     // ran, 2 reset its history every refresh.
     CustomOptional<uint32_t> DlssNrCacheModelHistory { 1 };
-    // Priority pixels (characters) from the depth buffer's stencil: (stencil & Mask) == Ref.
-    CustomOptional<bool> DlssNrCacheStencil { false };
-    CustomOptional<uint32_t> DlssNrCacheStencilMask { 0 };
-    CustomOptional<uint32_t> DlssNrCacheStencilRef { 0 };
-    // 0 off, 1 confidence, 2 low band, 3 high band, 4 stencil plane.
+    // 0 off, 1 confidence, 2 low band, 3 high band.
     CustomOptional<uint32_t> DlssNrCacheDebugView { 0 };
     // How many consecutive frames the measurement dump writes.
     CustomOptional<uint32_t> DlssNrCacheDumpFrames { 12 };

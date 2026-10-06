@@ -29,9 +29,6 @@ cbuffer Params : register(b0)
     float gHighGain;
     uint  gBilateral;
     uint  gDebugView;
-    uint  gStencilOn;
-    uint  gStencilMask;
-    uint  gStencilRef;
     uint  gStatsSlot;
     uint  gAccReset;
     uint  gPassthrough;
@@ -39,23 +36,18 @@ cbuffer Params : register(b0)
     uint  gSrcW;
     uint  gSrcH;
     uint  gFrameIndex;
-    uint  gBandActive;   // reproject: merge a freshly resolved band (gAux0, band-local rows) into history
-    uint  gBandY0;       // the band's first row in the frame
-    uint  gBandHeight;   // its height in rows
-    uint  gBandFeather;  // rows over which its top and bottom fade in (the model's context margin)
-    uint  gBandEdges;    // bit 0: band touches the top of the frame, bit 1: the bottom (no fade there)
-    uint  gCropOffsetY;  // crop: first source row
     uint  gUseGameExposure; // the game's live exposure is bound at t10: white = gExposurePreMul / exposure
     float gExposurePreMul;
     float gMaxLumaEdit;     // the most, in stops, the composition can move a pixel's luminance
     float gStabilize;       // anti-flicker: the most a refresh may move a still-valid pixel's edit, in stops (0 off)
     uint  gDespeckle;       // bound each fresh edit by its eight neighbours' (isolated dark specks)
-    float gMapBlend;        // local luminance map: share of this frame's reading taken (1 on a reset)
     uint  gCrossfadeOn;     // keyframe crossfade: the shown edit walks toward the model's latest answer
     float gCrossfade;       // this frame's step: 1 / (frames left until the model runs again)
     float gTemporal;        // temporal stabiliser: weight of the reprojected, clamped previous edit (0 off)
     uint  gTemporalValid;   // the previous stabilised edit exists and belongs to this raster
     float gLowTemporal;     // luminance stability: weight of the reprojected regional (low band) edit (0 off)
+    float gJitterDeltaX;    // pre-SR: this frame's change of camera jitter, in uv, added to every reprojection
+    float gJitterDeltaY;
 };
 
 Texture2D<float4>   gHistEdit  : register(t0); // rgb: log2 edit, a: high-band confidence
@@ -67,7 +59,7 @@ Texture2D<float4>   gAux0      : register(t5); // per mode: NR result / L1 / sma
 Texture2D<float4>   gAux1      : register(t6); // per mode: L1 guide / small model answer
 Texture2D<float4>   gAux2      : register(t7); // L2
 Texture2D<float4>   gAux3      : register(t8); // L3
-Texture2D<uint2>    gStencil   : register(t9); // the depth buffer's stencil plane, when there is one
+// t9 is bound to a stand-in and read by nothing.
 Texture2D<float4>   gExposure  : register(t10); // the game's 1x1 exposure, when it supplies one
 Texture2D<float4>   gHistTarget : register(t11); // keyframe crossfade: the model's latest answer, carried
 
@@ -222,16 +214,6 @@ int2 MotionTexel(float2 uv)
     return clamp(int2(uv * float2(gMotionW, gMotionH)), int2(0, 0), int2(gMotionW, gMotionH) - 1);
 }
 
-bool IsPriority(float2 uv)
-{
-    // Bit 0: the depth buffer has a stencil plane and it is bound. Bit 1: the user turned priority on.
-    if ((gStencilOn & 3u) != 3u)
-        return false;
-
-    const uint s = gStencil.Load(int3(DepthTexel(uv), 0)).g;
-    return (s & gStencilMask) == gStencilRef;
-}
-
 // Where this pixel was last frame, as an offset in uv.
 //
 // The vector is taken from the nearest surface in a 3x3 neighbourhood rather than the pixel itself,
@@ -260,7 +242,11 @@ float2 MotionUvOffset(float2 uv)
 
     const float2 bestUv = (float2(best) + 0.5) / float2(gDepthW, gDepthH);
     const float2 mv = gMotion.Load(int3(MotionTexel(bestUv), 0)).xy * float2(gMvScaleX, gMvScaleY);
-    return mv / float2(gMotionW, gMotionH);
+
+    // Pre-SR works on the game's jittered render: each frame samples the scene a fraction of a pixel
+    // elsewhere and the motion vectors leave that out, so the change of jitter is added here (0 after
+    // the upscaler, where the frame is not jittered).
+    return mv / float2(gMotionW, gMotionH) + float2(gJitterDeltaX, gJitterDeltaY);
 }
 
 // The history at q, with each of the four bilinear taps admitted only if its depth agrees with this
@@ -462,7 +448,6 @@ uint2 LevelSize(uint level)
 groupshared float4 sEdit[64];  // rgb: w * edit, a: w
 groupshared float2 sGuide[64]; // w * log2 depth, w * log2 luma
 groupshared uint sRejected;
-groupshared uint sRejectedPriority;
 
 void ReduceToFirstLevel(uint3 gtid, uint3 id, float w, float3 edit, float linC, float logLuma)
 {
@@ -506,13 +491,20 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
     const bool inside = id.x < gWidth && id.y < gHeight;
     const float2 uv = (float2(id.xy) + 0.5) / float2(max(gWidth, 1u), max(gHeight, 1u));
 
+    if (gMode == 11)
+    {
+        // Pre-SR: the game's render-resolution colour, read where DLSS would read it, into the texture
+        // the pass rewrites and DLSS is then handed instead. Nothing of the game's own is written.
+        if (inside)
+            gOut0[id.xy] = gColour.Load(int3(id.xy, 0));
+
+        return;
+    }
+
     if (gMode == 0)
     {
         if (id.x == 0 && id.y == 0)
-        {
-            gStats[uint2(gStatsSlot * 2u, 0)] = 0u;
-            gStats[uint2(gStatsSlot * 2u + 1u, 0)] = 0u;
-        }
+            gStats[uint2(gStatsSlot, 0)] = 0u;
 
         return;
     }
@@ -522,10 +514,7 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
     if (gMode == 1 || gMode == 2)
     {
         if (gtid.x == 0 && gtid.y == 0)
-        {
             sRejected = 0u;
-            sRejectedPriority = 0u;
-        }
 
         GroupMemoryBarrierWithGroupSync();
 
@@ -540,12 +529,8 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
             linC = LinDepth(gDepth.Load(int3(DepthTexel(uv), 0)).r);
             logLuma = LogLuma(colour.rgb);
 
-            const bool priority = IsPriority(uv);
-
-            // Characters get half the slack: on them a stale edit is the most visible.
-            const float tolScale = priority ? 0.5 : 1.0;
-            const float depthTol = gDepthTol * tolScale;
-            const float colourTol = max(gColourTol * tolScale, 1e-3);
+            const float depthTol = gDepthTol;
+            const float colourTol = max(gColourTol, 1e-3);
 
             const float2 q = uv + MotionUvOffset(uv);
             const bool onScreen = all(q >= 0.0) && all(q <= 1.0);
@@ -592,44 +577,10 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
                 if (gCrossfadeOn != 0)
                     gOut6[id.xy] = float4(h.target, saturate(h.targetConfidence * doubt));
 
-                // Spread refresh: one band of this frame was just run through the model. Inside it the
-                // model's own answer replaces the carried one, fading in over its context margin so
-                // the band's edges -- where the model saw the least around it -- count the least.
-                if (gBandActive != 0)
-                {
-                    const int ry = (int) id.y - (int) gBandY0;
-
-                    if (ry >= 0 && ry < (int) gBandHeight)
-                    {
-                        const float feather = max((float) gBandFeather, 1.0);
-                        const float wTop = (gBandEdges & 1u) ? 1.0 : saturate(((float) ry + 0.5) / feather);
-                        const float wBot = (gBandEdges & 2u) ? 1.0 : saturate(((float) gBandHeight - (float) ry - 0.5) / feather);
-                        float ok;
-                        const float3 fresh = Stabilize(FreshEditAt(int2(id.xy), int2(id.x, ry),
-                                                                   int2(gWidth, gBandHeight), ok),
-                                                       h.edit, h.valid * vColour);
-
-                        // Where the carried edit is still good, the band moves it only part of the way
-                        // (the refresh blend), so a band refreshing does not snap; where it is not, the
-                        // band's answer is taken whole.
-                        const float settle = h.valid > 0.5 ? gRefreshBlend : 1.0;
-                        const float bw = min(wTop, wBot) * ok * settle;
-
-                        edit = lerp(edit, fresh, bw);
-                        confidence = lerp(confidence, 1.0, min(wTop, wBot) * ok);
-                        w = max(w, bw);
-                    }
-                }
-
                 gOut0[id.xy] = float4(edit, saturate(confidence));
 
                 if (h.valid < 0.5)
-                {
                     InterlockedAdd(sRejected, 1u);
-
-                    if (priority)
-                        InterlockedAdd(sRejectedPriority, 1u);
-                }
             }
             else
             {
@@ -675,10 +626,7 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
             GroupMemoryBarrierWithGroupSync();
 
             if (gtid.x == 0 && gtid.y == 0 && sRejected > 0u)
-            {
-                InterlockedAdd(gStats[uint2(gStatsSlot * 2u, 0)], sRejected);
-                InterlockedAdd(gStats[uint2(gStatsSlot * 2u + 1u, 0)], sRejectedPriority);
-            }
+                InterlockedAdd(gStats[uint2(gStatsSlot, 0)], sRejected);
         }
 
         return;
@@ -792,24 +740,6 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
         {
             result = saturate(0.5 + dot(hist.a * high, kLuma) * 8.0).xxx * white * 0.5;
         }
-        else if (gDebugView == 4)
-        {
-            // The stencil plane, one hue per value, so the bit a game uses for characters can be found
-            // by looking. Grey where the depth buffer has no stencil.
-            if ((gStencilOn & 1u) != 0)
-            {
-                const uint s = gStencil.Load(int3(DepthTexel(uv), 0)).g;
-                const float3 hue = frac(float3(s * 0.137, s * 0.311, s * 0.519));
-                result = (s == 0u ? 0.1 : 0.3 + 0.7 * hue) * white * 0.5;
-
-                if (IsPriority(uv))
-                    result = lerp(result, float3(1.0, 0.0, 1.0) * white * 0.5, 0.5);
-            }
-            else
-            {
-                result = 0.25 * white;
-            }
-        }
 
         gOut0[id.xy] = float4(result, original.a);
         return;
@@ -885,21 +815,6 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
             M = LinearToSrgb(CubeScaleResidual(saturate(P), saturate(P) + e));
 
         gOut0[id.xy] = float4(M, full.a);
-        return;
-    }
-
-    if (gMode == 8)
-    {
-        // One band of the guides, for a model run on that band alone: depth to R32, motion as it is.
-        // The band is cut at depth's resolution. Motion may be at another (display-resolution vectors),
-        // so it is read at the matching texel and its values rescaled to depth's pixels: the game's
-        // scale then still turns them into pixels of the texture the model is handed.
-        const int3 src = int3(id.x, id.y + gCropOffsetY, 0);
-        gOut0[id.xy] = float4(gDepth.Load(src).r, 0.0, 0.0, 0.0);
-
-        const float2 ms = float2(gMotionW, gMotionH) / float2(max(gDepthW, 1u), max(gDepthH, 1u));
-        const int2 mt = min(int2((float2(src.xy) + 0.5) * ms), int2(gMotionW, gMotionH) - 1);
-        gOut1[id.xy] = float4(gMotion.Load(int3(mt, 0)).xy / ms, 0.0, 0.0);
         return;
     }
 
@@ -1023,17 +938,6 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
         const float eps = Eps();
         gOut0[id.xy] = float4(max((max(original.rgb, 0.0) + eps) * exp2(outEdit) - eps, 0.0), original.a);
         gOut3[id.xy] = float4(outEdit, 1.0);
-        return;
-    }
-
-    if (gMode == 9)
-    {
-        // The automatic white point's local map: this frame's 64x64 tile means (gAux0), in log2,
-        // eased toward from last frame's map (gAux1) so that what moves under a tile does not make the
-        // model's exposure shimmer.
-        const float raw = log2(max(gAux0.Load(int3(id.xy, 0)).r, 1e-12));
-        const float prev = gAux1.Load(int3(id.xy, 0)).r;
-        gOut0[id.xy] = float4(lerp(prev, raw, saturate(gMapBlend)), 0.0, 0.0, 0.0);
         return;
     }
 

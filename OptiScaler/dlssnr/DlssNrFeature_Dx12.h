@@ -2,6 +2,9 @@
 
 #include <d3d12.h>
 
+#include <optional>
+#include <string>
+
 #include <shaders/dlssnr/DlssNr_Common.h>
 #include <nvsdk_ngx.h>
 
@@ -32,6 +35,52 @@ namespace DlssNr
 // game never does -- so without this the pass runs and never reports what it cost.
 void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
                           ID3D12CommandQueue* timingQueue = nullptr);
+
+// Pre-SR placement (DlssNrPreSr): called just before the game's DLSS Super Resolution evaluate. Runs the
+// pass on a copy of the game's render-resolution colour and swaps that copy into the parameter block,
+// so the upscaler upscales the enhanced frame. True when it swapped; EndBeforeUpscale must then be
+// called with the same block once the upscaler has been evaluated, to put the game's own colour back.
+// EvaluateAfterUpscale is still called after the upscaler as usual and knows not to run the model again.
+bool EvaluateBeforeUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
+                           ID3D12CommandQueue* timingQueue = nullptr);
+void EndBeforeUpscale(NVSDK_NGX_Parameter* params);
+
+// Hot-swap comparison: what Neural Rendering runs as, live, without touching any setting. Cycled by the
+// comparison key (DlssNrCompareKey) or chosen in the menu.
+enum class CompareMode : int
+{
+    Yours = 0,   // the saved settings
+    Vanilla = 1, // as OptiScaler ships it: the model every frame, full size, after the upscaler
+    Off = 2
+};
+
+CompareMode GetCompareMode();
+void SetCompareMode(CompareMode mode);
+void CycleCompareMode();
+const char* CompareModeName(CompareMode mode);
+double SecondsSinceCompareSwitch();
+
+// What is running right now, for the line on screen and the menu.
+struct LiveStats
+{
+    bool valid = false;
+    bool enabled = false;
+    bool preSr = false;
+    bool cache = false;
+    bool benchmark = false;
+    const char* mode = "";
+    CompareMode compare = CompareMode::Yours;
+    double renderedFps = 0.0; // frames the game renders per second -- frame generation excluded
+    double nrMs = 0.0;        // the pass on the GPU, averaged
+    unsigned int modelWidth = 0;
+    unsigned int modelHeight = 0;
+};
+
+LiveStats GetLiveStats();
+
+// The line on screen, drawn by the menu every frame it is wanted.
+bool OverlayWanted();
+void RenderOverlay(float alpha);
 
 
 
@@ -133,7 +182,6 @@ struct CacheStatus
     unsigned int framesSinceRefresh = 0;
     float lastRejected = 0.0f;
     float cumulativeRejected = 0.0f;
-    bool stencilAvailable = false;
     const char* lastRefreshReason = "";
     int regime = 1; // 0 still, 1 moving, 2 fast
     unsigned int dumpWritten = 0;
@@ -149,8 +197,13 @@ CacheStatus GetCacheStatus();
 // tools/dlssnr_cache/measure_reprojection.py. The model runs on every one of them.
 void RequestCacheDump();
 
-// The A/B benchmark: Neural Rendering off (optional), as it ships, and with the edit cache, on the same
-// scene one after the other. Rendered frames only -- frame generation is excluded on purpose.
+// The A/B benchmark: Neural Rendering off (optional), as OptiScaler ships it, with the user's settings
+// and (optional) those settings before the upscaler, on the same scene one after the other. Rendered
+// frames only -- frame generation is excluded on purpose. Each phase ends with a capture: a picture and
+// a flicker figure. The page goes to dlssnr-benchmark/<date>/rapport.html beside OptiScaler, and
+// dlssnr-benchmark.html always opens the latest.
+constexpr int kBenchmarkPhases = 4; // off, vanilla, yours, yours at the other placement
+
 struct BenchmarkResult
 {
     bool valid = false;
@@ -159,18 +212,29 @@ struct BenchmarkResult
     double frameMs = 0.0;
     double nrMs = 0.0;    // the Neural Rendering pass on the GPU, averaged
     unsigned int frames = 0;
+
+    bool flickerValid = false;
+    float flickerMean = 0.0f; // mean frame-to-frame brightness change, percent
+    float flickerP95 = 0.0f;
+    bool picture = false;
+    unsigned int shotWidth = 0;
+    unsigned int shotHeight = 0;
 };
 
 struct BenchmarkStatus
 {
     bool active = false;
     int phase = 0;
+    int step = 0;
+    int steps = 0;
+    bool capturing = false;
     float phaseProgress = 0.0f;
     bool warmingUp = false;
-    BenchmarkResult results[3]; // off, vanilla, cache
+    BenchmarkResult results[kBenchmarkPhases];
+    std::string report; // the page of the last finished run, empty until there is one
 };
 
-void StartBenchmark(bool includeOff);
+void StartBenchmark(bool includeOff, bool includeOtherPlacement, bool captures);
 void CancelBenchmark();
 BenchmarkStatus GetBenchmarkStatus();
 const char* BenchmarkPhaseName(int phase);

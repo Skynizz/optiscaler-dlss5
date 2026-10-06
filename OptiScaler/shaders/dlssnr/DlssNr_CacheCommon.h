@@ -28,13 +28,9 @@ enum DlssNrCacheMode : uint32_t
     DlssNrCacheMode_AccumulateMv = 5, // motion since the model last ran, for its own history
     DlssNrCacheMode_JbuUpsample = 6,  // a below-size model answer -> full size, guided by the frame
     DlssNrCacheMode_DumpPack = 7,     // the measurement dump's per-frame images
-    DlssNrCacheMode_CropGuides = 8,   // one band of depth and motion, for a model run on that band
-    DlssNrCacheMode_LocalMap = 9,     // the automatic white point's smoothed local luminance map
-    DlssNrCacheMode_Temporal = 10     // the temporal stabiliser: shown edit vs last frame's, clamped
+    DlssNrCacheMode_Temporal = 10,    // the temporal stabiliser: shown edit vs last frame's, clamped
+    DlssNrCacheMode_Copy = 11         // pre-SR: the game's colour into the texture the pass rewrites
 };
-
-// Spread refresh: at most this many bands, so a band never has too little of the picture around it.
-constexpr uint32_t kDlssNrCacheMaxBands = 4;
 
 // The first pyramid level is a quarter of the frame on each side, and each level below a quarter of
 // the one above. Three levels reach 1/64, coarse enough that a disocclusion the size of a character
@@ -42,10 +38,10 @@ constexpr uint32_t kDlssNrCacheMaxBands = 4;
 constexpr uint32_t kDlssNrCachePyramidStep = 4;
 constexpr uint32_t kDlssNrCachePyramidLevels = 3;
 
-// Two counters per frame slot -- pixels whose history was rejected, and how many of those were
-// priority (stencil) pixels -- and four slots, matching the readback ring.
+// One counter per frame slot -- pixels whose history was rejected -- and four slots, matching the
+// readback ring.
 constexpr uint32_t kDlssNrCacheStatSlots = 4;
-constexpr uint32_t kDlssNrCacheStatsWidth = kDlssNrCacheStatSlots * 2;
+constexpr uint32_t kDlssNrCacheStatsWidth = kDlssNrCacheStatSlots;
 
 struct alignas(256) DlssNrCacheConstants
 {
@@ -86,9 +82,6 @@ struct alignas(256) DlssNrCacheConstants
     uint32_t Bilateral;
     uint32_t DebugView;
 
-    uint32_t StencilEnabled;
-    uint32_t StencilMask;
-    uint32_t StencilRef;
     uint32_t StatsSlot;
 
     // The first accumulation after the model ran starts from zero rather than from what it was given.
@@ -104,14 +97,6 @@ struct alignas(256) DlssNrCacheConstants
 
     uint32_t FrameIndex;
 
-    // Spread refresh (see DlssNrCacheBand).
-    uint32_t BandActive;
-    uint32_t BandY0;
-    uint32_t BandHeight;
-    uint32_t BandFeather;
-    uint32_t BandEdges;
-    uint32_t CropOffsetY;
-
     // The game's live exposure (bound at t10), so the ratio floor is the composition's own on this frame.
     uint32_t UseGameExposure;
     float ExposurePreMul;
@@ -125,9 +110,6 @@ struct alignas(256) DlssNrCacheConstants
     // Bound each fresh edit by its eight neighbours' (removes isolated specks the model invents).
     uint32_t Despeckle;
 
-    // The local luminance map's temporal smoothing: the share of this frame's reading taken.
-    float MapBlend;
-
     // Keyframe crossfade: on, and this frame's step toward the model's latest answer.
     uint32_t CrossfadeOn;
     float Crossfade;
@@ -138,4 +120,8 @@ struct alignas(256) DlssNrCacheConstants
 
     // Luminance stability: the weight of last frame's regional (low band) edit, eased on its own.
     float LowTemporal;
+
+    // Pre-SR: this frame's change of camera jitter, in uv, added to every reprojection. 0 otherwise.
+    float JitterDeltaX;
+    float JitterDeltaY;
 };
