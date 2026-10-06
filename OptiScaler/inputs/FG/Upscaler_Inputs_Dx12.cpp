@@ -214,7 +214,7 @@ void UpscalerInputsDx12::UpscaleStart(ID3D12GraphicsCommandList* InCmdList, NVSD
                         setResource.width = feature->RenderWidth();
                         setResource.height = feature->RenderHeight();
                         setResource.state = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
-                        setResource.validity = FG_ResourceValidity::JustTrackCmdlist;
+                        setResource.validity = FG_ResourceValidity::UntilPresent;
 
                         fg->SetResource(&setResource);
 
@@ -265,6 +265,9 @@ void UpscalerInputsDx12::UpscaleEnd(ID3D12GraphicsCommandList* InCmdList, NVSDK_
             ID3D12Resource* output = nullptr;
             if (InParameters->Get(NVSDK_NGX_Parameter_Output, &output) != NVSDK_NGX_Result_Success)
                 InParameters->Get(NVSDK_NGX_Parameter_Output, (void**) &output);
+
+            if (output == nullptr)
+                return;
 
             ResourceInfo info {};
             auto desc = output->GetDesc();

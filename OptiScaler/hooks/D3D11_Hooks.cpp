@@ -8,6 +8,8 @@
 
 #include <wrapped/wrapped_swapchain.h>
 
+#include <resource_tracking/ResTrack_dx11.h>
+
 #include <detours/detours.h>
 
 #include <d3d11_4.h>
@@ -88,7 +90,10 @@ static inline D3D11_FILTER UpgradeToAF(D3D11_FILTER f)
 
 static void HookToDeviceLocal(ID3D11Device* InDevice)
 {
-    if (o_CreateSamplerState != nullptr || InDevice == nullptr)
+    if (InDevice == nullptr)
+        return;
+
+    if (o_CreateSamplerState != nullptr)
         return;
 
     LOG_DEBUG("Dx11");
@@ -258,6 +263,7 @@ static HRESULT hkD3D11CreateDevice(IDXGIAdapter* pAdapter, D3D_DRIVER_TYPE Drive
     HRESULT result;
     {
         ScopedSkipParentWrapping skipParentWrapping {};
+        ScopedCreatingD3DDevice creatingD3DDevice {};
         result = o_D3D11CreateDevice(pAdapter, DriverType, Software, Flags, pFeatureLevels, FeatureLevels, SDKVersion,
                                      ppDevice, pFeatureLevel, ppImmediateContext);
     }
@@ -334,12 +340,10 @@ static HRESULT hkD3D11CreateDeviceAndSwapChain(IDXGIAdapter* pAdapter, D3D_DRIVE
         }
     }
 
+    static const D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_1 };
+
     if (!(State::Instance().gameQuirks & GameQuirk::SkipD3D11FeatureLevelElevation))
     {
-        static const D3D_FEATURE_LEVEL levels[] = {
-            D3D_FEATURE_LEVEL_11_1,
-        };
-
         D3D_FEATURE_LEVEL maxLevel = D3D_FEATURE_LEVEL_1_0_CORE;
 
         for (UINT i = 0; i < FeatureLevels; ++i)
@@ -566,6 +570,8 @@ void D3D11Hooks::Hook(HMODULE dx11Module)
 
 void D3D11Hooks::Unhook()
 {
+    ResTrack_Dx11::ReleaseHooks();
+
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
 

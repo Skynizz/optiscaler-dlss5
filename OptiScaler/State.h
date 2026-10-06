@@ -41,12 +41,37 @@ enum class FGInput : uint32_t
     ForceXeLL, // Do not expose this option
 };
 
+template <> struct EnumConfig<FGInput>
+{
+    static constexpr auto default_value = FGInput::NoFG;
+
+    static constexpr std::pair<FGInput, std::string_view> mapping[] = {
+        { FGInput::NoFG, "NoFG" },       { FGInput::Upscaler, "Upscaler" },   { FGInput::DLSSG, "DLSSG" },
+        { FGInput::NvngxFG, "NvngxFG" }, { FGInput::FSRFG, "FSRFG" },         { FGInput::FSRFG30, "FSRFG30" },
+        { FGInput::XeFG, "XeFG" },       { FGInput::ForceXeLL, "ForceXeLL" },
+    };
+};
+
 enum class FGOutput : uint32_t
 {
     NoFG,
     FSRFG,
     DLSSG,
     XeFG,
+    Reprojection
+};
+
+template <> struct EnumConfig<FGOutput>
+{
+    static constexpr auto default_value = FGOutput::NoFG;
+
+    static constexpr std::pair<FGOutput, std::string_view> mapping[] = {
+        { FGOutput::NoFG, "NoFG" },
+        { FGOutput::FSRFG, "FSRFG" },
+        { FGOutput::DLSSG, "DLSSG" },
+        { FGOutput::XeFG, "XeFG" },
+        { FGOutput::Reprojection, "Reprojection" },
+    };
 };
 
 enum class FGNvngxReplacement : uint32_t
@@ -84,6 +109,48 @@ enum class SwapchainInteropApi : uint32_t
 {
     None,
     Dx11wDx12,
+};
+
+enum class ColorTransfer : uint32_t
+{
+    Unknown,
+    SRGB,
+    Linear,
+    PQ,
+    HLG
+};
+
+enum class ColorPrimaries : uint32_t
+{
+    Unknown,
+    Rec709,
+    Rec2020
+};
+
+enum class ColorRange : uint32_t
+{
+    Unknown,
+    Full,
+    Studio
+};
+
+enum class ColorModel : uint32_t
+{
+    Unknown,
+    RGB,
+    YCbCr
+};
+
+struct OutputColorSpace
+{
+    DXGI_COLOR_SPACE_TYPE dxgiColorSpace = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+
+    ColorTransfer transfer = ColorTransfer::SRGB;
+    ColorPrimaries primaries = ColorPrimaries::Rec709;
+    ColorRange range = ColorRange::Full;
+    ColorModel model = ColorModel::RGB;
+
+    bool valid = false;
 };
 
 typedef struct CapturedHudlessInfo
@@ -303,7 +370,8 @@ class State
 
     // HDR
     std::vector<IUnknown*> scBuffers;
-    bool isHdrActive = false;
+    OutputColorSpace outputColorSpace {};
+    bool hdrOutputActive = false;
 
     std::optional<ApiUpscalerInput> setInputApiName;
     ApiUpscalerInput currentInputApiName;

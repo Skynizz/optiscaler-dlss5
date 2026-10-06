@@ -43,7 +43,7 @@ static int ExportCallback(PVOID hNewDll, ULONG nOrdinal, LPCSTR pszName, PVOID p
     if (pszName == NULL)
         return true;
 
-    auto pNewFunction = GetProcAddress((HMODULE) hNewDll, pszName);
+    auto pNewFunction = KernelBaseProxy::GetProcAddress_()((HMODULE) hNewDll, pszName);
 
     if (pNewFunction && pNewFunction != pOldFunction)
     {
@@ -179,13 +179,6 @@ class XeLLProxy
 
             if (mainModule != nullptr)
             {
-                // We don't control which XeLL dll XeFG will pick
-                // Detouring GetModuleHandleExA seemingly isn't enough
-#ifndef LOW_LATENCY_INPUTS
-                if (_memoryDll && mainModule != _memoryDll)
-                    RedirectAllExports(_memoryDll, mainModule);
-#endif
-
                 break;
             }
         }

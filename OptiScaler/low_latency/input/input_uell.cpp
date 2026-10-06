@@ -1,6 +1,10 @@
 #include "pch.h"
 #include "input_uell.h"
 
+#include <DirectXMath.h>
+
+using namespace DirectX;
+
 void InputUeLowLatency::init()
 {
     if (inited)
@@ -41,7 +45,8 @@ void InputUeLowLatency::tickStart(int64_t frameId, float DeltaSeconds, bool bIdl
     if (!inited)
         InputUeLowLatency::init();
 
-    auto result = InputCommon::sleep(inputContext, device, frameId);
+    // Most backends use 32bit frameId so it is what it is
+    auto result = InputCommon::sleep(inputContext, device, (uint32_t) frameId);
 
     if (result == InputResult::UsingDifferentInput)
         return;
@@ -77,5 +82,58 @@ void InputUeLowLatency::tickEnd(int64_t frameId, float DeltaSeconds, bool bIdleM
     {
         LOG_ERROR("set_marker result: {}", magic_enum::enum_name(result));
         return;
+    }
+}
+
+static void GetCameraBasis(const float cameraRotation[3], float cameraUp[3], float cameraRight[3],
+                           float cameraForward[3])
+{
+    float pitch = DirectX::XMConvertToRadians(cameraRotation[0]);
+    float yaw = DirectX::XMConvertToRadians(cameraRotation[1]);
+    float roll = DirectX::XMConvertToRadians(cameraRotation[2]);
+
+    float SP, CP, SY, CY, SR, CR;
+    DirectX::XMScalarSinCos(&SP, &CP, pitch);
+    DirectX::XMScalarSinCos(&SY, &CY, yaw);
+    DirectX::XMScalarSinCos(&SR, &CR, roll);
+
+    cameraForward[0] = CP * CY;
+    cameraForward[1] = CP * SY;
+    cameraForward[2] = SP;
+
+    cameraRight[0] = SR * SP * CY - CR * SY;
+    cameraRight[1] = SR * SP * SY + CR * CY;
+    cameraRight[2] = -SR * CP;
+
+    cameraUp[0] = -(CR * SP * CY + SR * SY);
+    cameraUp[1] = CY * SR - CR * SP * SY;
+    cameraUp[2] = CR * CP;
+}
+
+void InputUeLowLatency::cameraUpdate(int64_t frameId, float cameraPosition[3], float cameraRotation[3], float fovAngle)
+{
+    // Technically FSRFG input might have the camera data but not guaranteed
+    // if (State::Instance().activeFgInput == FGInput::DLSSG)
+    //    return;
+
+    if (auto fg = State::Instance().currentFG)
+    {
+        auto index = (int) (frameId % BUFFER_COUNT);
+
+        float cameraUp[3];
+        float cameraRight[3];
+        float cameraForward[3];
+
+        GetCameraBasis(cameraRotation, cameraUp, cameraRight, cameraForward);
+
+        fg->SetCameraData(cameraPosition, cameraUp, cameraRight, cameraForward, index);
+
+        UINT64 width = 0;
+        UINT height = 0;
+        fg->GetInterpolationRect(width, height, index);
+        float aspectRatio = (float) width / (float) height;
+
+        // TODO: camera near and far are placeholders
+        fg->SetCameraValues(0.01f, 10000.f, DirectX::XMConvertToRadians(fovAngle), aspectRatio, 0.0f, index);
     }
 }

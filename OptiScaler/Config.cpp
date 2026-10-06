@@ -5,7 +5,6 @@
 #include "Util.h"
 
 #include "nvapi/fakenvapi.h"
-#include <hooks/Streamline_Hooks.h>
 #include <misc/IdentifyGpu.h>
 
 #include <SimpleIni.h>
@@ -70,40 +69,8 @@ bool Config::Reload(std::filesystem::path iniPath)
             FGEnabled.set_from_config(readBool("FrameGen", "Enabled"));
             FGDebugView.set_from_config(readBool("FrameGen", "DebugView"));
 
-            if (auto FGInputString = readString("FrameGen", "FGInput"); FGInputString.has_value())
-            {
-                if (lstrcmpiA(FGInputString.value().c_str(), "nofg") == 0)
-                    FGInput.set_from_config(FGInput::NoFG);
-                else if (lstrcmpiA(FGInputString.value().c_str(), "upscaler") == 0)
-                    FGInput.set_from_config(FGInput::Upscaler);
-                else if (lstrcmpiA(FGInputString.value().c_str(), "nvngxfg") == 0)
-                    FGInput.set_from_config(FGInput::NvngxFG);
-                else if (lstrcmpiA(FGInputString.value().c_str(), "dlssg") == 0)
-                    FGInput.set_from_config(FGInput::DLSSG);
-                else if (lstrcmpiA(FGInputString.value().c_str(), "fsrfg") == 0)
-                    FGInput.set_from_config(FGInput::FSRFG);
-                else if (lstrcmpiA(FGInputString.value().c_str(), "fsrfg30") == 0)
-                    FGInput.set_from_config(FGInput::FSRFG30);
-
-                if (lstrcmpiA(FGInputString.value().c_str(), "nukems") == 0)
-                {
-                    FGInput.set_from_config(FGInput::NvngxFG);
-                    ini.SetValue("FrameGen", "FGNvngxReplacement", "nukems");
-                }
-            }
-
-            if (auto FGOutputString = readString("FrameGen", "FGOutput");
-                FGInput.value_or_default() != FGInput::NvngxFG && FGOutputString.has_value())
-            {
-                if (lstrcmpiA(FGOutputString.value().c_str(), "nofg") == 0)
-                    FGOutput.set_from_config(FGOutput::NoFG);
-                else if (lstrcmpiA(FGOutputString.value().c_str(), "fsrfg") == 0)
-                    FGOutput.set_from_config(FGOutput::FSRFG);
-                else if (lstrcmpiA(FGOutputString.value().c_str(), "xefg") == 0)
-                    FGOutput.set_from_config(FGOutput::XeFG);
-                else if (lstrcmpiA(FGOutputString.value().c_str(), "dlssg") == 0)
-                    FGOutput.set_from_config(FGOutput::DLSSG);
-            }
+            FGInput.set_from_config(readString("FrameGen", "FGInput").transform(CodeToEnum<enum FGInput>));
+            FGOutput.set_from_config(readString("FrameGen", "FGOutput").transform(CodeToEnum<enum FGOutput>));
 
             const bool canUseNvngxReplacement =
                 FGInput.value_or_default() == FGInput::NvngxFG || FGOutput.value_or_default() == FGOutput::DLSSG;
@@ -184,6 +151,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             FGHUDLimit.set_from_config(readInt("OptiFG", "HUDLimit"));
             FGHUDFixExtended.set_from_config(readBool("OptiFG", "HUDFixExtended"));
             FGImmediateCapture.set_from_config(readBool("OptiFG", "HUDFixImmediate"));
+            FGHudfixPersistentBindings.set_from_config(readBool("OptiFG", "HUDFixPersistentBindings"));
             FGUseShards.set_from_config(readBool("OptiFG", "UseShards"));
             FGAlwaysTrackHeaps.set_from_config(readBool("OptiFG", "AlwaysTrackHeaps"));
             FGResourceBlocking.set_from_config(readBool("OptiFG", "ResourceBlocking"));
@@ -213,8 +181,7 @@ bool Config::Reload(std::filesystem::path iniPath)
 
         {
             FGXeFGInterpolationCount.set_from_config(readInt("XeFG", "InterpolationCount"));
-            if (FGXeFGInterpolationCount.has_value() &&
-                (FGXeFGInterpolationCount.value() < 1 || FGXeFGInterpolationCount.value() > 3))
+            if (FGXeFGInterpolationCount.has_value() && FGXeFGInterpolationCount.value() < 1)
                 FGXeFGInterpolationCount.reset();
 
             FGXeFGIgnoreInitChecks.set_from_config(readBool("XeFG", "IgnoreInitChecks"));
@@ -242,6 +209,15 @@ bool Config::Reload(std::filesystem::path iniPath)
             FGDLSSGFramerateTargetDMFG.set_from_config(readFloat("DLSSG", "FramerateTargetDMFG"));
             FGDLSSGOverrideForceDMFG.set_from_config(readBool("DLSSG", "OverrideForceDMFG"));
             FGDLSSGForceDMFG.set_from_config(readBool("DLSSG", "ForceDMFG"));
+        }
+
+        {
+            ReprojectionFillMode.set_from_config(
+                readString("Reprojection", "FillMode", true).transform(CodeToEnum<ReprojectionFill>));
+
+            ReprojectionDepthCutoff.set_from_config(readFloat("Reprojection", "DepthCutoff"));
+            ReprojectionCutoffExpand.set_from_config(readUInt("Reprojection", "CutoffExpand"));
+            ReprojectionLateLatch.set_from_config(readBool("Reprojection", "LateLatch"));
         }
 
         // FSR FG Inputs
@@ -520,7 +496,8 @@ bool Config::Reload(std::filesystem::path iniPath)
 
         // Sharpness
         {
-            SharpnessShader.set_from_config(readString("Sharpness", "Shader", true).transform(CodeToSharpnessShader));
+            SharpnessShader.set_from_config(
+                readString("Sharpness", "Shader", true).transform(CodeToEnum<SharpenShader>));
             OverrideSharpness.set_from_config(readBool("Sharpness", "OverrideSharpness"));
 
             if (auto setting = readFloat("Sharpness", "Sharpness"); setting.has_value())
@@ -531,6 +508,9 @@ bool Config::Reload(std::filesystem::path iniPath)
         {
             if (auto setting = readFloat("Menu", "Scale"); setting.has_value())
                 MenuScale.set_from_config(std::clamp(setting.value(), 0.5f, 2.0f));
+
+            if (auto setting = readFloat("Menu", "Height"); setting.has_value())
+                MenuHeight.set_from_config(std::max(setting.value(), 300.0f));
 
             // Don't enable again if set false because of Linux issue
             OverlayMenu.set_from_config(readBool("Menu", "OverlayMenu"));
@@ -575,6 +555,8 @@ bool Config::Reload(std::filesystem::path iniPath)
             MenuBGColorG.set_from_config(readFloat("Menu", "BGColorG"));
             MenuBGColorB.set_from_config(readFloat("Menu", "BGColorB"));
             MenuBGColorA.set_from_config(readFloat("Menu", "BGColorA"));
+            CustomTabEnabled.set_from_config(readBool("Menu", "CustomTabEnabled"));
+            CustomTabCards.set_from_config(readString("Menu", "CustomTabCards"));
         }
 
         // Hooks
@@ -752,6 +734,9 @@ bool Config::Reload(std::filesystem::path iniPath)
         // NvApi
         {
             DisableFlipMetering.set_from_config(readBool("NvApi", "DisableFlipMetering"));
+            DisableOTA.set_from_config(readBool("NvApi", "DisableOTA"));
+            ImASillyGooseThatIsAboutToMisuseReflex.set_from_config(
+                readBool("NvApi", "ImASillyGooseThatIsAboutToMisuseReflex"));
         }
 
         // Spoofing
@@ -958,36 +943,13 @@ bool Config::SaveIni()
     {
         ini.SetValue("FrameGen", "Enabled", GetBoolValue(Instance()->FGEnabled.value_for_config()).c_str());
         ini.SetValue("FrameGen", "DebugView", GetBoolValue(Instance()->FGDebugView.value_for_config()).c_str());
-        std::string FGInputString = "auto";
-        if (auto FGInputHeld = Instance()->FGInput.value_for_config(); FGInputHeld.has_value())
-        {
-            if (FGInputHeld.value() == FGInput::NoFG)
-                FGInputString = "NoFG";
-            else if (FGInputHeld.value() == FGInput::Upscaler)
-                FGInputString = "Upscaler";
-            else if (FGInputHeld.value() == FGInput::NvngxFG)
-                FGInputString = "NvngxFG";
-            else if (FGInputHeld.value() == FGInput::DLSSG)
-                FGInputString = "DLSSG";
-            else if (FGInputHeld.value() == FGInput::FSRFG)
-                FGInputString = "FSRFG";
-            else if (FGInputHeld.value() == FGInput::FSRFG30)
-                FGInputString = "FSRFG30";
-        }
+
+        std::string FGInputString =
+            Instance()->FGInput.value_for_config().transform(EnumToCode<enum FGInput>).value_or("auto");
         ini.SetValue("FrameGen", "FGInput", FGInputString.c_str());
 
-        std::string FGOutputString = "auto";
-        if (auto FGOutputHeld = Instance()->FGOutput.value_for_config(); FGOutputHeld.has_value())
-        {
-            if (FGOutputHeld.value() == FGOutput::NoFG)
-                FGOutputString = "NoFG";
-            else if (FGOutputHeld.value() == FGOutput::FSRFG)
-                FGOutputString = "FSRFG";
-            else if (FGOutputHeld.value() == FGOutput::XeFG)
-                FGOutputString = "XeFG";
-            else if (FGOutputHeld.value() == FGOutput::DLSSG)
-                FGOutputString = "DLSSG";
-        }
+        std::string FGOutputString =
+            Instance()->FGOutput.value_for_config().transform(EnumToCode<enum FGOutput>).value_or("auto");
         ini.SetValue("FrameGen", "FGOutput", FGOutputString.c_str());
 
         std::string FGNvngxReplacementString = "auto";
@@ -1097,6 +1059,20 @@ bool Config::SaveIni()
         ini.SetValue("DLSSG", "ForceDMFG", GetBoolValue(Instance()->FGDLSSGForceDMFG.value_for_config()).c_str());
     }
 
+    // Reprojection
+    {
+        std::string fillMode =
+            ReprojectionFillMode.value_for_config().transform(EnumToCode<ReprojectionFill>).value_or("auto");
+
+        ini.SetValue("Reprojection", "FillMode", fillMode.c_str());
+        ini.SetValue("Reprojection", "DepthCutoff",
+                     GetFloatValue(Instance()->ReprojectionDepthCutoff.value_for_config()).c_str());
+        ini.SetValue("Reprojection", "CutoffExpand",
+                     GetIntValue(Instance()->ReprojectionCutoffExpand.value_for_config()).c_str());
+        ini.SetValue("Reprojection", "LateLatch",
+                     GetBoolValue(Instance()->ReprojectionLateLatch.value_for_config()).c_str());
+    }
+
     // OptiFG
     {
         ini.SetValue("OptiFG", "DisableHUDFix", GetBoolValue(Instance()->FGDisableHUDFix.value_for_config()).c_str());
@@ -1105,6 +1081,8 @@ bool Config::SaveIni()
         ini.SetValue("OptiFG", "HUDFixExtended", GetBoolValue(Instance()->FGHUDFixExtended.value_for_config()).c_str());
         ini.SetValue("OptiFG", "HUDFixImmediate",
                      GetBoolValue(Instance()->FGImmediateCapture.value_for_config()).c_str());
+        ini.SetValue("OptiFG", "HUDFixPersistentBindings",
+                     GetBoolValue(Instance()->FGHudfixPersistentBindings.value_for_config()).c_str());
         ini.SetValue("OptiFG", "UseShards", GetBoolValue(Instance()->FGUseShards.value_for_config()).c_str());
         ini.SetValue("OptiFG", "AlwaysTrackHeaps",
                      GetBoolValue(Instance()->FGAlwaysTrackHeaps.value_for_config()).c_str());
@@ -1369,7 +1347,7 @@ bool Config::SaveIni()
     // Sharpness
     {
         std::string shader = SharpnessShader.value_for_config()
-                                 .transform(SharpnessShaderToCode) // Turn enum into string
+                                 .transform(EnumToCode<SharpenShader>) // Turn enum into string
                                  .value_or("auto");
 
         ini.SetValue("Sharpness", "Shader", shader.c_str());
@@ -1424,6 +1402,7 @@ bool Config::SaveIni()
     // Menu
     {
         ini.SetValue("Menu", "Scale", GetFloatValue(Instance()->MenuScale).c_str());
+        ini.SetValue("Menu", "Height", GetFloatValue(Instance()->MenuHeight).c_str());
         ini.SetValue("Menu", "OverlayMenu", GetBoolValue(Instance()->OverlayMenu.value_for_config()).c_str());
 
         auto setting = Instance()->ShortcutKey.value_for_config();
@@ -1466,6 +1445,8 @@ bool Config::SaveIni()
         ini.SetValue("Menu", "BGColorG", GetFloatValue(Instance()->MenuBGColorG.value_for_config()).c_str());
         ini.SetValue("Menu", "BGColorB", GetFloatValue(Instance()->MenuBGColorB.value_for_config()).c_str());
         ini.SetValue("Menu", "BGColorA", GetFloatValue(Instance()->MenuBGColorA.value_for_config()).c_str());
+        ini.SetValue("Menu", "CustomTabEnabled", GetBoolValue(Instance()->CustomTabEnabled.value_for_config()).c_str());
+        ini.SetValue("Menu", "CustomTabCards", Instance()->CustomTabCards.value_for_config_or("auto").c_str());
     }
 
     // Hooks
@@ -1613,6 +1594,7 @@ bool Config::SaveIni()
     {
         ini.SetValue("NvApi", "DisableFlipMetering",
                      GetBoolValue(Instance()->DisableFlipMetering.value_for_config()).c_str());
+        ini.SetValue("NvApi", "DisableOTA", GetBoolValue(Instance()->DisableOTA.value_for_config()).c_str());
     }
 
     // DRS

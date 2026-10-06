@@ -9,11 +9,13 @@
 #include <d3d11_4.h>
 #include <dxgi1_6.h>
 
-#define DX11WDX12_NUM_OF_BUFFERS 2
+#define DX11WDX12_COMMAND_BUFFER_COUNT 3
 
 class IFeature_Dx11wDx12 : public virtual IFeature_Dx11
 {
   private:
+    std::vector<DetailedGpuTime> detailedGpuTimes;
+
     template <typename F, typename Default> auto CallFeature(F&& f, Default&& def)
     {
         if (auto feature = dx12Feature.get(); feature)
@@ -31,12 +33,12 @@ class IFeature_Dx11wDx12 : public virtual IFeature_Dx11
     D3D12_COMMAND_LIST_TYPE Dx12CommandListType = D3D12_COMMAND_LIST_TYPE_DIRECT;
 
     ID3D12CommandQueue* Dx12CommandQueue = nullptr;
-    ID3D12CommandAllocator* Dx12CommandAllocator[DX11WDX12_NUM_OF_BUFFERS] {};
-    ID3D12GraphicsCommandList* Dx12CommandList[DX11WDX12_NUM_OF_BUFFERS] {};
+    ID3D12CommandAllocator* Dx12CommandAllocator[DX11WDX12_COMMAND_BUFFER_COUNT] {};
+    ID3D12GraphicsCommandList* Dx12CommandList[DX11WDX12_COMMAND_BUFFER_COUNT] {};
     ID3D12Fence* Dx12Fence = nullptr;
     HANDLE Dx12FenceEvent = nullptr;
     UINT64 Dx12FenceValue = 0;
-    UINT64 Dx12CommandAllocatorFenceValue[DX11WDX12_NUM_OF_BUFFERS] = {};
+    UINT64 Dx12CommandAllocatorFenceValue[DX11WDX12_COMMAND_BUFFER_COUNT] = {};
 
     Dx11WithDx12::D3D11_TEXTURE2D_RESOURCE_C dx11Color = {};
     Dx11WithDx12::D3D11_TEXTURE2D_RESOURCE_C dx11Mv = {};
@@ -45,7 +47,7 @@ class IFeature_Dx11wDx12 : public virtual IFeature_Dx11
     Dx11WithDx12::D3D11_TEXTURE2D_RESOURCE_C dx11Exp = {};
     Dx11WithDx12::D3D11_TEXTURE2D_RESOURCE_C dx11Out = {};
 
-    ID3D11Resource* paramOutput[DX11WDX12_NUM_OF_BUFFERS] = {};
+    ID3D11Resource* paramOutput[DX11_WITH_DX12_CACHED_FRAMES] = {};
 
     bool CreateD3D12Objects();
     bool ProcessDx11Textures(const NVSDK_NGX_Parameter* InParameters);
@@ -74,14 +76,45 @@ class IFeature_Dx11wDx12 : public virtual IFeature_Dx11
     std::optional<double> ReadUpscalerTime(void* deviceContextVoid) override
     {
         if (auto feature = dx12Feature.get(); feature && Dx12CommandQueue)
-            return feature->ReadUpscalerTime(Dx12CommandQueue);
+        {
+            auto dx12UpscalerTime = feature->ReadUpscalerTime(Dx12CommandQueue);
+
+            feature->ReadDetailedGpuTimes(Dx12CommandQueue, detailedGpuTimes);
+
+            // Count up shader times that are included in upscalerWithInterop but not in dx12UpscalerTime
+            double deductedUpscalerTime = 0.0;
+            for (const auto& time : detailedGpuTimes)
+            {
+                if (!time.includedInUpscalerTime)
+                {
+                    deductedUpscalerTime += time.time;
+                    break;
+                }
+            }
+
+            auto upscalerWithInterop = UpscalerTime->ReadGpuTime((ID3D11DeviceContext*) deviceContextVoid);
+
+            if (dx12UpscalerTime && upscalerWithInterop)
+            {
+                auto interopTime = upscalerWithInterop.value() - dx12UpscalerTime.value() - deductedUpscalerTime;
+
+                if (interopTime > 0.0)
+                {
+                    detailedGpuTimes.push_back({ "Interop", interopTime, true });
+                    return interopTime + dx12UpscalerTime.value();
+                }
+            }
+
+            return std::nullopt;
+        }
 
         return std::nullopt;
     };
+
     void ReadDetailedGpuTimes(void* deviceContextVoid, std::vector<DetailedGpuTime>& detailedGpuTimes) override
     {
-        if (auto feature = dx12Feature.get(); feature && Dx12CommandQueue)
-            return feature->ReadDetailedGpuTimes(Dx12CommandQueue, detailedGpuTimes);
+        // We already queried and prepared detailedGpuTimes in ReadUpscalerTime
+        detailedGpuTimes = this->detailedGpuTimes;
     };
 
     feature_version Version() final
@@ -94,10 +127,10 @@ class IFeature_Dx11wDx12 : public virtual IFeature_Dx11
         return CallFeature([](auto f) { return f->JitterCount(); }, size_t {});
     }
 
-    void TickFrozenCheck() override
+    void TickFrozenCheck(uint32_t presentPerEval = 1) override
     {
         if (auto feature = dx12Feature.get(); feature)
-            return feature->TickFrozenCheck();
+            return feature->TickFrozenCheck(presentPerEval);
     };
 
     bool IsFrozen() override

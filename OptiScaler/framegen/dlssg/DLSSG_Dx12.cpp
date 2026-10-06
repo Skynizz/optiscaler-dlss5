@@ -3,6 +3,8 @@
 #include "DLSSG_Dx12.h"
 
 #include <hudfix/Hudfix_Dx12.h>
+#include <hudfix/Hudfix_Dx11.h>
+
 #include <menu/menu_overlay_dx.h>
 #include <resource_tracking/ResTrack_dx12.h>
 
@@ -28,47 +30,9 @@ feature_version DLSSG_Dx12::Version()
 
 HWND DLSSG_Dx12::Hwnd() { return _hwnd; }
 
-bool DLSSG_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cmdQueue, DXGI_SWAP_CHAIN_DESC* desc,
-                                 IDXGISwapChain** swapChain, bool readyToRelease)
+bool DLSSG_Dx12::CreateSwapchainInternal(IDXGIFactory* factory, ID3D12CommandQueue* cmdQueue,
+                                         DXGI_SWAP_CHAIN_DESC* desc, IDXGISwapChain** swapChain)
 {
-    if (State::Instance().currentFGSwapchain != nullptr && _hwnd == desc->OutputWindow)
-    {
-        if (Config::Instance()->FGPreserveSwapChain.value_or_default())
-        {
-            LOG_WARN("FG swapchain already created for the same output window!");
-            auto result = State::Instance().currentFGSwapchain->ResizeBuffers(
-                              desc->BufferCount, desc->BufferDesc.Width, desc->BufferDesc.Height,
-                              desc->BufferDesc.Format, desc->Flags) == S_OK;
-
-            *swapChain = State::Instance().currentFGSwapchain;
-            return result;
-        }
-        // Game is creating new swapchain without releasing old one,
-        // we need to release it to avoid errors
-        else if (readyToRelease)
-        {
-            LOG_INFO("Releasing old swapchain");
-            ReleaseSwapchain(_hwnd);
-
-            // Not sure why but XeFG sometimes doesn't release the swapchain properly
-            // so we force release it here to be able to recreate swapchain for same hwnd
-            if (State::Instance().currentRealSwapchain != nullptr)
-            {
-                UINT release = 0;
-                do
-                {
-                    release = State::Instance().currentRealSwapchain->Release();
-                    LOG_DEBUG("Releasing swapchain, ref count: {}", release);
-                } while (release > 0);
-            }
-        }
-        else
-        {
-            LOG_WARN("FG swapchain already exists for the same output window and is not ready to release!");
-            return false;
-        }
-    }
-
     if (StreamlineProxy::Module() == nullptr)
     {
         LOG_ERROR("Streamline proxy can't find sl.interposer.dll!");
@@ -119,6 +83,7 @@ bool DLSSG_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cmdQ
     sl::DLSSGOptions dlssgOptions {};
     if (StreamlineProxy::DLSSGGetState()(viewport, dlssgState, &dlssgOptions) == sl::Result::eOk)
     {
+        State::Instance().dlssgMfgMax = dlssgState.numFramesToGenerateMax;
         _maxInterpolationCount = dlssgState.numFramesToGenerateMax;
         LOG_INFO("Max supported interpolations: {}", dlssgState.numFramesToGenerateMax);
 
@@ -132,47 +97,10 @@ bool DLSSG_Dx12::CreateSwapchain(IDXGIFactory* factory, ID3D12CommandQueue* cmdQ
     return true;
 }
 
-bool DLSSG_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* cmdQueue, HWND hwnd,
-                                  DXGI_SWAP_CHAIN_DESC1* desc, DXGI_SWAP_CHAIN_FULLSCREEN_DESC* pFullscreenDesc,
-                                  IDXGISwapChain1** swapChain, bool readyToRelease)
+bool DLSSG_Dx12::CreateSwapchain1Internal(IDXGIFactory* factory, ID3D12CommandQueue* cmdQueue, HWND hwnd,
+                                          DXGI_SWAP_CHAIN_DESC1* desc, DXGI_SWAP_CHAIN_FULLSCREEN_DESC* pFullscreenDesc,
+                                          IDXGISwapChain1** swapChain)
 {
-    if (State::Instance().currentFGSwapchain != nullptr && _hwnd == hwnd)
-    {
-        if (Config::Instance()->FGPreserveSwapChain.value_or_default())
-        {
-            LOG_WARN("FG swapchain already created for the same output window!");
-            auto result = State::Instance().currentFGSwapchain->ResizeBuffers(
-                              desc->BufferCount, desc->Width, desc->Height, desc->Format, desc->Flags) == S_OK;
-
-            *swapChain = (IDXGISwapChain1*) State::Instance().currentFGSwapchain;
-            return result;
-        }
-        // Game is creating new swapchain without releasing old one,
-        // we need to release it to avoid errors
-        else if (readyToRelease)
-        {
-            LOG_INFO("Releasing old swapchain");
-            ReleaseSwapchain(_hwnd);
-
-            // Not sure why but XeFG sometimes doesn't release the swapchain properly
-            // so we force release it here to be able to recreate swapchain for same hwnd
-            if (State::Instance().currentRealSwapchain != nullptr)
-            {
-                UINT release = 0;
-                do
-                {
-                    release = State::Instance().currentRealSwapchain->Release();
-                    LOG_DEBUG("Releasing swapchain, ref count: {}", release);
-                } while (release > 0);
-            }
-        }
-        else
-        {
-            LOG_WARN("FG swapchain already exists for the same output window and is not ready to release!");
-            return false;
-        }
-    }
-
     if (StreamlineProxy::Module() == nullptr)
     {
         LOG_ERROR("Streamline proxy can't find sl.interposer.dll!");
@@ -228,6 +156,7 @@ bool DLSSG_Dx12::CreateSwapchain1(IDXGIFactory* factory, ID3D12CommandQueue* cmd
     sl::DLSSGOptions dlssgOptions {};
     if (StreamlineProxy::DLSSGGetState()(viewport, dlssgState, &dlssgOptions) == sl::Result::eOk)
     {
+        State::Instance().dlssgMfgMax = dlssgState.numFramesToGenerateMax;
         _maxInterpolationCount = dlssgState.numFramesToGenerateMax;
         LOG_INFO("Max supported interpolations: {}", dlssgState.numFramesToGenerateMax);
 
@@ -439,27 +368,37 @@ bool DLSSG_Dx12::Dispatch()
         constData.cameraFwd = { 1.0f, 0.0f, 0.0f };
         constData.cameraPinholeOffset = { 0.0f, 0.0f };
 
+        auto prev = XMMatrixIdentity();
+
+        XMFLOAT4X4 temp;
+        XMStoreFloat4x4(&temp, prev);
+        memcpy(&constData.clipToLensClip, &temp, sizeof(sl::float4x4));
+        memcpy(&constData.clipToPrevClip, &temp, sizeof(sl::float4x4));
+        memcpy(&constData.prevClipToClip, &temp, sizeof(sl::float4x4));
+    }
+
+    {
         XMMATRIX cameraViewToClip {};
+        XMMATRIX clipToCameraView {};
+
+        float vFov = _cameraVFov[fIndex];
 
         // XMMatrixPerspectiveFovRH will fail if input values are incorrect
-        if (_cameraNear[fIndex] > 0.f && _cameraFar[fIndex] > 0.f &&
-            !XMScalarNearEqual(_cameraVFov[fIndex], 0.0f, 0.00001f) &&
+        if (_cameraNear[fIndex] > 0.f && _cameraFar[fIndex] > 0.f && std::isfinite(_cameraNear[fIndex]) &&
+            std::isfinite(_cameraFar[fIndex]) && !XMScalarNearEqual(vFov, 0.0f, 0.00001f) &&
             !XMScalarNearEqual(_cameraAspectRatio[fIndex], 0.0f, 0.00001f))
         {
             if (XMScalarNearEqual(_cameraNear[fIndex], _cameraFar[fIndex], 0.00001f))
                 _cameraFar[fIndex]++;
 
-            cameraViewToClip = XMMatrixPerspectiveFovRH(_cameraVFov[fIndex], _cameraAspectRatio[fIndex],
-                                                        _cameraNear[fIndex], _cameraFar[fIndex]);
+            cameraViewToClip =
+                XMMatrixPerspectiveFovRH(vFov, _cameraAspectRatio[fIndex], _cameraNear[fIndex], _cameraFar[fIndex]);
+            clipToCameraView = XMMatrixInverse(nullptr, cameraViewToClip);
         }
         else
         {
             LOG_WARN("Can't calculate projectionMatrix");
         }
-
-        XMMATRIX clipToCameraView = XMMatrixInverse(nullptr, cameraViewToClip);
-
-        auto prev = XMMatrixIdentity();
 
         // Convert to sl::float4x4 for Streamline
         XMFLOAT4X4 temp;
@@ -467,11 +406,6 @@ bool DLSSG_Dx12::Dispatch()
         memcpy(&constData.cameraViewToClip, &temp, sizeof(sl::float4x4));
         XMStoreFloat4x4(&temp, clipToCameraView);
         memcpy(&constData.clipToCameraView, &temp, sizeof(sl::float4x4));
-
-        XMStoreFloat4x4(&temp, prev);
-        memcpy(&constData.clipToLensClip, &temp, sizeof(sl::float4x4));
-        memcpy(&constData.clipToPrevClip, &temp, sizeof(sl::float4x4));
-        memcpy(&constData.prevClipToClip, &temp, sizeof(sl::float4x4));
     }
 
     constData.cameraAspectRatio = _cameraAspectRatio[fIndex];
@@ -607,6 +541,7 @@ void DLSSG_Dx12::EvaluateState(ID3D12Device* device, FG_Constants& fgConstants)
 
         state.clearCapturedHudlesses = true;
         Hudfix_Dx12::ResetCounters();
+        Hudfix_Dx11::ResetCounters();
     }
 
     if (state.fgChanged)
@@ -616,6 +551,7 @@ void DLSSG_Dx12::EvaluateState(ID3D12Device* device, FG_Constants& fgConstants)
         state.fgChanged = false;
 
         Hudfix_Dx12::ResetCounters();
+        Hudfix_Dx11::ResetCounters();
 
         // Pause for 10 frames
         UpdateTarget();
@@ -791,7 +727,6 @@ bool DLSSG_Dx12::Present()
     {
         auto ui = GetResource(FG_ResourceType::UIColor, fIndex);
         if (ui && (ui->validity == FG_ResourceValidity::UntilPresent ||
-                   ui->validity == FG_ResourceValidity::JustTrackCmdlist ||
                    ui->validity == FG_ResourceValidity::UntilPresentFromDispatch))
         {
             LOG_DEBUG("UI[{}] resource: {:X}, copy: {}", fIndex, (size_t) ui->resource, (size_t) ui->copy);
@@ -827,7 +762,6 @@ bool DLSSG_Dx12::Present()
         {
             auto hudless = GetResource(FG_ResourceType::HudlessColor, fIndex);
             if (hudless && (hudless->validity == FG_ResourceValidity::UntilPresent ||
-                            hudless->validity == FG_ResourceValidity::JustTrackCmdlist ||
                             hudless->validity == FG_ResourceValidity::UntilPresentFromDispatch))
             {
                 LOG_DEBUG("Hudless[{}] resource: {:X}, copy: {}", fIndex, (size_t) hudless->resource,
@@ -1032,8 +966,7 @@ bool DLSSG_Dx12::SetResource(Dx12Resource* inputResource)
         _noHudless[fIndex] = false;
 
     if ((type == FG_ResourceType::Depth || type == FG_ResourceType::Velocity) ||
-        (fResource->validity != FG_ResourceValidity::UntilPresent &&
-         fResource->validity != FG_ResourceValidity::JustTrackCmdlist))
+        fResource->validity != FG_ResourceValidity::UntilPresent)
     {
         fResource->validity = (fResource->validity != FG_ResourceValidity::ValidNow || willFlip)
                                   ? FG_ResourceValidity::UntilPresent

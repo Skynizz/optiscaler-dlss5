@@ -163,13 +163,13 @@ std::string UpscalerToCode(Upscaler upscaler)
 Upscaler CodeToUpscaler(const std::string& code)
 {
     static const std::unordered_map<std::string, Upscaler> mapping = {
-        { "xess", Upscaler::XeSS },   { "xess_12", Upscaler::XeSS_on12 },
-        { "fsr21", Upscaler::FSR21 }, { "fsr21_12", Upscaler::FSR21_on12 },
-        { "fsr22", Upscaler::FSR22 }, { "fsr22_12", Upscaler::FSR22_on12 },
-        { "ffx", Upscaler::FFX },     { "ffx_12", Upscaler::FFX_on12 },
-        { "dlss", Upscaler::DLSS },   { "dlssd", Upscaler::DLSSD },
-        { "dlss_12", Upscaler::DLSS_on12 },
-        { "fsr31", Upscaler::FSR31 }, { "fsr31_12", Upscaler::FFX_on12 }, // for compat reasons
+        { "xess", Upscaler::XeSS },         { "xess_12", Upscaler::XeSS_on12 },
+        { "fsr21", Upscaler::FSR21 },       { "fsr21_12", Upscaler::FSR21_on12 },
+        { "fsr22", Upscaler::FSR22 },       { "fsr22_12", Upscaler::FSR22_on12 },
+        { "ffx", Upscaler::FFX },           { "ffx_12", Upscaler::FFX_on12 },
+        { "dlss", Upscaler::DLSS },         { "dlss_12", Upscaler::DLSS_on12 },
+        { "dlssd", Upscaler::DLSSD },       { "fsr31", Upscaler::FSR31 },
+        { "fsr31_12", Upscaler::FFX_on12 }, // for compat reasons
     };
 
     auto it = mapping.find(code);
@@ -187,33 +187,4 @@ Upscaler CodeToUpscalerFfx(const std::string& code)
         return Upscaler::FFX;
 
     return CodeToUpscaler(code);
-}
-
-// Converts enum to the string codes for config
-std::string SharpnessShaderToCode(SharpenShader sharpenShader)
-{
-    switch (sharpenShader)
-    {
-    case SharpenShader::RCAS:
-        return "rcas";
-    case SharpenShader::DepthAware:
-        return "da";
-    case SharpenShader::LocalContrastDepthAware:
-        return "lcda";
-    default:
-        return "";
-    }
-}
-
-// Converts string codes into enum for config
-SharpenShader CodeToSharpnessShader(const std::string& code)
-{
-    static const std::unordered_map<std::string, SharpenShader> mapping = {
-        { "rcas", SharpenShader::RCAS },
-        { "da", SharpenShader::DepthAware },
-        { "lcda", SharpenShader::LocalContrastDepthAware },
-    };
-
-    auto it = mapping.find(code);
-    return (it != mapping.end()) ? it->second : SharpenShader::RCAS;
 }

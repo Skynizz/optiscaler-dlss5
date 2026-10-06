@@ -19,11 +19,11 @@ bool DLSSFeatureDx12::InitDLSS(ID3D12GraphicsCommandList* InCommandList, NVSDK_N
         return false;
     }
 
-    if (!_dlssInitedDx12)
+    if (!_dlssInited)
     {
-        _dlssInitedDx12 = NVNGXProxy::InitDx12(Device);
+        _dlssInited = NVNGXProxy::InitDx12(Device);
 
-        if (!_dlssInitedDx12)
+        if (!_dlssInited)
             return false;
 
         _moduleLoaded =
@@ -110,7 +110,7 @@ bool DLSSFeatureDx12::EvaluateInternal(ID3D12GraphicsCommandList* InCommandList,
 
 void DLSSFeatureDx12::Shutdown(ID3D12Device* InDevice)
 {
-    if (_dlssInitedDx12)
+    if (_dlssInited)
     {
         if (NVNGXProxy::D3D12_Shutdown() != nullptr)
             NVNGXProxy::D3D12_Shutdown()();

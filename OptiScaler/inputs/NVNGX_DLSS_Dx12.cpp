@@ -377,12 +377,22 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_Shutdown(void)
 
     D3D12Device = nullptr;
 
+    if (const auto feature = State::Instance().currentFeature)
+    {
+        const bool usesDx12Dlss = feature->GetUpscalerType() == Upscaler::DLSS && feature->Api() == API::DX12;
+
+        if (usesDx12Dlss)
+        {
+            const auto dlssFeature = dynamic_cast<DLSSFeatureDx12*>(feature);
+            dlssFeature->Shutdown(D3D12Device);
+        }
+    }
+
     State::Instance().currentFeature = nullptr;
 
     // Unhooking and cleaning stuff causing issues during shutdown.
     // Disabled for now to check if it cause any issues
     // UnhookAll();
-    DLSSFeatureDx12::Shutdown(D3D12Device);
 
     // Added `&& !State::Instance().isShuttingDown` hack for crash on exit
     if (Config::Instance()->DLSSEnabled.value_or_default() && NVNGXProxy::IsDx12Inited() &&
@@ -1063,11 +1073,11 @@ static NVSDK_NGX_Result TryEvaluateOptiFeature(ID3D12GraphicsCommandList* InCmdL
     // Evaluate the feature
     bool evalSuccess = false;
     {
-        // Resource tracking
-        UpscalerInputsDx12::UpscaleEnd(InCmdList, InParameters, feature);
-
         ScopedSkipHeapCapture skip {};
         evalSuccess = feature->Evaluate(InCmdList, InParameters);
+
+        // Resource tracking
+        UpscalerInputsDx12::UpscaleEnd(InCmdList, InParameters, feature);
     }
 
     if (!evalSuccess)
