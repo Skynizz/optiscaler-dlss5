@@ -46,6 +46,50 @@ des débris animés. Les écarts de moins de 0,05 point ne sont pas significatif
   x1,09 à x1,15.
 - La compensation du jitter dans le cache réduit le scintillement du pre-SR de 0,54 à 0,47 %.
 
+## Face aux autres DLSS 5 (6 octobre 2026)
+
+Mêmes conditions, même scène, chaque outil réglé sur ses options les plus rapides :
+
+- **ShyVortex/OptiScaler-DLSSNR-PreSR-Multipass v0.9.34** : pre-SR, modèle à 100 % puis 75 %, point
+  blanc automatique (`WhitePointSource=3`). Avec son réglage par défaut (point blanc manuel), le
+  modèle ne produit presque rien dans Control (détail x0,99, effet 0,03 stop).
+- **janblade/OptiScaler-F5-DLSSNR-Multipass v0.1.27** : pre-SR avec réutilisation du goulot du
+  modèle une image sur deux (`VitEvery=2`), puis après SR avec `DetailReuse` et résolution du modèle
+  automatique.
+- **Addon RenoDX DLSS5** (build du 19 septembre) : ne fonctionne pas dans Control Resonant. Sans les
+  hooks Streamline il ne s'enclenche jamais (0 évaluation), avec `EnableHooks=1` le jeu reste figé au
+  démarrage. Les versions récentes ne sont distribuées que sur le Discord RenoDX, non testées ici.
+
+Le coût est celui que chaque outil journalise pour sa passe complète. Comme ces forks remplacent
+OptiScaler, notre benchmark ne peut pas les mesurer directement : les FPS sont estimés par
+1000 / (16,08 ms + coût), 16,08 ms étant le temps d'image mesuré sans DLSS 5. La formule retombe à
+1 % près sur nos mesures réelles (vanilla 34,4 mesuré, 34,4 estimé ; Quality 46,7 et 46,3).
+
+Le scintillement, le détail et l'effet sont mesurés de la même façon pour tous, sur 12 captures
+d'écran consécutives (zone fixe de la scène, personnage exclu) : un jeu HDR capturé en SDR, donc les
+valeurs absolues diffèrent du tableau du dessus, seuls les écarts comptent.
+
+| Mode | Coût DLSS 5 | FPS estimés | Scintillement | Détail | Effet |
+|---|---:|---:|---:|---:|---:|
+| DLSS 5 désactivé | - | 62,2 | 0,34 % | x1,00 | - |
+| DLSS 5 d'origine (OptiScaler) | 13,03 ms | 34,4 | 0,38 % | x1,14 | 0,12 stop |
+| **Nous : Performance** (pre-SR, 1 image sur 2) | **2,89 ms** | **52,7** | 0,40 % | x1,19 | 0,15 stop |
+| F5 : après SR + DetailReuse | 3,50 ms | 51,1 | 0,52 % | x1,23 | 0,15 stop |
+| ShyVortex : pre-SR 75 % | 3,74 ms | 50,5 | 0,37 % | x1,11 | 0,17 stop |
+| F5 : pre-SR, VitEvery 2 | 4,85 ms | 47,8 | 0,41 % | x1,25 | 0,13 stop |
+| ShyVortex : pre-SR 100 % | 5,35 ms | 46,7 | 0,45 % | x1,34 | 0,18 stop |
+| **Nous : Quality** (pre-SR, chaque image) | 5,53 ms | 46,3 | **0,36 %** | x1,32 | 0,15 stop |
+
+Ce qu'on en retient :
+
+- Notre mode Performance est le moins cher de tous (2,89 ms, 17 % de moins que le suivant), avec
+  plus de détail que ShyVortex à 75 % et moins de scintillement que la DetailReuse de F5.
+- Notre mode Quality est parmi les plus stables (0,36 %, à égalité avec ShyVortex à 75 % qui a
+  nettement moins de détail), avec autant de détail que ShyVortex à 100 % qui scintille plus. Il coûte en revanche 0,7 ms de plus que le pre-SR de F5, qui réutilise une
+  partie du calcul interne du modèle d'une image à l'autre : c'est la piste à reprendre.
+- Les écarts de scintillement de moins de 0,05 point et d'effet de moins de 0,02 stop sont dans le
+  bruit de mesure (une seule scène, une passe par mode).
+
 ## Captures
 
 | | |

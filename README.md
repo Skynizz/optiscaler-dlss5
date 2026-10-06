@@ -25,6 +25,23 @@ mode après 3 s de stabilisation.
 - **Détail ajouté** : micro-contraste de l'image par rapport à DLSS 5 désactivé, sur la partie fixe
   de la scène.
 
+### Face aux autres DLSS 5
+
+Même scène, chaque outil sur ses réglages les plus rapides (coût journalisé par chaque outil, FPS
+estimés de la même façon pour tous) :
+
+| | Coût DLSS 5 | FPS estimés | Scintillement | Détail |
+|---|---:|---:|---:|---:|
+| **Ce fork, Performance** | **2,89 ms** | **52,7** | 0,40 % | x1,19 |
+| F5 v0.1.27, DetailReuse | 3,50 ms | 51,1 | 0,52 % | x1,23 |
+| ShyVortex v0.9.34, pre-SR 75 % | 3,74 ms | 50,5 | 0,37 % | x1,11 |
+| F5 v0.1.27, pre-SR | 4,85 ms | 47,8 | 0,41 % | x1,25 |
+| ShyVortex v0.9.34, pre-SR 100 % | 5,35 ms | 46,7 | 0,45 % | x1,34 |
+| **Ce fork, Quality** | 5,53 ms | 46,3 | **0,36 %** | x1,32 |
+
+L'addon RenoDX DLSS5 ne s'enclenche pas dans Control Resonant (ou fige le jeu avec les hooks
+Streamline), il n'a pas pu être mesuré.
+
 Détail des mesures et méthode : [docs/comparaison.md](docs/comparaison.md).
 
 ![Comparaison](docs/benchmark/zoom.jpg)
