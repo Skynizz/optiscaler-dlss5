@@ -2,7 +2,8 @@
 
 Fork d'[OptiScaler](https://github.com/optiscaler/OptiScaler), basé sur
 [OptiScaler_DLSSNR](https://github.com/Dagherbou/OptiScaler_DLSSNR) de Dagherbou, qui fait tourner
-DLSS 5 Neural Rendering pour beaucoup moins cher et avec moins de scintillement.
+DLSS 5 Neural Rendering pour beaucoup moins cher et avec moins de scintillement. Base OptiScaler :
+`master` du 6 octobre 2026.
 
 Le modèle NVIDIA (`nvngx_dlssnr.dll`) n'est pas fourni.
 
@@ -42,6 +43,22 @@ estimés de la même façon pour tous) :
 L'addon RenoDX DLSS5 ne s'enclenche pas dans Control Resonant (ou fige le jeu avec les hooks
 Streamline), il n'a pas pu être mesuré.
 
+### Styles et multi-pass
+
+Même scène, réglage Quality (pre-SR, modèle à chaque image) :
+
+| | FPS | Coût DLSS 5 | Scintillement | Détail | Effet |
+|---|---:|---:|---:|---:|---:|
+| DLSS 5 d'origine | 35,0 | 13,1 ms | 0,43-0,52 % | x1,11 | 0,29 stop |
+| Style Default, 1 passe | 47,7 | 5,5 ms | 0,38-0,40 % | x1,12 | 0,29 stop |
+| Style Natural | 47,6 | 5,6 ms | 0,36 % | x1,19 | 0,28 stop |
+| Style Cinematic | 47,1 | 5,6 ms | 0,42 % | x0,87 | 0,25 stop |
+| 2 passes | 37,6 | 10,8 ms | 0,47 % | x1,25 | 0,44 stop |
+| 2 passes, modèle 1 image sur 2 | 48,0 | 5,5 ms | 0,63 % | x1,18 | 0,43 stop |
+
+Deux passes en mode Performance donnent l'effet renforcé du multi-pass pour le coût d'une passe
+classique, au prix d'un peu plus de scintillement.
+
 Détail des mesures et méthode : [docs/comparaison.md](docs/comparaison.md).
 
 ![Comparaison](docs/benchmark/zoom.jpg)
@@ -66,6 +83,10 @@ d'images réelles en plus. La touche F6 affiche le vrai chiffre.
 - **Anti-scintillement** : stabilisateur temporel de la correction, mises à jour lissées entre deux
   passages du modèle, despeckle, stabilisation de luminance par zones (écrans OLED).
 - **Modèle à résolution réduite** avec agrandissement guidé par les contours (placement après SR).
+- **Multi-pass** (1 à 3 passes) : le modèle repasse sur sa propre réponse, chaque passe avec son
+  propre historique, et la composition se fait une seule fois. Chaque passe est créée une image avant
+  d'être utilisée, ce qui évite le blocage GPU qui l'avait fait retirer du fork d'origine.
+- **Style du modèle** (Default, Natural, Cinematic) choisi à côté des presets.
 - **Comparaison en direct** : F6 bascule optimisé / d'origine / désactivé sans toucher aux réglages,
   avec les FPS réels à l'écran.
 - **Benchmark intégré** : les modes à la suite, une capture de chacun, et un rapport HTML.

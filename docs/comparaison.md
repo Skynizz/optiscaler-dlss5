@@ -90,6 +90,27 @@ Ce qu'on en retient :
 - Les écarts de scintillement de moins de 0,05 point et d'effet de moins de 0,02 stop sont dans le
   bruit de mesure (une seule scène, une passe par mode).
 
+## Styles du modèle et multi-pass (base OptiScaler du 6 octobre)
+
+Deux séries, chacune avec ses propres références (off et d'origine), réglage Quality :
+
+| Mode | FPS | 1 % low | Coût DLSS 5 | Scintillement | Détail | Effet | Décalage moyen |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| DLSS 5 d'origine (série 1) | 35,1 | 28,1 | 13,11 ms | 0,43 % | x1,11 | 0,29 stop | -0,11 stop |
+| Style Default | 47,4 | 29,9 | 5,54 ms | 0,40 % | x1,12 | 0,29 stop | -0,12 stop |
+| Style Natural | 47,6 | 36,1 | 5,63 ms | 0,36 % | x1,19 | 0,28 stop | -0,23 stop |
+| Style Cinematic | 47,1 | 32,0 | 5,62 ms | 0,42 % | x0,87 | 0,25 stop | -0,19 stop |
+| DLSS 5 d'origine (série 2) | 35,0 | 29,3 | 13,11 ms | 0,52 % | x1,12 | 0,29 stop | -0,12 stop |
+| 1 passe | 47,7 | 27,3 | 5,55 ms | 0,38 % | x1,13 | 0,29 stop | -0,13 stop |
+| 2 passes | 37,6 | 28,8 | 10,82 ms | 0,47 % | x1,25 | 0,44 stop | -0,21 stop |
+| 2 passes, modèle 1 image sur 2 (série 3) | 48,0 | 29,7 | 5,52 ms | 0,63 % | x1,18 | 0,43 stop | - |
+
+- Le style ne change pas le coût. Natural ajoute plus de micro-détail que Default et assombrit
+  davantage ; Cinematic lisse. C'est la principale raison pour laquelle un réglage RenoDX en Natural
+  ne ressemble pas au rendu par défaut de ce fork.
+- Une deuxième passe coûte un passage complet du modèle et renforce nettement l'effet. Avec le cache
+  (modèle une image sur deux), deux passes coûtent autant qu'une passe à chaque image.
+
 ## Captures
 
 | | |
