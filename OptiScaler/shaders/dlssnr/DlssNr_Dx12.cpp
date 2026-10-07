@@ -392,6 +392,15 @@ std::unique_ptr<DlssNrEditCache_Dx12> g_cache;
 // different amounts and the last reading alone says little.
 double g_avgGpuTime = 0.0;
 
+// The pass's cost by kind of frame, for the edit cache's GPU budget: a frame the model ran on under the
+// cache (1) and a cached frame (2); 0 is a frame without the cache. The pass timer reads a frame two
+// starts late from a ring of three, so the kind travels with its slot.
+double g_costRefresh = 0.0;
+double g_costCached = 0.0;
+int g_frameKind = 0;
+int g_timeKind[3] = {};
+unsigned int g_timeStarts = 0;
+
 // What the pass runs as right now. The saved settings, unless the comparison key or the benchmark says
 // otherwise for the moment; neither ever writes a setting, so nothing of this can end up in the ini.
 //   0 your settings, 1 as OptiScaler ships it (the model every frame, full size, after the upscaler),
@@ -2320,7 +2329,12 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         g_ngxTime = std::make_unique<GpuTime_Dx12>(device);
 
     if (g_gpuTime != nullptr)
+    {
         g_gpuTime->Start(cmdList);
+        ++g_timeStarts;
+    }
+
+    g_frameKind = 0;
 
     // Fetch the game's exposure, where the game supplies one and the user asked for it.
     //
@@ -2503,8 +2517,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         if (g_cache != nullptr && g_cache->IsInit())
         {
             cacheActive = true;
+            g_cache->SetFrameCosts(g_costRefresh, g_costCached);
             cacheRefresh = g_cache->BeginFrame(cfg, device, width, height, desc.Format, frame.Reset || g_nr.reset,
                                                g_preSrDispatch);
+            g_frameKind = cacheRefresh ? 1 : 2;
         }
         else
         {
@@ -3143,6 +3159,7 @@ void FinishPassTiming(ID3D12GraphicsCommandList* cmdList, ID3D12CommandQueue* ti
 {
     if (g_gpuTime != nullptr)
     {
+        g_timeKind[g_timeStarts % 3] = g_frameKind;
         g_gpuTime->End(cmdList);
 
         // This path records into the game's own list, so there is no queue of ours to read from.
@@ -3159,6 +3176,13 @@ void FinishPassTiming(ID3D12GraphicsCommandList* cmdList, ID3D12CommandQueue* ti
             {
                 g_lastGpuTime = ms;
                 g_avgGpuTime = g_avgGpuTime <= 0.0 ? ms.value() : g_avgGpuTime * 0.95 + ms.value() * 0.05;
+
+                // The reading is the frame two starts ago: its kind is in the slot after this one.
+                const int kind = g_timeKind[(g_timeStarts + 1) % 3];
+                double& cost = kind == 1 ? g_costRefresh : g_costCached;
+
+                if (kind != 0)
+                    cost = cost <= 0.0 ? ms.value() : cost * 0.9 + ms.value() * 0.1;
             }
 
             if (g_ngxTime != nullptr)
@@ -4655,6 +4679,9 @@ CacheStatus GetCacheStatus()
     s.intervalNow = c.intervalNow;
     s.printRejected = c.printRejected;
     s.speed = c.speed;
+    s.budgetFloor = c.budgetFloor;
+    s.costRefresh = c.costRefresh;
+    s.costCached = c.costCached;
 
     static_assert(CacheStatus::kStages == DlssNrEditCache_Dx12::Status::kStages);
 

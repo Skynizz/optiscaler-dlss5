@@ -100,6 +100,9 @@ F6 in game to see the real number.
 - **Model style** (Default, Natural, Cinematic) right next to the presets.
 - **Strong preset**: after the upscaler (works with Ray Reconstruction), Natural style, 2 model passes,
   model every other frame. The strongest look for about the cost of one pass every frame.
+- **Motion priority and GPU budget**: ghosting only exists in motion, so with a long interval the model now
+  runs at the long interval standing still and about every other frame as soon as the camera moves (priority
+  0.5 by default). Or give DLSS 5 a budget in ms and the interval adapts to stay under it.
 - **Light pop-in smoothing**: when a light enters the frame, the model re-grades the whole picture at once.
   Where the game's own image did not change, that change now fades in (1.5 stops/s by default) instead of
   landing in one frame; real light changes still pass at once.

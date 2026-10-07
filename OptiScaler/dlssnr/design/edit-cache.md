@@ -110,6 +110,33 @@ fingerprint, orange by depth), the edit's age in frames and its staleness (motio
 Memory, when on: two RGBA16F frame-size textures each for the fingerprint and the meta (about 60 MB at
 1440p); the guided filter adds three more at full or half size.
 
+## Motion priority, GPU budget, still interval
+
+The carried edit can only be what the model said one to N frames ago, so at 8 frames between runs it can
+never be the stock look while the picture moves. Measured on the dumps with every anti-ghosting default on,
+share of the effect kept by interval:
+
+| | x2 | x3 | x4 | x8 |
+|---|---:|---:|---:|---:|
+| pan | 93.9% | 92.4% | 91.8% | 89.4% |
+| pan, character and debris | 91.0% | 89.6% | 88.1% | 85.3% |
+| almost still | 95.7% | 95.0% | 94.4% | 93.6% |
+
+(Even x2 is not 100%: the model re-decides small things every run, and a carried edit is steadier than the
+model's own answer.) A perfectly fresh low band on every cached frame -- a second, small model -- would only
+reach 90-95% at x8 for about the cost of the pre-SR Quality preset, so the cadence is where the gain is:
+
+* `CacheMotionPriority` (0-1, default 0.5): the speed regime's reference pace is divided by 1 + 4 x priority.
+  At 0.5 and 1440p, any camera motion of about 2 px/frame or more drops to `CacheAdaptiveMin`; standing still
+  keeps the long interval, where carrying costs nothing in quality. In motion, x2 against x8 is -44% on the
+  strongest trails and -72% on the area where the edit hurts (debris dump).
+* `CacheBudgetMs` (0 = off): the main pass times each frame and keeps the cost of a frame with the model and
+  of a cached one apart (the timer reads two frames late; the kind travels with its slot). The shortest
+  interval whose average stays under the budget is ceil((refresh - cached) / (budget - cached)); it raises the
+  floor at once, motion priority then spends it. Measured in Control: 8.8 ms with the model, 1.85 ms
+  without, budget 3 ms: every 7 frames, 2.8-3.0 ms.
+* `CacheStillMax` (4-16, default 8): the longest interval standing still.
+
 ## Anti light pop-in (`CacheAntiPop`, `CacheAntiPopRate`)
 
 The model only sees the frame. A bright light entering it makes the model re-grade regions far from the

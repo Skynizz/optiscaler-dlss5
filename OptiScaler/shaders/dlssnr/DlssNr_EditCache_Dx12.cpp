@@ -615,6 +615,9 @@ bool DlssNrEditCache_Dx12::BeginFrame(const Config& cfg, ID3D12Device* device, u
     _crossfadeFrames = std::min(cfg.DlssNrCacheCrossfadeFrames.value_or_default(), 16u);
     _adaptiveSpeed = cfg.DlssNrCacheAdaptiveSpeed.value_or_default();
     _adaptiveMin = std::clamp(cfg.DlssNrCacheAdaptiveMin.value_or_default(), 1u, 16u);
+    _motionPriority = std::clamp(cfg.DlssNrCacheMotionPriority.value_or_default(), 0.0f, 1.0f);
+    _budgetMs = std::clamp(cfg.DlssNrCacheBudgetMs.value_or_default(), 0.0f, 100.0f);
+    _stillMax = std::clamp(cfg.DlssNrCacheStillMax.value_or_default(), 4u, 16u);
 
     const unsigned int interval = std::clamp(cfg.DlssNrCacheInterval.value_or_default(), 1u, 16u);
     const bool adaptive = cfg.DlssNrCacheAdaptive.value_or_default();
@@ -632,7 +635,7 @@ bool DlssNrEditCache_Dx12::BeginFrame(const Config& cfg, ID3D12Device* device, u
     else if (_frame - _lastRefresh >=
              (_intervalNow = bySpeed ? SpeedInterval(interval) : EffectiveInterval(interval, adaptive, threshold)))
         why = _regime == 0 ? "interval (still: slower)" : _regime == 2 ? "interval (fast motion: faster)" : "interval";
-    else if (bySpeed && _frame - _lastRefresh >= std::min(_adaptiveMin, interval) && _staleNow >= threshold)
+    else if (bySpeed && _frame - _lastRefresh >= _floorNow && _staleNow >= threshold)
         why = "too much of the edit rejected";
 
     // Keyframe crossfade step for this frame: the share of the remaining way to the model's latest answer,
@@ -671,12 +674,31 @@ bool DlssNrEditCache_Dx12::BeginFrame(const Config& cfg, ID3D12Device* device, u
 // one way costs a little performance, the other way ghosting.
 unsigned int DlssNrEditCache_Dx12::SpeedInterval(unsigned int interval)
 {
-    const float ref = std::max(0.001f * (float) _width, 0.5f);
-    const unsigned int minimum = std::min(_adaptiveMin, interval);
+    // Motion priority lowers the ordinary pace the interval is measured against: at 1 the model runs at the
+    // shortest interval from a fifth of the speed. Ghosting only exists in motion; standing still the long
+    // interval costs nothing in quality.
+    const float ref = std::max(0.001f * (float) _width, 0.5f) / (1.0f + 4.0f * _motionPriority);
+    unsigned int minimum = std::min(_adaptiveMin, interval);
+
+    // The GPU budget: the average pass over an interval of n is (refresh + (n - 1) cached) / n, so the
+    // shortest n that stays under the budget is (refresh - cached) / (budget - cached), rounded up. It
+    // raises the floor -- motion then spends the budget, never more.
+    _budgetFloor = 0;
+
+    if (_budgetMs > 0.0f && _costRefresh > 0.0 && _costCached > 0.0)
+    {
+        const double spare = (double) _budgetMs - _costCached;
+        const unsigned int need =
+            spare <= 0.0 ? interval : (unsigned int) std::ceil((_costRefresh - _costCached) / spare - 1e-6);
+        _budgetFloor = std::clamp(need, 1u, interval);
+        minimum = std::max(minimum, _budgetFloor);
+    }
+
+    _floorNow = minimum;
     unsigned int wanted = interval;
 
     if (_speed >= 0.0f && _speed < 0.25f * ref)
-        wanted = std::max(interval, std::min(interval * 2u, 8u));
+        wanted = std::max(interval, std::min(interval * 2u, _stillMax));
     else if (_speed >= 0.0f)
         wanted = std::clamp((unsigned int) std::lround((float) interval * ref / std::max(_speed, ref)), minimum, interval);
 
@@ -703,8 +725,10 @@ unsigned int DlssNrEditCache_Dx12::SpeedInterval(unsigned int interval)
         }
     }
 
-    _regime = _speedInterval > interval ? 0 : _speedInterval < interval ? 2 : 1;
-    return _speedInterval;
+    // The hysteresis smooths what motion asks for; the budget is a limit and holds at once.
+    const unsigned int result = std::max(_speedInterval, minimum);
+    _regime = result > interval ? 0 : result < interval ? 2 : 1;
+    return result;
 }
 
 // The interval actually used. With adaptation on, a regular cadence per regime instead of runs fired
@@ -1786,6 +1810,9 @@ DlssNrEditCache_Dx12::Status DlssNrEditCache_Dx12::GetStatus() const
     s.intervalNow = std::max(1u, _intervalNow);
     s.printRejected = _printRejected;
     s.speed = std::max(_speed, 0.0f);
+    s.budgetFloor = _budgetFloor;
+    s.costRefresh = _costRefresh;
+    s.costCached = _costCached;
 
     for (int i = 0; i < Status::kStages; ++i)
         s.stageMs[i] = _stageSeen[i] ? _stageMs[i] : -1.0;

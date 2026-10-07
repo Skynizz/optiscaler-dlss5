@@ -391,6 +391,9 @@ void RenderMenu(Config* config, float menuResScale)
                 config->DlssNrCacheAdaptiveMin = 2u;
                 config->DlssNrCacheAntiPop = true;
                 config->DlssNrCacheAntiPopRate = 1.5f;
+                config->DlssNrCacheMotionPriority = 0.5f;
+                config->DlssNrCacheBudgetMs = 0.0f;
+                config->DlssNrCacheStillMax = 8u;
                 config->DlssNrPasses = 1u;
                 config->DlssNrPreSr = preSr;
                 config->DlssNrWorkingScale = scale;
@@ -934,6 +937,40 @@ void RenderMenu(Config* config, float menuResScale)
 
                         if (ImGui::SliderInt("Shortest interval", &minimum, 1, 8))
                             config->DlssNrCacheAdaptiveMin = (uint32_t) std::clamp(minimum, 1, 16);
+
+                        HelpMarker("1 lets the model run every frame -- the stock look -- when the camera moves"
+                                   "\nfast enough.");
+
+                        float priority = config->DlssNrCacheMotionPriority.value_or_default();
+
+                        if (ImGui::SliderFloat("Motion priority", &priority, 0.0f, 1.0f,
+                                               priority <= 0.0f ? "off" : "%.2f"))
+                            config->DlssNrCacheMotionPriority = std::clamp(priority, 0.0f, 1.0f);
+
+                        HelpMarker("Ghosting only exists in motion. Higher runs the model far sooner as soon as the"
+                                   "\ncamera moves -- down to the shortest interval above -- while a still or slow view"
+                                   "\nkeeps the long one, where carrying the edit costs nothing in quality."
+                                   "\n\nWith 8 frames between runs, priority 1 and shortest interval 1-2: the stock"
+                                   "\nlook when moving (measured on Control captures: effect kept 89% at 8 frames,"
+                                   "\n94% at 2), the cost of 8 frames standing still.");
+
+                        float budget = config->DlssNrCacheBudgetMs.value_or_default();
+
+                        if (ImGui::SliderFloat("GPU budget", &budget, 0.0f, 12.0f, budget <= 0.0f ? "off" : "%.1f ms"))
+                            config->DlssNrCacheBudgetMs = std::clamp(budget, 0.0f, 100.0f);
+
+                        HelpMarker("The most DLSS 5 may cost per frame on average. The interval never goes shorter"
+                                   "\nthan this allows -- from the measured cost of a frame with the model and"
+                                   "\nwithout it -- and motion priority spends the budget where the picture moves."
+                                   "\nPredictable frame rate, the best look it can buy. Off by default.");
+
+                        int stillMax = (int) config->DlssNrCacheStillMax.value_or_default();
+
+                        if (ImGui::SliderInt("Longest interval standing still", &stillMax, 4, 16))
+                            config->DlssNrCacheStillMax = (uint32_t) std::clamp(stillMax, 4, 16);
+
+                        HelpMarker("When the camera stands still nothing ghosts: dialogue, aiming, standing about can"
+                                   "\nrun the model this rarely. 8 is as before.");
                     }
 
                     if (!adaptive)
@@ -1989,6 +2026,12 @@ void RenderOverlay(float alpha)
             {
                 ImGui::TextDisabled("Cache: model every %u frames  |  camera %.1f px/f  |  rejected %.1f%% depth, %.1f%% fingerprint",
                                     cs.intervalNow, cs.speed, 100.0f * cs.lastRejected, 100.0f * cs.printRejected);
+
+                if (cs.costRefresh > 0.0 && cs.costCached > 0.0)
+                    ImGui::TextDisabled("Pass: %.2f ms with the model, %.2f ms without%s", cs.costRefresh, cs.costCached,
+                                        cs.budgetFloor > 0
+                                            ? std::format("  |  budget allows every {} frames or more", cs.budgetFloor).c_str()
+                                            : "");
 
                 char line[256] = "";
                 int used = 0;

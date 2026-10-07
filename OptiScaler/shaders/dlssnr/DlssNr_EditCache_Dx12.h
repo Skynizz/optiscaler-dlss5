@@ -101,6 +101,9 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
         unsigned int intervalNow = 1;     // frames between model runs right now
         float printRejected = 0.0f;       // the most recent frame's share rejected by the fingerprint
         float speed = 0.0f;               // camera motion, pixels per frame, smoothed
+        unsigned int budgetFloor = 0;     // the shortest interval the GPU budget allows (0: no budget)
+        double costRefresh = 0.0;         // the pass on a frame the model runs, ms
+        double costCached = 0.0;          // the pass on a cached frame, ms
 
         // GPU time of the cache's own passes, ms, smoothed; negative when not measured.
         static constexpr int kStages = 7;
@@ -121,6 +124,14 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
 
     // Forget the history: the next active frame is a refresh.
     void Invalidate();
+
+    // The whole pass's GPU cost on a frame the model runs and on a cached frame, measured by the caller:
+    // what the GPU budget (CacheBudgetMs) is held to. 0 while not yet measured.
+    void SetFrameCosts(double refreshMs, double cachedMs)
+    {
+        _costRefresh = refreshMs;
+        _costCached = cachedMs;
+    }
 
     // A cached frame: target (UNORDERED_ACCESS, holding the upscaler's frame) is rewritten as that frame
     // times the carried edit. keep (UNORDERED_ACCESS) receives the untouched frame on the way.
@@ -238,6 +249,17 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
     float _speed = -1.0f;          // pixels per frame, smoothed; negative until measured
     float _printRejected = 0.0f;
     float _staleNow = 0.0f;        // share of the frame without a believed edit, since the model ran
+
+    // Motion priority (0-1): how much sooner the model runs as the camera moves -- 0 is the regime above,
+    // 1 drops to the shortest interval at a fifth of the speed. And the GPU budget: the shortest interval
+    // whose average cost stays under CacheBudgetMs, from the measured costs.
+    float _motionPriority = 0.0f;
+    unsigned int _stillMax = 8;
+    float _budgetMs = 0.0f;
+    double _costRefresh = 0.0;
+    double _costCached = 0.0;
+    unsigned int _budgetFloor = 0;
+    unsigned int _floorNow = 1;
     unsigned int _speedInterval = 0;
     unsigned int _speedCandidate = 0;
     unsigned int _speedFrames = 0;

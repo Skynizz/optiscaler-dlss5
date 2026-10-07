@@ -610,6 +610,18 @@ class Config
     CustomOptional<bool> DlssNrCacheAntiPop { true };
     CustomOptional<float> DlssNrCacheAntiPopRate { 1.5f };
 
+    // With CacheAdaptiveSpeed: motion priority (0-1). Ghosting only exists in motion, so the model can run
+    // at the long interval standing still and far more often moving. 0 is the speed regime as it was; 1
+    // reaches the shortest interval (CacheAdaptiveMin, which may be 1) at a fifth of the speed.
+    CustomOptional<float> DlssNrCacheMotionPriority { 0.5f };
+    // GPU budget for the whole pass, ms averaged over frames (0 = off). With CacheAdaptiveSpeed the
+    // interval never goes shorter than the budget allows, from the measured cost of a frame with and
+    // without the model; motion priority then spends it where the picture moves.
+    CustomOptional<float> DlssNrCacheBudgetMs { 0.0f };
+    // With CacheAdaptiveSpeed: the longest interval while the camera stands still (4-16). Nothing moves, so
+    // nothing ghosts -- dialogue, aiming, standing about cost the model this rarely. 8 is as before.
+    CustomOptional<uint32_t> DlssNrCacheStillMax { 8 };
+
     // Joint bilateral enlargement of a below-size model's answer, guided by the full-size frame.
     // Only acts when the model resolution is under 100%; off is the resolve exactly as it was.
     CustomOptional<bool> DlssNrJbuUpsample { false };

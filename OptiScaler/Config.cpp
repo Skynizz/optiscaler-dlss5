@@ -380,6 +380,9 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrCacheAdaptiveMin.set_from_config(readUInt("DlssNr", "CacheAdaptiveMin"));
             DlssNrCacheAntiPop.set_from_config(readBool("DlssNr", "CacheAntiPop"));
             DlssNrCacheAntiPopRate.set_from_config(readFloat("DlssNr", "CacheAntiPopRate"));
+            DlssNrCacheMotionPriority.set_from_config(readFloat("DlssNr", "CacheMotionPriority"));
+            DlssNrCacheBudgetMs.set_from_config(readFloat("DlssNr", "CacheBudgetMs"));
+            DlssNrCacheStillMax.set_from_config(readUInt("DlssNr", "CacheStillMax"));
             DlssNrJbuUpsample.set_from_config(readBool("DlssNr", "JbuUpsample"));
             DlssNrJbuSigma.set_from_config(readFloat("DlssNr", "JbuSigma"));
             UseGenericAppIdWithDlss.set_from_config(readBool("DLSS", "UseGenericAppIdWithDlss"));
@@ -1329,6 +1332,10 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "CacheAntiPop", GetBoolValue(Instance()->DlssNrCacheAntiPop.value_for_config()).c_str());
     ini.SetValue("DlssNr", "CacheAntiPopRate",
                  GetFloatValue(Instance()->DlssNrCacheAntiPopRate.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheMotionPriority",
+                 GetFloatValue(Instance()->DlssNrCacheMotionPriority.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheBudgetMs", GetFloatValue(Instance()->DlssNrCacheBudgetMs.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheStillMax", GetIntValue(Instance()->DlssNrCacheStillMax.value_for_config()).c_str());
     ini.SetValue("DlssNr", "JbuUpsample", GetBoolValue(Instance()->DlssNrJbuUpsample.value_for_config()).c_str());
     ini.SetValue("DlssNr", "JbuSigma", GetFloatValue(Instance()->DlssNrJbuSigma.value_for_config()).c_str());
         ini.SetValue("DLSS", "RenderPresetOverride",
