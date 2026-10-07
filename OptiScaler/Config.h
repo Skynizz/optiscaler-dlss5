@@ -572,6 +572,37 @@ class Config
     // How many consecutive frames the measurement dump writes.
     CustomOptional<uint32_t> DlssNrCacheDumpFrames { 12 };
 
+    // Anti-ghosting, for long intervals. Each one off is the cache exactly as it was without it.
+    //
+    // Fingerprint: the frame as it was where the model computed the edit (luma, chroma), carried with the
+    // edit and compared with each new frame; a carried edit the frame no longer matches is dropped until
+    // the model runs again, and its surface's broad edit stands in.
+    CustomOptional<bool> DlssNrCacheFingerprint { true };
+    // ... including the surroundings: catches the light an object left on the ground after it moved.
+    CustomOptional<bool> DlssNrCacheContext { true };
+    // Stops beyond the range of the pixel's 3x3 neighbourhood before doubt starts; none left at twice it.
+    CustomOptional<float> DlssNrCacheFingerprintTolerance { 0.25f };
+    // Rejected pixels borrow the broad edit only from the same surface, at every scale; where nothing
+    // similar is near, no edit rather than another surface's.
+    CustomOptional<bool> DlssNrCacheSurfaceFill { true };
+    // The keyframe crossfade reaches the model's answer within this many frames. 0 walks over the whole
+    // interval, as before -- which at long intervals kept the previous answer on screen far too long.
+    CustomOptional<uint32_t> DlssNrCacheCrossfadeFrames { 3 };
+    // Guided filter: the carried edit rebuilt from the current frame, window by window, so it keeps
+    // structure only where the frame has some. Cached frames only, by how far the edit has travelled.
+    CustomOptional<bool> DlssNrCacheGuided { false };
+    CustomOptional<float> DlssNrCacheGuidedStrength { 1.0f };
+    // Aging: carried detail fades with the motion it has been through (a still camera does not age it),
+    // toward the edit's broad part, or with AgeNeutral the whole edit toward none.
+    CustomOptional<bool> DlssNrCacheAging { false };
+    CustomOptional<float> DlssNrCacheAgeHalfLife { 8.0f };
+    CustomOptional<bool> DlssNrCacheAgeNeutral { false };
+    // With CacheAdaptive: follow the camera's speed and the share of the edit rejected -- CacheInterval at
+    // an ordinary pace, shorter in proportion as the view moves faster, down to CacheAdaptiveMin, and the
+    // model run at once when too much is rejected. Off is the three-regime cadence.
+    CustomOptional<bool> DlssNrCacheAdaptiveSpeed { true };
+    CustomOptional<uint32_t> DlssNrCacheAdaptiveMin { 2 };
+
     // Joint bilateral enlargement of a below-size model's answer, guided by the full-size frame.
     // Only acts when the model resolution is under 100%; off is the resolve exactly as it was.
     CustomOptional<bool> DlssNrJbuUpsample { false };

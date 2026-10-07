@@ -66,6 +66,50 @@ similar depth and luma. They keep the model's lighting and lose its synthesised 
 next refresh. That trade is deliberate: smearing the model's grass detail over moving grass is the
 artefact this must not produce.
 
+## Anti-ghosting at long intervals
+
+At 8 frames between runs the carried edit trailed, like early frame generation. Two causes, measured
+offline on Control dumps (`tools/dlssnr_cache/measure_ghosting.py`):
+
+* Validation compared each frame only with the one before it. Anything that changed a little every
+  frame never failed: a sliding shadow, debris with no motion vectors, the light the model put on the
+  ground under an object that has since moved. The low band was never rejected at all.
+* The keyframe crossfade spread each new answer over the whole interval, so at 8 frames the previous
+  answer stayed partly on screen for up to 16.
+
+Five switches, each one off being the cache as it was:
+
+| Switch | What it does | Default |
+|---|---|---|
+| `CacheFingerprint` | On a refresh, the frame's normalised log luma and two log chroma ratios are stored per pixel (`_histPrint`) and carried with the edit, never updated. Every cached frame compares them with the range this frame spans over the pixel's 3x3 neighbourhood (TAA-style, so aliasing and sub-pixel shifts pass). A mismatch multiplies a per-pixel validity (`_histMeta`) that only a refresh restores. A rejected pixel leaves the pyramid and keeps no detail; its surface's low band stands in. | on |
+| `CacheContext` | The same test on the surroundings: a quarter-size mean log luma, tent-filtered (`_context`). Catches the light an object left behind on the ground. | on |
+| `CacheSurfaceFill` | The low band is read jointly-bilaterally at every pyramid level, not only the first, and fades to no edit where nothing similar is near. Without it, a character whose edit was rejected took the wall's from the coarse levels. | on |
+| `CacheCrossfadeFrames` | The crossfade reaches the model's answer within this many frames instead of over the whole interval. No effect at 3 or less. | 3 |
+| `CacheAdaptiveSpeed` | With `CacheAdaptive`: the interval follows the camera's speed (mean motion, a GPU counter): `CacheInterval` at about 0.1% of the width per frame, shorter in proportion beyond, down to `CacheAdaptiveMin`; and the model runs at once when `CacheAdaptiveThreshold` of the frame has no believed edit left. | on |
+| `CacheGuided` | A fast guided filter (He et al., half size, 6 px window) rebuilds the carried edit from the frame's log luma, weighted by how far the edit has travelled. | off |
+| `CacheAging` | Carried detail fades with the motion it has travelled (`_histMeta.z`), toward the low band or (`CacheAgeNeutral`) toward no edit. | off |
+
+Measured at an 8-frame interval on three dumps (pan, pan with the character and flying debris, almost
+still), against the model's real answer on every frame, for the defaults against the cache before:
+
+| | mean error | strongest trails (p99.5) | area where the edit hurts | effect kept |
+|---|---:|---:|---:|---:|
+| pan | -24% | -60% | -41% | 86.4 -> 89.3% |
+| pan, character and debris | -16% | -26% | -23% | 82.6 -> 85.0% |
+| almost still | -7% | -4% | -74% | 93.2 -> 93.6% |
+
+On top of those, the guided filter and aging measured slightly worse on average (they also soften
+detail that was right), which is why they are off; the guided filter does trim the strongest trails a
+little further.
+
+Debug views 4 to 6 (`CacheDebugView`): the rejection mask (green believed, red rejected by the
+fingerprint, orange by depth), the edit's age in frames and its staleness (motion travelled). With
+`ShowStats` the on-screen line adds the cadence, the rejected shares and the GPU time of each cache pass
+(timestamps on the game's list, read back four frames later).
+
+Memory, when on: two RGBA16F frame-size textures each for the fingerprint and the meta (about 60 MB at
+1440p); the guided filter adds three more at full or half size.
+
 ## Pre-SR placement (`PreSr`)
 
 Off by default. On, the pass runs before the game's DLSS Super Resolution instead of after it: in

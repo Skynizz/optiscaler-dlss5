@@ -16,6 +16,16 @@
 // agree it still belongs to the same surface, and fades with age. Grass, hair and water fail that test
 // constantly and fall back to the low band, which is the robust part.
 //
+// At long intervals the carried edit used to trail. Four anti-ghosting tools, each with its own switch:
+//
+//   fingerprint     the frame as it was where the model computed the edit, carried with the edit and
+//                   compared with the frame every frame; a carried edit the frame no longer matches is
+//                   dropped for the rest of the interval and the same surface's broad edit stands in
+//   guided filter   the carried edit rebuilt from this frame, window by window, so it keeps structure only
+//                   where the frame has it
+//   aging           carried detail fades with the motion it has been through
+//   adaptive        the model runs sooner the faster the camera moves and the more is rejected
+//
 // Also hosts the joint bilateral upsampler for a below-size model, which shares the shader.
 //
 // Off by default, and nothing here runs or allocates unless asked for.
@@ -85,7 +95,20 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
         int regime = 1; // 0 still, 1 moving, 2 fast
         unsigned int dumpWritten = 0;
         bool dumpActive = false;
+
+        // Anti-ghosting.
+        unsigned int ghostFlags = 0;      // DlssNrCacheGhostFlag, as running
+        unsigned int intervalNow = 1;     // frames between model runs right now
+        float printRejected = 0.0f;       // the most recent frame's share rejected by the fingerprint
+        float speed = 0.0f;               // camera motion, pixels per frame, smoothed
+
+        // GPU time of the cache's own passes, ms, smoothed; negative when not measured.
+        static constexpr int kStages = 7;
+        double stageMs[kStages] = { -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0 };
     };
+
+    // The passes timed for the overlay, in the order of Status::stageMs.
+    static const char* StageName(int stage);
 
     explicit DlssNrEditCache_Dx12(ID3D12Device* device);
     ~DlssNrEditCache_Dx12();
@@ -155,8 +178,8 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
     ID3D12Resource* _constantBuffers[DLSSNR_CACHE_NUM_OF_HEAPS] = {};
     uint32_t _heapIndex = 0;
 
-    static constexpr uint32_t kSrvCount = 12;
-    static constexpr uint32_t kUavCount = 7;
+    static constexpr uint32_t kSrvCount = 18;
+    static constexpr uint32_t kUavCount = 9;
 
     // The frame-sized history, two of each so one is read while the other is written.
     ID3D12Resource* _histEdit[2] = {};
@@ -171,13 +194,65 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
     float _lowTemporal = 0.95f;
 
     void TemporalPass(ID3D12GraphicsCommandList* cmd, ID3D12Resource* target, ID3D12Resource* original,
-                      const DlssNrCacheInputs& in);
+                      const DlssNrCacheInputs& in, ID3D12Resource* edit);
 
     // Keyframe crossfade: the model's latest answer, carried alongside what is shown.
     ID3D12Resource* _histTarget[2] = {};
     bool _crossfadeOn = false;
     float _crossfade = 1.0f;
     unsigned int _cur = 0;
+    unsigned int _crossfadeFrames = 0; // the walk's length cap, 0 = the whole interval
+
+    // Anti-ghosting. Allocated only for the switches that need them, released with the rest.
+    ID3D12Resource* _histPrint[2] = {};  // the source's fingerprint, carried (ping-pong with the edit)
+    ID3D12Resource* _histMeta[2] = {};   // age, validity, staleness, tap validity
+    ID3D12Resource* _context = nullptr;  // this frame's surroundings, a quarter of the frame
+    ID3D12Resource* _guideSum[2] = {};   // guided filter: half-size sums (32-bit: they are differenced)
+    ID3D12Resource* _guideCoef[2] = {};  // guided filter: the coefficients a and b
+    ID3D12Resource* _guidedOut = nullptr; // guided filter: its edit, for the temporal stabiliser
+    ID3D12Resource* _levelGuideCoarse[2] = {}; // same-surface fill: the L2 and L3 guides
+
+    uint32_t _ghostFlags = 0;      // this frame's
+    uint32_t _ghostFlagsLast = 0;  // last frame's: a change invalidates the history
+    float _printTol = 0.25f;
+    float _ageHalfLife = 8.0f;
+    float _guidedStrength = 1.0f;
+    bool _guidedNow = false;       // the guided filter runs on this frame (cached frames only)
+
+    bool EnsureGhostResources(ID3D12Device* device);
+    void GuidedPass(ID3D12GraphicsCommandList* cmd, ID3D12Resource* target, ID3D12Resource* original,
+                    const DlssNrCacheInputs& in, bool toTemporal);
+
+    // The camera-speed regime (CacheAdaptiveSpeed): the model runs sooner the faster the view moves.
+    bool _adaptiveSpeed = false;
+    unsigned int _adaptiveMin = 2;
+    float _speed = -1.0f;          // pixels per frame, smoothed; negative until measured
+    float _printRejected = 0.0f;
+    float _staleNow = 0.0f;        // share of the frame without a believed edit, since the model ran
+    unsigned int _speedInterval = 0;
+    unsigned int _speedCandidate = 0;
+    unsigned int _speedFrames = 0;
+    unsigned int SpeedInterval(unsigned int interval);
+
+    // GPU timings of the cache's own passes, for the overlay (CacheTimings via ShowStats). Read back
+    // several frames late, like the counters.
+    static constexpr unsigned int kStampSlots = 8;
+    static constexpr unsigned int kStampsPerFrame = 8; // the start, then one per pass, in order
+    ID3D12QueryHeap* _stampHeap = nullptr;
+    ID3D12Resource* _stampReadback = nullptr;
+    bool _timing = false;
+    unsigned int _stampSlot = 0;
+    unsigned int _stampCount[kStampSlots] = {};
+    int _stampStage[kStampSlots][kStampsPerFrame] = {};
+    unsigned long long _stampFrame[kStampSlots] = {};
+    bool _stampOpen = false;
+    double _stageMs[Status::kStages] = {};
+    bool _stageSeen[Status::kStages] = {};
+
+    void StampBegin(ID3D12GraphicsCommandList* cmd);
+    void Stamp(ID3D12GraphicsCommandList* cmd, int stage);
+    void StampEnd(ID3D12GraphicsCommandList* cmd);
+    void ConsumeStamps();
 
     ID3D12Resource* _level[kDlssNrCachePyramidLevels] = {};
     ID3D12Resource* _levelGuide = nullptr;
@@ -257,6 +332,7 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
     void Accumulate(ID3D12GraphicsCommandList* cmd, const DlssNrCacheInputs& in);
     bool EnsureAccumulator(ID3D12Device* device, ID3D12Resource* motion);
     void BuildCoarseLevels(ID3D12GraphicsCommandList* cmd);
+    void ContextPass(ID3D12GraphicsCommandList* cmd, ID3D12Resource* frame, const DlssNrCacheInputs& in);
     void ApplyPass(ID3D12GraphicsCommandList* cmd, ID3D12Resource* target, ID3D12Resource* original,
                    const DlssNrCacheInputs& in);
 

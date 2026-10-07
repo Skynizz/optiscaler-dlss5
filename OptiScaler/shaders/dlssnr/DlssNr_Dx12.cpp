@@ -4566,6 +4566,19 @@ CacheStatus GetCacheStatus()
     s.regime = c.regime;
     s.dumpWritten = c.dumpWritten;
     s.dumpActive = c.dumpActive;
+    s.ghostFlags = c.ghostFlags;
+    s.intervalNow = c.intervalNow;
+    s.printRejected = c.printRejected;
+    s.speed = c.speed;
+
+    static_assert(CacheStatus::kStages == DlssNrEditCache_Dx12::Status::kStages);
+
+    for (int i = 0; i < CacheStatus::kStages; ++i)
+    {
+        s.stageMs[i] = c.stageMs[i];
+        s.stageName[i] = DlssNrEditCache_Dx12::StageName(i);
+    }
+
     return s;
 }
 

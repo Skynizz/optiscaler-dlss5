@@ -191,6 +191,17 @@ struct CacheStatus
 
     // The whole pass's cost averaged over recent frames, cache on or off.
     double averageMs = 0.0;
+
+    // Anti-ghosting, and the cadence it follows.
+    unsigned int ghostFlags = 0;  // DlssNrCacheGhostFlag, as running
+    unsigned int intervalNow = 1; // frames between model runs right now
+    float printRejected = 0.0f;   // the last frame's share rejected by the fingerprint
+    float speed = 0.0f;           // camera motion, pixels per frame
+
+    // GPU time of the cache's own passes (ms, -1 when not measured: only while ShowStats is on).
+    static constexpr int kStages = 7;
+    double stageMs[kStages] = { -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0 };
+    const char* stageName[kStages] = {};
 };
 
 CacheStatus GetCacheStatus();

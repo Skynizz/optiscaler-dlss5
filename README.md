@@ -88,6 +88,11 @@ F6 in game to see the real number.
   slider to babysit.
 - **Anti-flicker**: temporal stabiliser on the edit, smoothed updates between model runs, despeckle,
   regional luminance stabilisation (helps a lot on OLED).
+- **Anti-ghosting at long intervals** (model every 4 to 8 frames): a fingerprint of the frame the model
+  worked on travels with its edit and drops it once the frame no longer matches, rejected pixels only
+  borrow from their own surface, smoothed updates are capped at 3 frames, and the interval shortens with
+  camera speed. Guided filter and aging are there too, off by default. Debug views show the rejection mask
+  and the edit's age; with ShowStats the overlay gives each cache pass's GPU time.
 - **Reduced model resolution** with edge-aware upscaling of the result (after-SR placement).
 - **Multi-pass** (1 to 3 passes): the model runs again on its own answer, each pass with its own
   history, composed once. Each pass is built one frame before it is used, which avoids the GPU hang

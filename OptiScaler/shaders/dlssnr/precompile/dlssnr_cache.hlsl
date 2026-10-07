@@ -48,6 +48,17 @@ cbuffer Params : register(b0)
     float gLowTemporal;     // luminance stability: weight of the reprojected regional (low band) edit (0 off)
     float gJitterDeltaX;    // pre-SR: this frame's change of camera jitter, in uv, added to every reprojection
     float gJitterDeltaY;
+    uint  gGhostFlags;      // anti-ghosting switches (DlssNrCacheGhostFlag); 0 is the cache as it was
+    float gPrintTol;        // fingerprint: stops outside this frame's 3x3 range before doubt starts
+    float gContextTol;      // fingerprint: stops of change of the surroundings
+    float gAgeHalfLife;     // aging: frames of motion over which the carried detail halves
+    float gStalePx;         // aging: pixels of motion that count as one frame
+    float gGuidedEps;       // guided filter: regularisation, log luma squared
+    float gGuidedStrength;  // guided filter: share of the rebuilt edit taken
+    uint  gCtxW;            // the context grid, a quarter of the frame
+    uint  gCtxH;
+    uint  gHalfW;           // the guided filter's grid, half the frame
+    uint  gHalfH;
 };
 
 Texture2D<float4>   gHistEdit  : register(t0); // rgb: log2 edit, a: high-band confidence
@@ -59,17 +70,28 @@ Texture2D<float4>   gAux0      : register(t5); // per mode: NR result / L1 / sma
 Texture2D<float4>   gAux1      : register(t6); // per mode: L1 guide / small model answer
 Texture2D<float4>   gAux2      : register(t7); // L2
 Texture2D<float4>   gAux3      : register(t8); // L3
-// t9 is bound to a stand-in and read by nothing.
+// Anti-ghosting. The fingerprint is what the frame looked like where and when the model computed the
+// edit -- carried with the edit and never updated -- so a slow drift is caught as surely as a jump; the
+// meta is the edit's age, how much of it is still believed, and how far it has travelled.
+Texture2D<float4>   gHistPrint : register(t9);  // normalised log luma, log chroma r/g, b/g, surroundings
 Texture2D<float4>   gExposure  : register(t10); // the game's 1x1 exposure, when it supplies one
 Texture2D<float4>   gHistTarget : register(t11); // keyframe crossfade: the model's latest answer, carried
+Texture2D<float4>   gHistMeta  : register(t12); // age (frames), validity, staleness (frames of motion), tap validity
+Texture2D<float4>   gContext   : register(t13); // this frame's surroundings: normalised log luma, 1/4 size
+Texture2D<float4>   gGuide0    : register(t14); // guided filter: half-size sums, or the coefficients a
+Texture2D<float4>   gGuide1    : register(t15); // guided filter: half-size sums, or the coefficients b
+Texture2D<float4>   gAux4      : register(t16); // L2 guide (log2 depth, log luma), for the same-surface fill
+Texture2D<float4>   gAux5      : register(t17); // L3 guide
 
 RWTexture2D<float4> gOut0  : register(u0);
 RWTexture2D<float4> gOut1  : register(u1);
 RWTexture2D<float4> gOut2  : register(u2);
 RWTexture2D<float4> gOut3  : register(u3);
 RWTexture2D<float4> gOut4  : register(u4);
-RWTexture2D<uint>   gStats : register(u5);
+RWTexture2D<uint>   gStats : register(u5); // x: frame slot; y: 0 depth rejects, 1 fingerprint rejects, 2 motion (1/8 px)
 RWTexture2D<float4> gOut6  : register(u6); // keyframe crossfade: the carried target, written
+RWTexture2D<float4> gOut7  : register(u7); // anti-ghosting: the fingerprint, written
+RWTexture2D<float4> gOut8  : register(u8); // anti-ghosting: the meta, written
 
 SamplerState gLinear : register(s0);
 
@@ -113,6 +135,69 @@ float WhitePoint()
 float Eps() { return WhitePoint() / 512.0; }
 
 float LogLuma(float3 c) { return log2(dot(max(c, 0.0), kLuma) + Eps()); }
+
+// --- Anti-ghosting ---------------------------------------------------------------------------------
+//
+// At long intervals the carried edit trails: validation compared each frame only with the one before it,
+// so whatever drifted a little every frame -- a shadow sliding, debris without motion vectors, the light
+// an object threw on the ground after it moved away -- never failed, and the low band was never rejected
+// at all. Each switch below attacks one part of it; with GhostFlags at 0 none of this code runs.
+
+static const uint kGhostPrint = 1u;
+static const uint kGhostContext = 2u;
+static const uint kGhostAging = 4u;
+static const uint kGhostAgeNeutral = 8u;
+static const uint kGhostGuided = 16u;
+static const uint kGhostSurface = 32u;
+
+bool Ghost(uint flag) { return (gGhostFlags & flag) != 0u; }
+
+// Log luma against this frame's white point: the same surface reads the same whatever the exposure does.
+float NormLogLuma(float3 c) { return LogLuma(c) - log2(WhitePoint()); }
+
+// What the frame looks like at a pixel: normalised log luma and two log chroma ratios. Stored where the
+// model computed the edit and carried with it, untouched, to be compared with the frame every frame.
+// white is WhitePoint(), read once by the caller (it is a texture read).
+float3 PrintOf(float3 c, float white)
+{
+    const float eps = white / 512.0;
+    const float3 p = max(c, 0.0) + eps;
+    return float3(log2(dot(p - eps, kLuma) + eps) - log2(white), log2(p.r / p.g), log2(p.b / p.g));
+}
+
+// This frame's surroundings at uv: the quarter-size mean, tent-filtered by four bilinear reads, so it
+// moves smoothly with the content instead of snapping to a grid of blocks.
+float ContextAt(float2 uv)
+{
+    const float2 t = 0.5 / float2(max(gCtxW, 1u), max(gCtxH, 1u));
+    return 0.25 * (gContext.SampleLevel(gLinear, uv + float2(-t.x, -t.y), 0).r +
+                   gContext.SampleLevel(gLinear, uv + float2(t.x, -t.y), 0).r +
+                   gContext.SampleLevel(gLinear, uv + float2(-t.x, t.y), 0).r +
+                   gContext.SampleLevel(gLinear, uv + float2(t.x, t.y), 0).r);
+}
+
+// Full belief inside the tolerance, none at twice it: the same soft edge as the depth test, so a pixel
+// sitting on the threshold does not flicker between the two.
+float Soft(float d, float tol) { return saturate((2.0 * tol - d) / max(tol, 1e-4)); }
+
+float Outside(float v, float lo, float hi) { return max(max(lo - v, v - hi), 0.0); }
+
+// Whether the frame still looks like what the edit was computed for. The source is compared with the
+// range this frame spans over the pixel's 3x3 neighbourhood rather than with the pixel alone, as TAA
+// clamps its history: a sub-pixel shift, aliasing on fine detail or the bilinear read of the print stay
+// inside that range; a shadow that moved, a particle, a surface that is no longer there do not.
+float PrintMatch(float4 src, float3 lo, float3 hi, float contextNow)
+{
+    float m = Soft(Outside(src.x, lo.x, hi.x), gPrintTol);
+    m *= Soft(max(Outside(src.y, lo.y, hi.y), Outside(src.z, lo.z, hi.z)), gPrintTol);
+
+    // The surroundings: the light the model gave a patch of ground depended on what stood on it. When that
+    // left, the patch itself did not change, but its neighbourhood did.
+    if (Ghost(kGhostContext))
+        m *= Soft(abs(contextNow - src.w), gContextTol);
+
+    return m;
+}
 
 // An edit bounded to what the composition can actually produce: its luminance within the highlight
 // guard (plus a little for the soft knee), its colour within a stop of its luminance. Anything beyond
@@ -260,6 +345,8 @@ struct History
     float targetConfidence;
     float logLuma;
     float valid; // the fraction of the bilinear weight that passed, 0..1
+    float4 print; // anti-ghosting: the source's fingerprint, carried
+    float4 meta;  // anti-ghosting: age, validity, staleness, tap validity
 };
 
 // A history texture at uv q, Catmull-Rom filtered in five bilinear taps (the usual TAA arrangement).
@@ -302,6 +389,8 @@ History ReadHistory(float2 q, float linC, float tol)
     h.targetConfidence = 0.0;
     h.logLuma = 0.0;
     h.valid = 0.0;
+    h.print = 0.0;
+    h.meta = 0.0;
 
     const float2 pos = q * float2(gWidth, gHeight) - 0.5;
     const int2 i0 = (int2) floor(pos);
@@ -311,6 +400,8 @@ History ReadHistory(float2 q, float linC, float tol)
     float allValid = 1.0;
     float3 lo = 1e9, hi = -1e9;
     float3 tlo = 1e9, thi = -1e9;
+    float bestW = 0.0;
+    int2 bestT = int2(0, 0);
 
     [unroll] for (int k = 0; k < 4; ++k)
     {
@@ -343,6 +434,21 @@ History ReadHistory(float2 q, float linC, float tol)
             tlo = min(tlo, g4.rgb);
             thi = max(thi, g4.rgb);
         }
+
+        if (w > bestW)
+        {
+            bestW = w;
+            bestT = t;
+        }
+    }
+
+    // The fingerprint and the meta travel with the edit, read at its strongest valid tap: the fingerprint
+    // is compared with a 3x3 range, which a pixel's worth of placement does not move, and two reads cost
+    // a quarter of eight.
+    if (gGhostFlags != 0u && bestW > 0.0)
+    {
+        h.print = gHistPrint.Load(int3(bestT, 0));
+        h.meta = gHistMeta.Load(int3(bestT, 0));
     }
 
     if (wsum > 1e-4)
@@ -448,6 +554,43 @@ uint2 LevelSize(uint level)
 groupshared float4 sEdit[64];  // rgb: w * edit, a: w
 groupshared float2 sGuide[64]; // w * log2 depth, w * log2 luma
 groupshared uint sRejected;
+groupshared uint sRejectedPrint; // anti-ghosting: rejected by the fingerprint, not by depth
+groupshared uint sMotion;        // the group's motion, in eighths of a pixel
+
+// Anti-ghosting: this frame's fingerprint over the group and a one-pixel border (10x10), so each pixel's
+// 3x3 range is nine reads of shared memory rather than nine of the frame.
+groupshared float3 sPrint[100];
+
+void LoadPrintTile(uint3 gid, uint3 gtid)
+{
+    const int2 origin = int2(gid.xy) * 8 - 1;
+    const uint li = gtid.y * 8 + gtid.x;
+    const float white = WhitePoint();
+
+    [unroll] for (uint k = 0; k < 2; ++k)
+    {
+        const uint j = li + k * 64;
+
+        if (j < 100)
+        {
+            const int2 t = clamp(origin + int2(j % 10, j / 10), int2(0, 0), int2(gWidth, gHeight) - 1);
+            sPrint[j] = PrintOf(gColour.Load(int3(t, 0)).rgb, white);
+        }
+    }
+}
+
+void PrintRange(uint3 gtid, out float3 lo, out float3 hi)
+{
+    lo = 1e9;
+    hi = -1e9;
+
+    [unroll] for (uint k = 0; k < 9; ++k)
+    {
+        const float3 v = sPrint[(gtid.y + k / 3) * 10 + gtid.x + k % 3];
+        lo = min(lo, v);
+        hi = max(hi, v);
+    }
+}
 
 void ReduceToFirstLevel(uint3 gtid, uint3 id, float w, float3 edit, float linC, float logLuma)
 {
@@ -485,8 +628,69 @@ void ReduceToFirstLevel(uint3 gtid, uint3 id, float w, float3 edit, float linC, 
     }
 }
 
+// The low band from the same surface only, for the anti-ghosting fill. Each pyramid level is read
+// jointly-bilaterally -- more loosely the coarser it is -- from the coarsest to the finest, each finer
+// level taking over where it has support. Where no level holds anything like this pixel there is no edit:
+// borrowing another surface's light is how a character ended up wearing the wall behind them.
+float3 SurfaceLow(float2 uv, float logD, float logL)
+{
+    float3 low = 0.0;
+    float have = 0.0;
+
+    [unroll] for (int lvl = 2; lvl >= 0; --lvl)
+    {
+        const uint2 size = LevelSize((uint) lvl);
+        const float2 pos = uv * float2(size) - 0.5;
+        const int2 i0 = (int2) floor(pos);
+        const float2 f = pos - floor(pos);
+        const float sd = 0.15 * (1.0 + lvl); // ~11% in depth at the first level
+        const float sl = 1.0 * (1.0 + lvl);  // a stop of luma at the first level
+
+        float3 acc = 0.0;
+        float ws = 0.0;
+
+        [unroll] for (int k = 0; k < 4; ++k)
+        {
+            const int2 o = int2(k & 1, k >> 1);
+            const int2 t = clamp(i0 + o, int2(0, 0), int2(size) - 1);
+            const float wb = (o.x ? f.x : 1.0 - f.x) * (o.y ? f.y : 1.0 - f.y);
+
+            float4 e;
+            float2 g;
+
+            if (lvl == 0)
+            {
+                e = gAux0.Load(int3(t, 0));
+                g = gAux1.Load(int3(t, 0)).xy;
+            }
+            else if (lvl == 1)
+            {
+                e = gAux2.Load(int3(t, 0));
+                g = gAux4.Load(int3(t, 0)).xy;
+            }
+            else
+            {
+                e = gAux3.Load(int3(t, 0));
+                g = gAux5.Load(int3(t, 0)).xy;
+            }
+
+            const float dd = (g.x - logD) / sd;
+            const float dl = (g.y - logL) / sl;
+            const float w = wb * e.a * exp(-(dd * dd + dl * dl));
+            acc += e.rgb * w;
+            ws += w;
+        }
+
+        const float a = saturate(ws * 4.0);
+        low = lerp(low, ws > 1e-6 ? acc / ws : low, a);
+        have = lerp(have, 1.0, a);
+    }
+
+    return low * have;
+}
+
 [numthreads(8, 8, 1)]
-void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
+void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID, uint3 gid : SV_GroupID)
 {
     const bool inside = id.x < gWidth && id.y < gHeight;
     const float2 uv = (float2(id.xy) + 0.5) / float2(max(gWidth, 1u), max(gHeight, 1u));
@@ -503,8 +707,8 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
 
     if (gMode == 0)
     {
-        if (id.x == 0 && id.y == 0)
-            gStats[uint2(gStatsSlot, 0)] = 0u;
+        if (id.x == 0 && id.y < 3u)
+            gStats[uint2(gStatsSlot, id.y)] = 0u;
 
         return;
     }
@@ -514,7 +718,14 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
     if (gMode == 1 || gMode == 2)
     {
         if (gtid.x == 0 && gtid.y == 0)
+        {
             sRejected = 0u;
+            sRejectedPrint = 0u;
+            sMotion = 0u;
+        }
+
+        if (Ghost(kGhostPrint))
+            LoadPrintTile(gid, gtid);
 
         GroupMemoryBarrierWithGroupSync();
 
@@ -546,6 +757,30 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
             const float colourDiff = abs(logLuma - h.logLuma);
             const float vColour = saturate((2.0 * colourTol - colourDiff) / colourTol);
 
+            // Anti-ghosting. The fingerprint: does the frame still look like what the edit was computed
+            // for? Its verdicts multiply and only a model run restores them, so an edit rejected once stays
+            // rejected instead of flickering back.
+            float3 printNow = 0.0;
+            float contextNow = 0.0;
+            float match = 1.0;
+
+            if (Ghost(kGhostPrint))
+            {
+                printNow = sPrint[(gtid.y + 1) * 10 + gtid.x + 1];
+                contextNow = Ghost(kGhostContext) ? ContextAt(uv) : 0.0;
+
+                float3 lo, hi;
+                PrintRange(gtid, lo, hi);
+
+                if (gHistValid != 0 && onScreen)
+                    match = PrintMatch(h.print, lo, hi, contextNow);
+            }
+
+            const float validity = !Ghost(kGhostPrint) ? 1.0 : (gHistValid != 0 && onScreen ? saturate(h.meta.y) * match : 0.0);
+
+            // How far this frame moved the pixel, camera jitter left out: what ages a carried edit.
+            const float motionPx = length((q - uv - float2(gJitterDeltaX, gJitterDeltaY)) * float2(gWidth, gHeight));
+
             if (gMode == 1)
             {
                 gOut2[id.xy] = colour; // the untouched frame, kept for the apply
@@ -563,7 +798,7 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
                 }
 
                 edit = shownEdit;
-                w = h.valid;
+                w = h.valid * validity;
 
                 // Confidence decays with age and with every doubt -- depth or colour -- and only
                 // ever comes back on a refresh.
@@ -571,7 +806,7 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
                 // little from frame to frame and passed or failed the colour test at random, so their
                 // detail switched on and off; now a single failure dims it and only a run of them --
                 // a surface that really changed, like grass in the wind -- takes it away.
-                const float doubt = lerp(0.6, 1.0, vColour) * saturate(2.0 * h.valid - 1.0) * gHighDecay;
+                const float doubt = lerp(0.6, 1.0, vColour) * saturate(2.0 * h.valid - 1.0) * gHighDecay * validity;
                 float confidence = shownConfidence * doubt;
 
                 if (gCrossfadeOn != 0)
@@ -581,20 +816,43 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
 
                 if (h.valid < 0.5)
                     InterlockedAdd(sRejected, 1u);
+                else if (validity < 0.5)
+                    InterlockedAdd(sRejectedPrint, 1u);
+
+                // The print is carried as it is; the meta ages: a frame older, what is still believed,
+                // and the motion it has been through (a still camera does not age it).
+                if (gGhostFlags != 0u)
+                {
+                    gOut7[id.xy] = h.print;
+                    gOut8[id.xy] = float4(h.meta.x + 1.0, validity, h.meta.z + saturate(motionPx / max(gStalePx, 0.1)),
+                                          h.valid);
+                }
+
+                InterlockedAdd(sMotion, (uint) (min(motionPx, 32.0) * 8.0));
             }
             else
             {
                 float ok;
+                // An edit the fingerprint rejected is not something to hold the new answer to.
                 const float3 fresh = Stabilize(FreshEditAt(int2(id.xy), int2(id.xy), int2(gWidth, gHeight), ok),
-                                               h.edit, gHistValid != 0 ? h.valid * vColour : 0.0);
+                                               h.edit, gHistValid != 0 ? h.valid * vColour * validity : 0.0);
 
                 // Optional temporal smoothing of the refresh: where the carried edit is still valid,
                 // move only part of the way to the new one. 1 takes the new answer whole. A pixel the
                 // model returned black for keeps what was carried.
-                float keep = (gHistValid != 0) ? (1.0 - gRefreshBlend) * h.valid * vColour : 0.0;
+                float keep = (gHistValid != 0) ? (1.0 - gRefreshBlend) * h.valid * vColour * validity : 0.0;
 
                 if (ok < 0.5)
-                    keep = (gHistValid != 0 && h.valid > 0.5) ? 1.0 : 0.0;
+                    keep = (gHistValid != 0 && h.valid > 0.5 && validity > 0.5) ? 1.0 : 0.0;
+
+                // The fingerprint and meta of what is stored: this frame's, unless the model failed here
+                // and the carried edit was kept, in which case its own go on with it.
+                if (gGhostFlags != 0u)
+                {
+                    const bool kept = ok < 0.5 && keep > 0.5;
+                    gOut7[id.xy] = kept ? h.print : float4(printNow, contextNow);
+                    gOut8[id.xy] = kept ? float4(h.meta.x + 1.0, validity, h.meta.z, h.valid) : float4(0.0, 1.0, 0.0, 1.0);
+                }
 
                 edit = lerp(fresh, h.edit, saturate(keep));
                 w = 1.0;
@@ -604,7 +862,7 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
                     // The model's answer becomes the target, whole. What is shown takes the first step of
                     // the walk toward it, from what was shown before -- where that is still the same
                     // surface; elsewhere there is nothing to walk from, and the answer is shown at once.
-                    const bool carry = gHistValid != 0 && h.valid > 0.5 && ok > 0.5;
+                    const bool carry = gHistValid != 0 && h.valid > 0.5 && ok > 0.5 && validity > 0.5;
                     const float a = carry ? saturate(gCrossfade) : 1.0;
                     gOut6[id.xy] = float4(edit, 1.0);
                     edit = lerp(h.edit, edit, a);
@@ -625,8 +883,17 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
         {
             GroupMemoryBarrierWithGroupSync();
 
-            if (gtid.x == 0 && gtid.y == 0 && sRejected > 0u)
-                InterlockedAdd(gStats[uint2(gStatsSlot, 0)], sRejected);
+            if (gtid.x == 0 && gtid.y == 0)
+            {
+                if (sRejected > 0u)
+                    InterlockedAdd(gStats[uint2(gStatsSlot, 0)], sRejected);
+
+                if (sRejectedPrint > 0u)
+                    InterlockedAdd(gStats[uint2(gStatsSlot, 1)], sRejectedPrint);
+
+                if (sMotion > 0u)
+                    InterlockedAdd(gStats[uint2(gStatsSlot, 2)], sMotion);
+            }
         }
 
         return;
@@ -639,6 +906,7 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
     {
         // One level from the one above it: each texel is the coverage-weighted mean of a 4x4 block.
         float3 acc = 0.0;
+        float2 gacc = 0.0;
         float wsum = 0.0;
 
         [unroll] for (uint y = 0; y < 4; ++y)
@@ -652,11 +920,19 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
                     const float4 v = gAux0.Load(int3(s, 0));
                     acc += v.rgb * v.a;
                     wsum += v.a;
+
+                    if (Ghost(kGhostSurface))
+                        gacc += gAux1.Load(int3(s, 0)).xy * v.a;
                 }
             }
         }
 
         gOut0[id.xy] = float4(wsum > 1e-6 ? acc / wsum : 0.0, wsum / 16.0);
+
+        // The same-surface fill reads every level bilaterally, so every level carries its guide.
+        if (Ghost(kGhostSurface))
+            gOut1[id.xy] = float4(wsum > 1e-6 ? gacc / wsum : 0.0, 0.0, 0.0);
+
         return;
     }
 
@@ -708,16 +984,40 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
         low = lerp(low, l2.rgb, saturate(l2.a * 4.0));
         low = lerp(low, w1 > 1e-6 ? acc1 / w1 : low, saturate(w1 * 4.0));
 
+        // Anti-ghosting fill: the low band from the same surface at every level, or none.
+        if (Ghost(kGhostSurface))
+            low = SurfaceLow(uv, logD, guide.y);
+
+        // The edit's age, what is still believed of it and how far it has travelled.
+        const float4 meta = gGhostFlags != 0u ? gHistMeta.Load(int3(id.xy, 0)) : float4(0.0, 1.0, 0.0, 1.0);
+
+        // Aging: the carried detail fades with the motion it has been through -- toward the edit's broad
+        // part, or the whole edit toward none. A still camera does not age it, so nothing pulses standing
+        // still; the model's next run brings it back whole.
+        float highWeight = hist.a;
+        float ageScale = 1.0;
+
+        if (Ghost(kGhostAging))
+        {
+            const float a = exp2(-meta.z / max(gAgeHalfLife, 0.1));
+
+            if (Ghost(kGhostAgeNeutral))
+                ageScale = a;
+            else
+                highWeight *= a;
+        }
+
         // The high band is what the pixel's own history says beyond its region, and it is only as
         // good as its confidence. Where the history was rejected the pixel takes the low band alone.
         const float3 high = hist.rgb - low;
-        const float3 edit = ClampEdit(gLowGain * low + gHighGain * hist.a * high, max(gLowGain, gHighGain));
+        const float3 edit = ClampEdit(gLowGain * low + gHighGain * highWeight * high, max(gLowGain, gHighGain)) * ageScale;
 
         const float eps = Eps();
         float3 result = max((max(original.rgb, 0.0) + eps) * exp2(edit) - eps, 0.0);
 
-        // With the temporal stabiliser on, this pass only hands its edit on; mode 10 writes the frame.
-        if (gTemporal > 0.0 && gDebugView == 0)
+        // With the temporal stabiliser or the guided filter on, this pass only hands its edit on; mode 15
+        // or mode 10 writes the frame.
+        if ((gTemporal > 0.0 || Ghost(kGhostGuided)) && gDebugView == 0)
         {
             gOut3[id.xy] = float4(edit, 1.0);
             return;
@@ -739,6 +1039,25 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
         else if (gDebugView == 3)
         {
             result = saturate(0.5 + dot(hist.a * high, kLuma) * 8.0).xxx * white * 0.5;
+        }
+        else if (gDebugView == 4)
+        {
+            // The rejection mask. Green: the carried edit is believed. Red: the fingerprint rejected it --
+            // the frame changed under it. Orange: rejected by depth -- revealed, or another surface.
+            // In between, how much of it is still believed.
+            const float3 c = meta.w < 0.5 ? float3(1.0, 0.5, 0.0) : lerp(float3(1.0, 0.08, 0.08), float3(0.1, 1.0, 0.25), meta.y);
+            result = c * white * 0.5;
+        }
+        else if (gDebugView == 5 || gDebugView == 6)
+        {
+            // The edit's age in frames since the model ran (5), or the motion it has travelled, in frames of
+            // staleness (6): black, blue, green, yellow, red at eight.
+            const float a = saturate((gDebugView == 5 ? meta.x : meta.z) / 8.0);
+            float3 c = lerp(float3(0.0, 0.0, 0.0), float3(0.0, 0.3, 1.0), saturate(a * 4.0));
+            c = lerp(c, float3(0.0, 1.0, 0.3), saturate(a * 4.0 - 1.0));
+            c = lerp(c, float3(1.0, 1.0, 0.0), saturate(a * 4.0 - 2.0));
+            c = lerp(c, float3(1.0, 0.0, 0.0), saturate(a * 4.0 - 3.0));
+            result = c * white * 0.5;
         }
 
         gOut0[id.xy] = float4(result, original.a);
@@ -938,6 +1257,133 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID)
         const float eps = Eps();
         gOut0[id.xy] = float4(max((max(original.rgb, 0.0) + eps) * exp2(outEdit) - eps, 0.0), original.a);
         gOut3[id.xy] = float4(outEdit, 1.0);
+        return;
+    }
+
+    if (gMode == 12)
+    {
+        // Anti-ghosting: this frame's surroundings, each texel the mean normalised log luma of a 4x4
+        // block of the frame (dispatched at a quarter size; gSrcW/H is the frame).
+        float acc = 0.0;
+        float n = 0.0;
+        const float white = WhitePoint();
+
+        [unroll] for (uint y = 0; y < 4; ++y)
+        {
+            [unroll] for (uint x = 0; x < 4; ++x)
+            {
+                const uint2 s = id.xy * 4u + uint2(x, y);
+
+                if (s.x < gSrcW && s.y < gSrcH)
+                {
+                    acc += PrintOf(gColour.Load(int3(s, 0)).rgb, white).x;
+                    n += 1.0;
+                }
+            }
+        }
+
+        gOut0[id.xy] = float4(n > 0.0 ? acc / n : 0.0, 0.0, 0.0, 0.0);
+        return;
+    }
+
+    if (gMode == 13)
+    {
+        // The guided filter models the carried edit, window by window, as a linear function of the frame's
+        // own log luma: a = cov(I, edit) / (var(I) + eps), b = mean(edit) - a mean(I). Where the frame has
+        // structure the edit keeps the structure that follows it; where the frame is flat (the wall a
+        // character walked away from) a goes to zero and the edit to its local mean -- the ghost's
+        // outline has nothing in the frame to hold on to. He et al., computed at half size ("fast").
+        //
+        // This pass: 2x2 means of I, I^2, the edit and I x edit, at half size (gSrcW/H is the frame).
+        float I1 = 0.0, I2 = 0.0, n = 0.0;
+        float3 p1 = 0.0, Ip = 0.0;
+        const float white = WhitePoint();
+
+        [unroll] for (uint y = 0; y < 2; ++y)
+        {
+            [unroll] for (uint x = 0; x < 2; ++x)
+            {
+                const uint2 s = id.xy * 2u + uint2(x, y);
+
+                if (s.x < gSrcW && s.y < gSrcH)
+                {
+                    const float I = PrintOf(gColour.Load(int3(s, 0)).rgb, white).x;
+                    const float3 e = gAux0.Load(int3(s, 0)).rgb;
+                    I1 += I;
+                    I2 += I * I;
+                    p1 += e;
+                    Ip += I * e;
+                    n += 1.0;
+                }
+            }
+        }
+
+        n = max(n, 1.0);
+        gOut0[id.xy] = float4(I1 / n, I2 / n, p1.r / n, p1.g / n);
+        gOut1[id.xy] = float4(p1.b / n, Ip / n);
+        return;
+    }
+
+    if (gMode == 14)
+    {
+        // The window means, then the coefficients (gWidth/H is the half size).
+        static const int R = 1; // kDlssNrCacheGuidedRadius
+        float4 s0 = 0.0, s1 = 0.0;
+
+        [unroll] for (int dy = -R; dy <= R; ++dy)
+        {
+            [unroll] for (int dx = -R; dx <= R; ++dx)
+            {
+                const int2 t = clamp(int2(id.xy) + int2(dx, dy), int2(0, 0), int2(gWidth, gHeight) - 1);
+                s0 += gGuide0.Load(int3(t, 0));
+                s1 += gGuide1.Load(int3(t, 0));
+            }
+        }
+
+        s0 /= (float) ((2 * R + 1) * (2 * R + 1));
+        s1 /= (float) ((2 * R + 1) * (2 * R + 1));
+
+        const float mI = s0.x;
+        const float varI = max(s0.y - mI * mI, 0.0);
+        const float3 mp = float3(s0.z, s0.w, s1.x);
+        const float3 a = (s1.yzw - mI * mp) / (varI + max(gGuidedEps, 1e-5));
+
+        gOut0[id.xy] = float4(a, 0.0);
+        gOut1[id.xy] = float4(mp - a * mI, 0.0);
+        return;
+    }
+
+    if (gMode == 15)
+    {
+        // The edit rebuilt from this frame, a and b averaged over the windows covering the pixel (a tent
+        // of four bilinear reads), and blended in by how far the edit has travelled: a fresh edit is the
+        // model's own and is left alone, so nothing changes standing still.
+        const float4 original = gColour.Load(int3(id.xy, 0));
+        const float3 raw = gAux0.Load(int3(id.xy, 0)).rgb;
+        const float4 meta = gHistMeta.Load(int3(id.xy, 0));
+
+        const float2 t = 0.5 / float2(max(gHalfW, 1u), max(gHalfH, 1u));
+        float3 A = 0.0, B = 0.0;
+
+        [unroll] for (int k = 0; k < 4; ++k)
+        {
+            const float2 o = float2(k & 1 ? t.x : -t.x, k & 2 ? t.y : -t.y);
+            A += gGuide0.SampleLevel(gLinear, uv + o, 0).rgb;
+            B += gGuide1.SampleLevel(gLinear, uv + o, 0).rgb;
+        }
+
+        const float3 rebuilt = 0.25 * (A * NormLogLuma(original.rgb) + B);
+        const float weight = saturate(gGuidedStrength) * saturate(meta.z / 2.0);
+        const float3 edit = ClampEdit(lerp(raw, rebuilt, weight), max(gLowGain, gHighGain));
+
+        if (gTemporal > 0.0)
+        {
+            gOut3[id.xy] = float4(edit, 1.0);
+            return;
+        }
+
+        const float eps = Eps();
+        gOut0[id.xy] = float4(max((max(original.rgb, 0.0) + eps) * exp2(edit) - eps, 0.0), original.a);
         return;
     }
 

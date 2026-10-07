@@ -366,6 +366,18 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrCacheModelHistory.set_from_config(readUInt("DlssNr", "CacheModelHistory"));
             DlssNrCacheDebugView.set_from_config(readUInt("DlssNr", "CacheDebugView"));
             DlssNrCacheDumpFrames.set_from_config(readUInt("DlssNr", "CacheDumpFrames"));
+            DlssNrCacheFingerprint.set_from_config(readBool("DlssNr", "CacheFingerprint"));
+            DlssNrCacheContext.set_from_config(readBool("DlssNr", "CacheContext"));
+            DlssNrCacheFingerprintTolerance.set_from_config(readFloat("DlssNr", "CacheFingerprintTolerance"));
+            DlssNrCacheSurfaceFill.set_from_config(readBool("DlssNr", "CacheSurfaceFill"));
+            DlssNrCacheCrossfadeFrames.set_from_config(readUInt("DlssNr", "CacheCrossfadeFrames"));
+            DlssNrCacheGuided.set_from_config(readBool("DlssNr", "CacheGuided"));
+            DlssNrCacheGuidedStrength.set_from_config(readFloat("DlssNr", "CacheGuidedStrength"));
+            DlssNrCacheAging.set_from_config(readBool("DlssNr", "CacheAging"));
+            DlssNrCacheAgeHalfLife.set_from_config(readFloat("DlssNr", "CacheAgeHalfLife"));
+            DlssNrCacheAgeNeutral.set_from_config(readBool("DlssNr", "CacheAgeNeutral"));
+            DlssNrCacheAdaptiveSpeed.set_from_config(readBool("DlssNr", "CacheAdaptiveSpeed"));
+            DlssNrCacheAdaptiveMin.set_from_config(readUInt("DlssNr", "CacheAdaptiveMin"));
             DlssNrJbuUpsample.set_from_config(readBool("DlssNr", "JbuUpsample"));
             DlssNrJbuSigma.set_from_config(readFloat("DlssNr", "JbuSigma"));
             UseGenericAppIdWithDlss.set_from_config(readBool("DLSS", "UseGenericAppIdWithDlss"));
@@ -1292,6 +1304,26 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "CacheDebugView", GetIntValue(Instance()->DlssNrCacheDebugView.value_for_config()).c_str());
     ini.SetValue("DlssNr", "CacheDumpFrames",
                  GetIntValue(Instance()->DlssNrCacheDumpFrames.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheFingerprint",
+                 GetBoolValue(Instance()->DlssNrCacheFingerprint.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheContext", GetBoolValue(Instance()->DlssNrCacheContext.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheFingerprintTolerance",
+                 GetFloatValue(Instance()->DlssNrCacheFingerprintTolerance.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheSurfaceFill",
+                 GetBoolValue(Instance()->DlssNrCacheSurfaceFill.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheCrossfadeFrames",
+                 GetIntValue(Instance()->DlssNrCacheCrossfadeFrames.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheGuided", GetBoolValue(Instance()->DlssNrCacheGuided.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheGuidedStrength",
+                 GetFloatValue(Instance()->DlssNrCacheGuidedStrength.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheAging", GetBoolValue(Instance()->DlssNrCacheAging.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheAgeHalfLife",
+                 GetFloatValue(Instance()->DlssNrCacheAgeHalfLife.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheAgeNeutral", GetBoolValue(Instance()->DlssNrCacheAgeNeutral.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheAdaptiveSpeed",
+                 GetBoolValue(Instance()->DlssNrCacheAdaptiveSpeed.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheAdaptiveMin",
+                 GetIntValue(Instance()->DlssNrCacheAdaptiveMin.value_for_config()).c_str());
     ini.SetValue("DlssNr", "JbuUpsample", GetBoolValue(Instance()->DlssNrJbuUpsample.value_for_config()).c_str());
     ini.SetValue("DlssNr", "JbuSigma", GetFloatValue(Instance()->DlssNrJbuSigma.value_for_config()).c_str());
         ini.SetValue("DLSS", "RenderPresetOverride",

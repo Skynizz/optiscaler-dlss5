@@ -380,6 +380,15 @@ void RenderMenu(Config* config, float menuResScale)
                 config->DlssNrCacheDespeckle = true;
                 config->DlssNrCacheTemporal = temporal;
                 config->DlssNrCacheLowTemporal = 0.95f;
+                config->DlssNrCacheFingerprint = true;
+                config->DlssNrCacheContext = true;
+                config->DlssNrCacheFingerprintTolerance = 0.25f;
+                config->DlssNrCacheSurfaceFill = true;
+                config->DlssNrCacheCrossfadeFrames = 3u;
+                config->DlssNrCacheGuided = false;
+                config->DlssNrCacheAging = false;
+                config->DlssNrCacheAdaptiveSpeed = true;
+                config->DlssNrCacheAdaptiveMin = 2u;
                 config->DlssNrPreSr = preSr;
                 config->DlssNrWorkingScale = scale;
                 config->DlssNrJbuUpsample = scale < 0.999f;
@@ -741,6 +750,156 @@ void RenderMenu(Config* config, float menuResScale)
                            "\nneighbours is that speck, not structure; a real edge has neighbours on its own"
                            "\nside that agree with it, so edges keep their shape.");
 
+                if (ImGui::TreeNodeEx("Anti-ghosting (long intervals)", ImGuiTreeNodeFlags_DefaultOpen))
+                {
+                    const auto gs = DlssNr::GetCacheStatus();
+
+                    if (gs.historyValid && gs.refreshes + gs.cached > 0)
+                        ImGui::TextDisabled("Model every %u frames - camera %.1f px/frame - fingerprint rejects %.1f%%",
+                                            gs.intervalNow, gs.speed, 100.0f * gs.printRejected);
+
+                    bool fingerprint = config->DlssNrCacheFingerprint.value_or_default();
+
+                    if (ImGui::Checkbox("Fingerprint check", &fingerprint))
+                        config->DlssNrCacheFingerprint = fingerprint;
+
+                    HelpMarker("Where the model computed its edit, what the frame looked like there (brightness,"
+                               "\ncolour) is stored with the edit and travels with it. Every frame it is compared"
+                               "\nwith the frame now -- against the range of the pixel's neighbourhood, so aliasing"
+                               "\nand sub-pixel shifts pass. A carried edit the frame no longer matches -- a shadow"
+                               "\nthat moved, debris, a surface now behind something -- is dropped until the model"
+                               "\nruns again: the trails at long intervals."
+                               "\n\nThe old check compared each frame only with the one before, so anything that"
+                               "\ndrifted a little every frame was never caught."
+                               "\n\nMeasured at 8 frames between runs: strongest trails -26 to -60%.");
+
+                    if (fingerprint)
+                    {
+                        ScopedIndent printIndent {};
+
+                        bool context = config->DlssNrCacheContext.value_or_default();
+
+                        if (ImGui::Checkbox("Include the surroundings", &context))
+                            config->DlssNrCacheContext = context;
+
+                        HelpMarker("Also compares the pixel's surroundings (about ten pixels across). The light the"
+                                   "\nmodel gave a patch of ground depended on what stood on it; when that moved"
+                                   "\naway the ground itself did not change, but its surroundings did.");
+
+                        float tol = config->DlssNrCacheFingerprintTolerance.value_or_default();
+
+                        if (ImGui::SliderFloat("Fingerprint tolerance", &tol, 0.05f, 1.0f, "%.2f stops",
+                                               ImGuiSliderFlags_Logarithmic))
+                            config->DlssNrCacheFingerprintTolerance = std::clamp(tol, 0.02f, 4.0f);
+
+                        HelpMarker("How far outside its neighbourhood's range the frame may move before the carried"
+                                   "\nedit is doubted; at twice this it is dropped. Lower rejects sooner (fewer trails,"
+                                   "\nmore of the frame on the broad edit between runs).");
+                    }
+
+                    bool fill = config->DlssNrCacheSurfaceFill.value_or_default();
+
+                    if (ImGui::Checkbox("Fill from the same surface only", &fill))
+                        config->DlssNrCacheSurfaceFill = fill;
+
+                    HelpMarker("A rejected pixel borrows the broad edit of its own surface (similar depth and"
+                               "\nbrightness) at every scale. Before, the coarse scales took whatever was nearest,"
+                               "\nso a character whose edit was rejected could wear the wall behind them. Where"
+                               "\nnothing similar is near, no edit at all until the model runs.");
+
+                    if (preSrOn || !crossfade)
+                        ImGui::BeginDisabled();
+
+                    int xfFrames = (int) config->DlssNrCacheCrossfadeFrames.value_or_default();
+
+                    if (ImGui::SliderInt("Smooth updates over", &xfFrames, 0, 8,
+                                         xfFrames == 0 ? "the whole interval" : "%d frames"))
+                        config->DlssNrCacheCrossfadeFrames = (uint32_t) std::clamp(xfFrames, 0, 16);
+
+                    if (preSrOn || !crossfade)
+                        ImGui::EndDisabled();
+
+                    HelpMarker("Smooth model updates reach the model's answer within this many frames. Spread over"
+                               "\nthe whole interval, at 8 frames the previous answer stayed on screen for up to 16:"
+                               "\na trail of its own. No effect at 3 frames between runs or fewer.");
+
+                    bool guided = config->DlssNrCacheGuided.value_or_default();
+
+                    if (ImGui::Checkbox("Guided filter", &guided))
+                        config->DlssNrCacheGuided = guided;
+
+                    HelpMarker("On frames without the model, the carried edit is rebuilt from the frame itself,"
+                               "\nwindow by window, so it only keeps structure where the frame has some: the outline"
+                               "\nof something that moved away has nothing to hold on to. Blended in by how far the"
+                               "\nedit has travelled -- standing still nothing changes."
+                               "\n\nOff by default: on top of the fingerprint it measured slightly less faithful.");
+
+                    if (guided)
+                    {
+                        ScopedIndent guidedIndent {};
+                        float strength = config->DlssNrCacheGuidedStrength.value_or_default();
+
+                        if (ImGui::SliderFloat("Guided strength", &strength, 0.0f, 1.0f, "%.2f"))
+                            config->DlssNrCacheGuidedStrength = std::clamp(strength, 0.0f, 1.0f);
+                    }
+
+                    bool aging = config->DlssNrCacheAging.value_or_default();
+
+                    if (ImGui::Checkbox("Aging", &aging))
+                        config->DlssNrCacheAging = aging;
+
+                    HelpMarker("The carried detail fades with the motion it has been through, toward the edit's"
+                               "\nbroad part; the model's next run brings it back. A still camera does not age it,"
+                               "\nso nothing pulses standing still."
+                               "\n\nOff by default: on top of the fingerprint it measured slightly less faithful.");
+
+                    if (aging)
+                    {
+                        ScopedIndent agingIndent {};
+                        float halfLife = config->DlssNrCacheAgeHalfLife.value_or_default();
+
+                        if (ImGui::SliderFloat("Half-life", &halfLife, 1.0f, 32.0f, "%.1f frames of motion",
+                                               ImGuiSliderFlags_Logarithmic))
+                            config->DlssNrCacheAgeHalfLife = std::clamp(halfLife, 0.5f, 64.0f);
+
+                        bool neutral = config->DlssNrCacheAgeNeutral.value_or_default();
+
+                        if (ImGui::Checkbox("Fade the whole edit", &neutral))
+                            config->DlssNrCacheAgeNeutral = neutral;
+
+                        HelpMarker("Fades all of the edit toward none rather than only its detail. Stronger"
+                                   "\nagainst trails, but the effect then visibly breathes while moving.");
+                    }
+
+                    if (!adaptive)
+                        ImGui::BeginDisabled();
+
+                    bool bySpeed = config->DlssNrCacheAdaptiveSpeed.value_or_default();
+
+                    if (ImGui::Checkbox("Follow the camera's speed", &bySpeed))
+                        config->DlssNrCacheAdaptiveSpeed = bySpeed;
+
+                    HelpMarker("With Adapt to motion: the model runs at the interval set above while the view moves"
+                               "\nat an ordinary pace, and sooner in proportion as it moves faster, down to the"
+                               "\nshortest interval below. It also runs at once when the fast-motion threshold of"
+                               "\nthe frame has lost its carried edit. Standing still it runs less, up to 1 in 8."
+                               "\nOff is the three-regime cadence.");
+
+                    if (bySpeed)
+                    {
+                        ScopedIndent speedIndent {};
+                        int minimum = (int) config->DlssNrCacheAdaptiveMin.value_or_default();
+
+                        if (ImGui::SliderInt("Shortest interval", &minimum, 1, 8))
+                            config->DlssNrCacheAdaptiveMin = (uint32_t) std::clamp(minimum, 1, 16);
+                    }
+
+                    if (!adaptive)
+                        ImGui::EndDisabled();
+
+                    ImGui::TreePop();
+                }
+
                 if (ImGui::TreeNode("Advanced cache settings"))
                 {
                     if (adaptive)
@@ -848,10 +1007,11 @@ void RenderMenu(Config* config, float menuResScale)
 
                 if (ImGui::TreeNode("Developer tools"))
                 {
-                    static const char* cacheDebugNames[] = { "Off", "Confidence", "Lighting band", "Detail band" };
+                    static const char* cacheDebugNames[] = { "Off",           "Confidence",   "Lighting band", "Detail band",
+                                                             "Rejection mask", "Age of the edit", "Staleness" };
                     int cacheDebug = (int) config->DlssNrCacheDebugView.value_or_default();
 
-                    if (cacheDebug < 0 || cacheDebug > 3)
+                    if (cacheDebug < 0 || cacheDebug > 6)
                         cacheDebug = 0;
 
                     if (ImGui::Combo("Cache debug view", &cacheDebug, cacheDebugNames, IM_ARRAYSIZE(cacheDebugNames)))
@@ -859,7 +1019,11 @@ void RenderMenu(Config* config, float menuResScale)
 
                     HelpMarker("Confidence: green where a pixel keeps its own carried detail, red where it was"
                                "\nrejected and borrows its surface's broad edit. Lighting and Detail show the two"
-                               "\nbands of the edit, centred on grey.");
+                               "\nbands of the edit, centred on grey."
+                               "\n\nRejection mask (needs the fingerprint): green believed, red rejected by the"
+                               "\nfingerprint, orange rejected by depth (revealed, another surface)."
+                               "\nAge of the edit: frames since the model ran. Staleness: the motion it has travelled."
+                               "\nBoth black, blue, green, yellow, red at 8.");
 
                     int dumpFrames = (int) config->DlssNrCacheDumpFrames.value_or_default();
 
@@ -1771,6 +1935,39 @@ void RenderOverlay(float alpha)
         {
             ImGui::SameLine();
             ImGui::TextDisabled(" |  %s: switch", keyName);
+        }
+
+        // The edit cache, with ShowStats: its cadence, what it rejects, and the GPU time of each of its
+        // own passes (measured only while this line is shown).
+        if (live.enabled && live.cache && Config::Instance()->DlssNrShowStats.value_or_default())
+        {
+            const auto cs = DlssNr::GetCacheStatus();
+
+            if (cs.historyValid)
+            {
+                ImGui::TextDisabled("Cache: model every %u frames  |  camera %.1f px/f  |  rejected %.1f%% depth, %.1f%% fingerprint",
+                                    cs.intervalNow, cs.speed, 100.0f * cs.lastRejected, 100.0f * cs.printRejected);
+
+                char line[256] = "";
+                int used = 0;
+                double total = 0.0;
+
+                for (int i = 0; i < DlssNr::CacheStatus::kStages && used < (int) sizeof(line) - 32; ++i)
+                {
+                    if (cs.stageMs[i] < 0.0)
+                        continue;
+
+                    used += snprintf(line + used, sizeof(line) - used, "%s%s %.3f", used > 0 ? "  " : "",
+                                     cs.stageName[i], cs.stageMs[i]);
+
+                    // The capture runs only on the frames the model runs; the rest make a frame without it.
+                    if (i != DlssNr::CacheStatus::kStages - 1)
+                        total += cs.stageMs[i];
+                }
+
+                if (used > 0)
+                    ImGui::TextDisabled("GPU ms: %s  |  frame without the model %.3f", line, total);
+            }
         }
     }
 
