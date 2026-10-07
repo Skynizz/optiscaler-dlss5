@@ -98,6 +98,11 @@ F6 in game to see the real number.
   history, composed once. Each pass is built one frame before it is used, which avoids the GPU hang
   that got multi-pass removed from the original fork.
 - **Model style** (Default, Natural, Cinematic) right next to the presets.
+- **Strong preset**: after the upscaler (works with Ray Reconstruction), Natural style, 2 model passes,
+  model every other frame. The strongest look for about the cost of one pass every frame.
+- **Light pop-in smoothing**: when a light enters the frame, the model re-grades the whole picture at once.
+  Where the game's own image did not change, that change now fades in (1.5 stops/s by default) instead of
+  landing in one frame; real light changes still pass at once.
 - **Live comparison**: F6 cycles optimised / vanilla / off without touching your settings and shows
   the real rendered FPS on screen.
 - **Built-in benchmark**: runs the modes back to back, captures each one and writes an HTML report.

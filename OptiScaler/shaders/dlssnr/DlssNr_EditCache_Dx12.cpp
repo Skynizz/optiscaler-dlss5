@@ -292,7 +292,8 @@ void DlssNrEditCache_Dx12::ReleaseAll(bool immediately)
                                &_histEdit[0],  &_histEdit[1],  &_histGuide[0], &_histGuide[1],  &_level[0],
                                &_level[1],     &_level[2],     &_levelGuide,   &_stats,         &_modelUp,
                                &_accMv[0],     &_accMv[1],     &_histPrint[0], &_histPrint[1],  &_histMeta[0],
-                               &_histMeta[1],  &_context,      &_guideSum[0],  &_guideSum[1],   &_guideCoef[0],
+                               &_histMeta[1],  &_context,      &_contextPrev,  &_guideSum[0],   &_guideSum[1],
+                               &_guideCoef[0],
                                &_guideCoef[1], &_guidedOut,    &_levelGuideCoarse[0], &_levelGuideCoarse[1] };
 
     for (ID3D12Resource** r : all)
@@ -444,7 +445,8 @@ bool DlssNrEditCache_Dx12::EnsureGhostResources(ID3D12Device* device)
 {
     const bool print = (_ghostFlags & DlssNrCacheGhost_Fingerprint) != 0;
     const bool meta = (_ghostFlags & (DlssNrCacheGhost_Fingerprint | DlssNrCacheGhost_Aging | DlssNrCacheGhost_Guided)) != 0;
-    const bool context = print && (_ghostFlags & DlssNrCacheGhost_Context) != 0;
+    // The surroundings serve the fingerprint and the anti pop-in, which keeps last frame's too.
+    const bool context = (print && (_ghostFlags & DlssNrCacheGhost_Context) != 0) || _antiPopStep > 0.0f;
     const bool guided = (_ghostFlags & DlssNrCacheGhost_Guided) != 0;
     const bool surface = (_ghostFlags & DlssNrCacheGhost_SurfaceFill) != 0;
 
@@ -477,6 +479,7 @@ bool DlssNrEditCache_Dx12::EnsureGhostResources(ID3D12Device* device)
     }
 
     ok &= want(_context, context, DXGI_FORMAT_R16G16B16A16_FLOAT, LevelDim(_width, 0), LevelDim(_height, 0));
+    ok &= want(_contextPrev, context, DXGI_FORMAT_R16G16B16A16_FLOAT, LevelDim(_width, 0), LevelDim(_height, 0));
     ok &= want(_guidedOut, guided, DXGI_FORMAT_R16G16B16A16_FLOAT, _width, _height);
 
     if (!ok)
@@ -494,8 +497,10 @@ bool DlssNrEditCache_Dx12::EnsureGhostResources(ID3D12Device* device)
         }
 
         Park(_context);
+        Park(_contextPrev);
         Park(_guidedOut);
         _ghostFlags = 0;
+        _antiPopStep = 0.0f;
     }
 
     return ok;
@@ -513,6 +518,7 @@ bool DlssNrEditCache_Dx12::BeginFrame(const Config& cfg, ID3D12Device* device, u
 {
     ++_frame;
     TickRetired();
+    _contextPrevValid = false; // set again by this frame's ContextPass, if it runs
 
     if (!EnsureResources(device, width, height, format))
         return true; // cannot cache: run the model, which is what off would do
@@ -545,6 +551,26 @@ bool DlssNrEditCache_Dx12::BeginFrame(const Config& cfg, ID3D12Device* device, u
     // The regional light (luminance stability) is broad enough not to care, and stays.
     _temporal = preSr ? 0.0f : std::clamp(cfg.DlssNrCacheTemporal.value_or_default(), 0.0f, 0.9f);
     _lowTemporal = std::clamp(cfg.DlssNrCacheLowTemporal.value_or_default(), 0.0f, 0.95f);
+
+    // Anti light pop-in: a rate in stops per second, turned into this frame's step with the real time
+    // between frames (smoothed), so the fade takes the same time at 40 fps as at 120.
+    {
+        LARGE_INTEGER now, freq;
+        QueryPerformanceCounter(&now);
+        QueryPerformanceFrequency(&freq);
+
+        if (_lastBeginTicks != 0)
+        {
+            const double dt = std::clamp((double) (now.QuadPart - _lastBeginTicks) / (double) freq.QuadPart,
+                                         1.0 / 500.0, 1.0 / 10.0);
+            _frameSeconds = _frameSeconds * 0.9 + dt * 0.1;
+        }
+
+        _lastBeginTicks = now.QuadPart;
+
+        const float rate = std::clamp(cfg.DlssNrCacheAntiPopRate.value_or_default(), 0.1f, 20.0f);
+        _antiPopStep = cfg.DlssNrCacheAntiPop.value_or_default() ? rate * (float) _frameSeconds : 0.0f;
+    }
     _debugView = cfg.DlssNrCacheDebugView.value_or_default();
     _modelHistory = cfg.DlssNrCacheModelHistory.value_or_default();
 
@@ -832,6 +858,9 @@ DlssNrCacheConstants DlssNrEditCache_Dx12::BaseConstants(const DlssNrCacheInputs
     c.ContextHeight = LevelDim(_height, 0);
     c.HalfWidth = (_width + 1) / 2;
     c.HalfHeight = (_height + 1) / 2;
+    // Needs last frame's surroundings to tell a re-grade from a real change; without them it stands aside.
+    c.AntiPopStep = (_debugView == 0 && _contextPrevValid) ? _antiPopStep : 0.0f;
+    c.AntiPopFrameTolerance = 0.15f;
     return c;
 }
 
@@ -955,6 +984,11 @@ void DlssNrEditCache_Dx12::BuildCoarseLevels(ID3D12GraphicsCommandList* cmd)
 void DlssNrEditCache_Dx12::ContextPass(ID3D12GraphicsCommandList* cmd, ID3D12Resource* frame,
                                        const DlssNrCacheInputs& in)
 {
+    // Last frame's surroundings become the previous ones; they count only if built on the frame just before.
+    std::swap(_context, _contextPrev);
+    _contextPrevValid = _contextPrev != nullptr && _contextFrame != 0 && _contextFrame + 1 == _frame;
+    _contextFrame = _frame;
+
     DlssNrCacheConstants c = BaseConstants(in);
     c.Mode = DlssNrCacheMode_Context;
     c.Width = LevelDim(_width, 0);
@@ -1043,7 +1077,9 @@ void DlssNrEditCache_Dx12::ApplyPass(ID3D12GraphicsCommandList* cmd, ID3D12Resou
     if (!surface)
         c.GhostFlags &= ~DlssNrCacheGhost_SurfaceFill;
 
-    const bool stabilise = c.Temporal > 0.0f;
+    // Mode 10 runs for the temporal stabiliser and for the anti pop-in, which live in the same pass (the
+    // latter also before the upscaler, where the former stands aside).
+    const bool stabilise = c.Temporal > 0.0f || c.AntiPopStep > 0.0f;
     const bool guided = _guidedNow && c.DebugView == 0 && _guideSum[0] != nullptr && meta != nullptr;
 
     if (!guided)
@@ -1094,18 +1130,39 @@ void DlssNrEditCache_Dx12::TemporalPass(ID3D12GraphicsCommandList* cmd, ID3D12Re
     ID3D12Resource* prev = _finalHist[_finalCur];
     ID3D12Resource* next = _finalHist[1 - _finalCur];
 
+    DlssNrCacheConstants c = BaseConstants(in);
+    c.Mode = DlssNrCacheMode_Temporal;
+
+    // The anti pop-in reads this frame's and last frame's surroundings.
+    const bool contexts = c.AntiPopStep > 0.0f && _context != nullptr && _contextPrev != nullptr;
+
     Barrier(cmd, edit, kUav, kSrv);
     Barrier(cmd, prev, kUav, kSrv);
     Barrier(cmd, _histGuide[_cur], kUav, kSrv);
     Barrier(cmd, _histGuide[1 - _cur], kUav, kSrv);
 
-    DlssNrCacheConstants c = BaseConstants(in);
-    c.Mode = DlssNrCacheMode_Temporal;
+    if (contexts)
+    {
+        Barrier(cmd, _context, kUav, kSrv);
+        Barrier(cmd, _contextPrev, kUav, kSrv);
+    }
+    else
+    {
+        c.AntiPopStep = 0.0f;
+    }
 
     ID3D12Resource* srv[kSrvCount] = { nullptr, _histGuide[_cur], original, in.depth, in.motion,
                                        edit,    prev,             _histGuide[1 - _cur] };
+    srv[13] = contexts ? _context : nullptr;
+    srv[18] = contexts ? _contextPrev : nullptr;
     ID3D12Resource* uav[kUavCount] = { target, nullptr, nullptr, next };
     Pass(cmd, c, srv, uav, Groups(_width), Groups(_height));
+
+    if (contexts)
+    {
+        Barrier(cmd, _context, kSrv, kUav);
+        Barrier(cmd, _contextPrev, kSrv, kUav);
+    }
 
     Barrier(cmd, edit, kSrv, kUav);
     Barrier(cmd, prev, kSrv, kUav);
@@ -1156,8 +1213,8 @@ bool DlssNrEditCache_Dx12::RunCached(ID3D12GraphicsCommandList* cmd, ID3D12Devic
     Barrier(cmd, _histPrint[prev], kUav, kSrv);
     Barrier(cmd, _histMeta[prev], kUav, kSrv);
 
-    // Anti-ghosting: the surroundings the fingerprint compares with.
-    const bool context = _context != nullptr && (_ghostFlags & DlssNrCacheGhost_Context) != 0;
+    // Anti-ghosting and anti pop-in: the surroundings the fingerprint and the pop test compare with.
+    const bool context = _context != nullptr && ((_ghostFlags & DlssNrCacheGhost_Context) != 0 || _antiPopStep > 0.0f);
 
     if (context)
         ContextPass(cmd, target, in);
@@ -1278,8 +1335,9 @@ bool DlssNrEditCache_Dx12::CaptureRefresh(ID3D12GraphicsCommandList* cmd, ID3D12
     Barrier(cmd, _histPrint[prev], kUav, kSrv);
     Barrier(cmd, _histMeta[prev], kUav, kSrv);
 
-    // Anti-ghosting: the fingerprint stored with the model's answer includes the surroundings.
-    const bool context = _context != nullptr && (_ghostFlags & DlssNrCacheGhost_Context) != 0;
+    // Anti-ghosting: the fingerprint stored with the model's answer includes the surroundings (and the
+    // anti pop-in compares them with last frame's).
+    const bool context = _context != nullptr && ((_ghostFlags & DlssNrCacheGhost_Context) != 0 || _antiPopStep > 0.0f);
 
     if (context)
         ContextPass(cmd, original, in);
@@ -1320,7 +1378,8 @@ bool DlssNrEditCache_Dx12::CaptureRefresh(ID3D12GraphicsCommandList* cmd, ID3D12
     // pops, unfiltered, while the frames between were steady.
     const bool rewrite = (_refreshBlend < 0.999f && wasValid) || std::abs(_lowGain - 1.0f) > 1e-3f ||
                          std::abs(_highGain - 1.0f) > 1e-3f || _debugView != 0 || (_stabilize > 0.0f && wasValid) ||
-                         _despeckle || (_crossfadeOn && wasValid && _crossfade < 0.999f) || _temporal > 0.0f;
+                         _despeckle || (_crossfadeOn && wasValid && _crossfade < 0.999f) || _temporal > 0.0f ||
+                         _antiPopStep > 0.0f; // a pop lands on the frame the model runs: that is where it is held
 
     Barrier(cmd, target, kSrv, kUav);
 

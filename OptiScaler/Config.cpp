@@ -378,6 +378,8 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrCacheAgeNeutral.set_from_config(readBool("DlssNr", "CacheAgeNeutral"));
             DlssNrCacheAdaptiveSpeed.set_from_config(readBool("DlssNr", "CacheAdaptiveSpeed"));
             DlssNrCacheAdaptiveMin.set_from_config(readUInt("DlssNr", "CacheAdaptiveMin"));
+            DlssNrCacheAntiPop.set_from_config(readBool("DlssNr", "CacheAntiPop"));
+            DlssNrCacheAntiPopRate.set_from_config(readFloat("DlssNr", "CacheAntiPopRate"));
             DlssNrJbuUpsample.set_from_config(readBool("DlssNr", "JbuUpsample"));
             DlssNrJbuSigma.set_from_config(readFloat("DlssNr", "JbuSigma"));
             UseGenericAppIdWithDlss.set_from_config(readBool("DLSS", "UseGenericAppIdWithDlss"));
@@ -1324,6 +1326,9 @@ bool Config::SaveIni()
                  GetBoolValue(Instance()->DlssNrCacheAdaptiveSpeed.value_for_config()).c_str());
     ini.SetValue("DlssNr", "CacheAdaptiveMin",
                  GetIntValue(Instance()->DlssNrCacheAdaptiveMin.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheAntiPop", GetBoolValue(Instance()->DlssNrCacheAntiPop.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheAntiPopRate",
+                 GetFloatValue(Instance()->DlssNrCacheAntiPopRate.value_for_config()).c_str());
     ini.SetValue("DlssNr", "JbuUpsample", GetBoolValue(Instance()->DlssNrJbuUpsample.value_for_config()).c_str());
     ini.SetValue("DlssNr", "JbuSigma", GetFloatValue(Instance()->DlssNrJbuSigma.value_for_config()).c_str());
         ini.SetValue("DLSS", "RenderPresetOverride",

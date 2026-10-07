@@ -603,6 +603,13 @@ class Config
     CustomOptional<bool> DlssNrCacheAdaptiveSpeed { true };
     CustomOptional<uint32_t> DlssNrCacheAdaptiveMin { 2 };
 
+    // Anti light pop-in: the model only sees the frame, so a light entering it makes the model re-grade
+    // regions whose own picture did not change -- the whole image shifts at once. Where the frame stayed the
+    // same, the edit's regional light may then change by at most AntiPopRate stops a second; where the frame
+    // changed (a light switched on there, a cut) it passes at once. Needs the edit cache.
+    CustomOptional<bool> DlssNrCacheAntiPop { true };
+    CustomOptional<float> DlssNrCacheAntiPopRate { 1.5f };
+
     // Joint bilateral enlargement of a below-size model's answer, guided by the full-size frame.
     // Only acts when the model resolution is under 100%; off is the resolve exactly as it was.
     CustomOptional<bool> DlssNrJbuUpsample { false };

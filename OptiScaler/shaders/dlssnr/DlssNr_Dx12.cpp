@@ -472,6 +472,10 @@ PreSrState g_preSr;
 // Set around the pre-SR dispatch, so the pass knows its target is the copy rather than the output.
 bool g_preSrDispatch = false;
 
+// Frames the pass ran before and after the upscaler, for the benchmark's "where it really ran".
+unsigned long long g_passBefore = 0;
+unsigned long long g_passAfter = 0;
+
 // The last pre-SR frame's jitter, for the change the cache moves its edit by; and which way the game's
 // jitter runs against the image (+1 the sample sits at the pixel centre plus the jitter, -1 minus it,
 // 0 no compensation). -1 measured steadiest in Control (flicker 0.47% against 0.54% uncompensated and
@@ -3221,6 +3225,12 @@ struct BenchState
     std::string settings;
     unsigned int renderWidth = 0;
     unsigned int renderHeight = 0;
+
+    // Counters at the start of the phase: where the pass ran, and the edit cache's runs.
+    unsigned long long passBefore0 = 0;
+    unsigned long long passAfter0 = 0;
+    unsigned long long refreshes0 = 0;
+    unsigned long long cached0 = 0;
 };
 
 BenchState g_bench;
@@ -3296,6 +3306,10 @@ void BenchApplyPhase()
     g_bench.frames.clear();
     g_bench.gpuSum = 0.0;
     g_bench.gpuCount = 0;
+    g_bench.passBefore0 = g_passBefore;
+    g_bench.passAfter0 = g_passAfter;
+    g_bench.refreshes0 = g_cache != nullptr ? g_cache->GetStatus().refreshes : 0;
+    g_bench.cached0 = g_cache != nullptr ? g_cache->GetStatus().cached : 0;
     QueryPerformanceCounter(&g_bench.phaseStart);
     g_bench.last = g_bench.phaseStart;
 }
@@ -3331,6 +3345,47 @@ void BenchFinishPhase()
         r.frameMs = avg;
         r.nrMs = g_bench.gpuCount > 0 ? g_bench.gpuSum / g_bench.gpuCount : 0.0;
         r.frames = (unsigned int) sorted.size();
+
+        // Pacing, in the order the frames came: the step from each frame time to the next.
+        std::vector<float> steps;
+        steps.reserve(g_bench.frames.size());
+
+        for (size_t i = 1; i < g_bench.frames.size(); ++i)
+            steps.push_back(std::abs(g_bench.frames[i] - g_bench.frames[i - 1]));
+
+        if (!steps.empty())
+        {
+            double stepSum = 0.0;
+
+            for (float v : steps)
+                stepSum += v;
+
+            r.pacingMs = stepSum / steps.size();
+            std::sort(steps.begin(), steps.end());
+            r.pacingP99 = steps[std::min(steps.size() - 1, (size_t) (steps.size() * 0.99))];
+        }
+    }
+
+    // Where the pass really ran, and whether pre-SR, asked for, fell back after the upscaler (the game
+    // calls Ray Reconstruction, which has no image before its upscale to work on).
+    {
+        const unsigned long long before = g_passBefore - g_bench.passBefore0;
+        const unsigned long long after = g_passAfter - g_bench.passAfter0;
+        const Config& cfg = *Config::Instance();
+        r.placement = (before == 0 && after == 0) || g_bench.phase == 0 ? 0 : (before >= after ? 2 : 1);
+        r.preSrFellBack = r.placement == 1 && EffEnabled(cfg) && EffPreSr(cfg);
+
+        if (g_cache != nullptr && EffCache(cfg) && g_bench.phase != 0)
+        {
+            const auto cs = g_cache->GetStatus();
+            const unsigned long long runs = cs.refreshes - g_bench.refreshes0;
+            const unsigned long long carried = cs.cached - g_bench.cached0;
+
+            if (runs + carried > 0)
+                r.modelShare = (float) runs / (float) (runs + carried);
+
+            r.rejected = cs.lastRejected + cs.printRejected;
+        }
     }
 
     g_bench.series[g_bench.phase] = g_bench.frames;
@@ -3341,8 +3396,11 @@ void BenchFinishPhase()
         g_bench.renderHeight = g_nr.guideHeight;
     }
 
-    LOG_INFO("DLSS-NR benchmark: {} -> {:.1f} fps, 1% low {:.1f}, frame {:.2f} ms, NR pass {:.2f} ms ({} frames)",
-             DlssNr::BenchmarkPhaseName(g_bench.phase), r.fps, r.low1, r.frameMs, r.nrMs, r.frames);
+    LOG_INFO("DLSS-NR benchmark: {} -> {:.1f} fps, 1% low {:.1f}, frame {:.2f} ms, NR pass {:.2f} ms ({} frames), "
+             "pacing {:.2f} ms (p99 {:.2f}), placement {}{}, model on {:.0f}% of frames",
+             DlssNr::BenchmarkPhaseName(g_bench.phase), r.fps, r.low1, r.frameMs, r.nrMs, r.frames, r.pacingMs,
+             r.pacingP99, r.placement == 2 ? "before the upscaler" : r.placement == 1 ? "after the upscaler" : "none",
+             r.preSrFellBack ? " (pre-SR fell back)" : "", r.modelShare < 0.0f ? 100.0f : 100.0f * r.modelShare);
 }
 
 // The frame times of one phase as an SVG polyline, averaged down to at most `points` points.
@@ -3475,7 +3533,7 @@ void WriteReport()
     // The numbers.
     h += "<h2>Mesures</h2><div class=\"card scroll\"><table><tr><th>Mode</th><th>FPS</th><th>1% low</th>"
          "<th>Temps d'image</th><th>Co&ucirc;t DLSS 5</th><th>vs d'origine</th><th>Scintillement moyen</th>"
-         "<th>Scintillement p90</th></tr>";
+         "<th>Scintillement p90</th><th>R&eacute;gularit&eacute;</th><th>Mod&egrave;le</th><th>Placement</th></tr>";
 
     for (int p : g_bench.plan)
     {
@@ -3492,19 +3550,44 @@ void WriteReport()
             versus = std::format("<span class=\"{}\">{:+.0f}%</span>", pct >= 0.0 ? "good" : "bad", pct);
         }
 
+        const std::string model = p == 0 ? std::string("&mdash;")
+                                  : r.modelShare < 0.0f ? std::string("100%")
+                                                        : std::format("{:.0f}%", 100.0f * r.modelShare);
+        const std::string placement = r.placement == 2   ? std::string("avant l'upscaler")
+                                      : r.placement == 1 ? std::string(r.preSrFellBack ? "apr&egrave;s (repli)"
+                                                                                       : "apr&egrave;s l'upscaler")
+                                                         : std::string("&mdash;");
+
         h += std::format("<tr><td><span class=\"dot\" style=\"background:{}\"></span>{}</td><td><b>{:.1f}</b></td>"
-                         "<td>{:.1f}</td><td>{:.2f} ms</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                         "<td>{:.1f}</td><td>{:.2f} ms</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td>"
+                         "<td>{:.2f} ms</td><td>{}</td><td>{}</td></tr>",
                          PageColour(p), PageName(p), r.fps, r.low1, r.frameMs,
                          p == 0 ? std::string("&mdash;") : std::format("{:.2f} ms", r.nrMs), versus,
                          r.flickerValid ? std::format("{:.2f}%", r.flickerMean) : std::string("&mdash;"),
-                         r.flickerValid ? std::format("{:.2f}%", r.flickerP95) : std::string("&mdash;"));
+                         r.flickerValid ? std::format("{:.2f}%", r.flickerP95) : std::string("&mdash;"), r.pacingMs,
+                         model, placement);
     }
+
+    bool fellBack = false;
+
+    for (int p : g_bench.plan)
+        fellBack = fellBack || (g_bench.results[p].valid && g_bench.results[p].preSrFellBack);
 
     h += "</table></div><p class=\"dim\">FPS et 1% low&nbsp;: images calcul&eacute;es par le jeu pendant 8&nbsp;s apr&egrave;s "
          "3&nbsp;s de stabilisation, sans la g&eacute;n&eacute;ration d'images. Co&ucirc;t DLSS 5&nbsp;: la passe enti&egrave;re "
          "sur le GPU, en moyenne. Scintillement&nbsp;: variation de luminosit&eacute; d'une image &agrave; la suivante sur 10 "
          "images cons&eacute;cutives, cam&eacute;ra immobile, sans les 5% de pixels qui bougent le plus (objets anim&eacute;s, "
-         "particules)&nbsp;; plus bas = plus stable, le mode d&eacute;sactiv&eacute; donne le bruit propre au jeu.</p>";
+         "particules)&nbsp;; plus bas = plus stable, le mode d&eacute;sactiv&eacute; donne le bruit propre au jeu. "
+         "R&eacute;gularit&eacute;&nbsp;: de combien le temps d'image change en moyenne d'une image &agrave; la suivante "
+         "(un mod&egrave;le lanc&eacute; une image sur deux se voit ici, pas dans la moyenne)&nbsp;; plus bas = plus "
+         "fluide. Mod&egrave;le&nbsp;: part des images o&ugrave; le mod&egrave;le a vraiment tourn&eacute;. "
+         "Placement&nbsp;: o&ugrave; la passe a r&eacute;ellement tourn&eacute;.</p>";
+
+    if (fellBack)
+        h += "<div class=\"card note\"><b>Pre-SR en repli&nbsp;:</b> le pre-SR &eacute;tait demand&eacute; mais le jeu "
+             "n'appelle pas DLSS Super Resolution (Ray Reconstruction activ&eacute;, le plus souvent)&nbsp;: la passe a "
+             "tourn&eacute; apr&egrave;s l'upscaler. Pour mesurer le pre-SR, d&eacute;sactive Ray Reconstruction dans le "
+             "jeu.</div>";
 
     // Bars.
     double best = 0.0;
@@ -4141,6 +4224,7 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
 
     if (preSrRan)
     {
+        ++g_passBefore;
         lookAtResult();
         return;
     }
@@ -4208,6 +4292,7 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
         return;
     }
 
+    ++g_passAfter;
     g_compose->Dispatch(cmdList, target, depth, motion, target, frame, timingQueue);
     lookAtResult();
 }

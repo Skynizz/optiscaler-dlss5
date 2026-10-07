@@ -164,4 +164,10 @@ struct alignas(256) DlssNrCacheConstants
     uint32_t ContextHeight;
     uint32_t HalfWidth;
     uint32_t HalfHeight;
+
+    // Anti light pop-in: the most, in stops, the edit's regional light may move in one frame where the
+    // frame itself did not change there (0 is off), and how much the frame's own regional luma may change,
+    // in stops, before the region counts as changed.
+    float AntiPopStep;
+    float AntiPopFrameTolerance;
 };

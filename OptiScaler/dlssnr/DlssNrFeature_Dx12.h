@@ -234,6 +234,21 @@ struct BenchmarkResult
     bool picture = false;
     unsigned int shotWidth = 0;
     unsigned int shotHeight = 0;
+
+    // Frame pacing: how much the frame time changes from one frame to the next (a model run one frame in
+    // two shows here, not in the average), mean and 99th percentile, ms.
+    double pacingMs = 0.0;
+    double pacingP99 = 0.0;
+
+    // Where the pass actually ran during the phase: 0 nowhere, 1 after the upscaler, 2 before it. Pre-SR
+    // falls back to after the upscaler when the game calls Ray Reconstruction rather than Super Resolution.
+    int placement = 0;
+    bool preSrFellBack = false;
+
+    // The edit cache during the phase: the share of frames the model ran (-1 without the cache) and the
+    // share of the frame without a believed edit at the end (-1 without the cache).
+    float modelShare = -1.0f;
+    float rejected = -1.0f;
 };
 
 struct BenchmarkStatus

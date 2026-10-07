@@ -389,6 +389,9 @@ void RenderMenu(Config* config, float menuResScale)
                 config->DlssNrCacheAging = false;
                 config->DlssNrCacheAdaptiveSpeed = true;
                 config->DlssNrCacheAdaptiveMin = 2u;
+                config->DlssNrCacheAntiPop = true;
+                config->DlssNrCacheAntiPopRate = 1.5f;
+                config->DlssNrPasses = 1u;
                 config->DlssNrPreSr = preSr;
                 config->DlssNrWorkingScale = scale;
                 config->DlssNrJbuUpsample = scale < 0.999f;
@@ -401,6 +404,18 @@ void RenderMenu(Config* config, float menuResScale)
 
             if (ImGui::SmallButton("Max quality"))
                 preset(1, 1.0f, 0.5f, false);
+
+            ImGui::SameLine();
+
+            // The full look: after the upscaler (works with Ray Reconstruction too), the Natural style, two
+            // model passes -- a stronger effect than one pass -- and the model every other frame so the two
+            // passes cost about what one pass every frame does.
+            if (ImGui::SmallButton("Strong"))
+            {
+                preset(2, 0.67f, 0.5f, false);
+                config->DlssNrPasses = 2u;
+                config->DlssNrStyle = 1u;
+            }
 
             ImGui::SameLine();
 
@@ -421,6 +436,9 @@ void RenderMenu(Config* config, float menuResScale)
                        "\nControl (RTX 4070, 1440p, DLSS Balanced, frames the game renders). Vanilla: 34 fps,"
                        "\nflicker 0.6%, detail added x1.11:"
                        "\n\n  Max quality  after the upscaler, full size, every frame: 34 fps"
+                       "\n  Strong       after the upscaler, Natural style, 2 passes, every other frame: twice"
+                       "\n               vanilla's effect with as much detail, and faster (measured with Ray"
+                       "\n               Reconstruction on: vanilla 26 fps, Strong 32 fps)"
                        "\n  Quality      before the upscaler (pre-SR), every frame: 47 fps, all of vanilla's"
                        "\n               detail, steadier than vanilla (0.49%)"
                        "\n  Balanced     after the upscaler, 67%, every other frame: 48 fps -- for games"
@@ -726,6 +744,30 @@ void RenderMenu(Config* config, float menuResScale)
                            "\nit, the area visibly breathes (measured: -35%)."
                            "\n\nThis eases the edit's regional light in time on its own. A real change of light --"
                            "\na third of a stop or more -- comes through at once. 0 is off; higher is steadier.");
+
+                bool antiPop = config->DlssNrCacheAntiPop.value_or_default();
+
+                if (ImGui::Checkbox("Smooth light pop-in", &antiPop))
+                    config->DlssNrCacheAntiPop = antiPop;
+
+                HelpMarker("The model only sees what is on screen: it does not know a light exists until it is in"
+                           "\nframe, and then re-grades the whole picture at once -- walls and ground far from the"
+                           "\nlight jump, although nothing about them changed."
+                           "\n\nWhere the game's own picture stayed the same, the model's regional light may then"
+                           "\nonly change at the rate below, like an eye adapting. Where the picture did change (a"
+                           "\nlight switched on right there, a cut, a new area) the change passes at once.");
+
+                if (antiPop)
+                {
+                    ScopedIndent popIndent {};
+                    float rate = config->DlssNrCacheAntiPopRate.value_or_default();
+
+                    if (ImGui::SliderFloat("Fade speed", &rate, 0.25f, 8.0f, "%.2f stops/s", ImGuiSliderFlags_Logarithmic))
+                        config->DlssNrCacheAntiPopRate = std::clamp(rate, 0.1f, 20.0f);
+
+                    HelpMarker("How fast a held change comes through. Lower hides pop-in more but the model's"
+                               "\nanswer arrives later; 1.5 fades a typical pop in about a third of a second.");
+                }
 
                 float stabilize = config->DlssNrCacheStabilize.value_or_default();
 

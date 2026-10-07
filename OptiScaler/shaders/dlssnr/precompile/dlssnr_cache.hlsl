@@ -59,6 +59,8 @@ cbuffer Params : register(b0)
     uint  gCtxH;
     uint  gHalfW;           // the guided filter's grid, half the frame
     uint  gHalfH;
+    float gAntiPopStep;     // anti light pop-in: max change of the regional edit per frame where the frame is still (0 off)
+    float gAntiPopFrameTol; // anti light pop-in: the frame's own regional change, in stops, that counts as a real change
 };
 
 Texture2D<float4>   gHistEdit  : register(t0); // rgb: log2 edit, a: high-band confidence
@@ -82,6 +84,7 @@ Texture2D<float4>   gGuide0    : register(t14); // guided filter: half-size sums
 Texture2D<float4>   gGuide1    : register(t15); // guided filter: half-size sums, or the coefficients b
 Texture2D<float4>   gAux4      : register(t16); // L2 guide (log2 depth, log luma), for the same-surface fill
 Texture2D<float4>   gAux5      : register(t17); // L3 guide
+Texture2D<float4>   gContextPrev : register(t18); // anti pop-in: last frame's surroundings
 
 RWTexture2D<float4> gOut0  : register(u0);
 RWTexture2D<float4> gOut1  : register(u1);
@@ -174,6 +177,16 @@ float ContextAt(float2 uv)
                    gContext.SampleLevel(gLinear, uv + float2(t.x, -t.y), 0).r +
                    gContext.SampleLevel(gLinear, uv + float2(-t.x, t.y), 0).r +
                    gContext.SampleLevel(gLinear, uv + float2(t.x, t.y), 0).r);
+}
+
+// The same, of last frame's surroundings (the anti pop-in's "did the frame change here").
+float ContextPrevAt(float2 uv)
+{
+    const float2 t = 0.5 / float2(max(gCtxW, 1u), max(gCtxH, 1u));
+    return 0.25 * (gContextPrev.SampleLevel(gLinear, uv + float2(-t.x, -t.y), 0).r +
+                   gContextPrev.SampleLevel(gLinear, uv + float2(t.x, -t.y), 0).r +
+                   gContextPrev.SampleLevel(gLinear, uv + float2(-t.x, t.y), 0).r +
+                   gContextPrev.SampleLevel(gLinear, uv + float2(t.x, t.y), 0).r);
 }
 
 // Full belief inside the tolerance, none at twice it: the same soft edge as the depth test, so a pixel
@@ -1015,9 +1028,9 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID, uint3
         const float eps = Eps();
         float3 result = max((max(original.rgb, 0.0) + eps) * exp2(edit) - eps, 0.0);
 
-        // With the temporal stabiliser or the guided filter on, this pass only hands its edit on; mode 15
-        // or mode 10 writes the frame.
-        if ((gTemporal > 0.0 || Ghost(kGhostGuided)) && gDebugView == 0)
+        // With the temporal stabiliser, the anti pop-in or the guided filter on, this pass only hands its
+        // edit on; mode 15 or mode 10 writes the frame.
+        if ((gTemporal > 0.0 || gAntiPopStep > 0.0 || Ghost(kGhostGuided)) && gDebugView == 0)
         {
             gOut3[id.xy] = float4(edit, 1.0);
             return;
@@ -1166,11 +1179,12 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID, uint3
 
         float3 outEdit = e;
 
-        // The regional light of this frame's edit, for the luminance stability below.
+        // The regional light of this frame's edit, for the luminance stability and the anti pop-in below.
         const float2 texel = 12.0 / float2(gWidth, gHeight);
         float3 lowNow = 0.0;
+        const bool split = gLowTemporal > 0.0 || gAntiPopStep > 0.0;
 
-        if (gLowTemporal > 0.0)
+        if (split)
         {
             [unroll] for (int r = 0; r < 9; ++r)
             {
@@ -1212,7 +1226,7 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID, uint3
                     const float lc = clamp(lh, mu - sigma - 0.02, mu + sigma + 0.02);
                     const float valid = saturate(2.0 * wsum - 1.0);
 
-                    if (gLowTemporal <= 0.0)
+                    if (!split)
                     {
                         hist += lc - lh;
                         outEdit = lerp(e, hist, gTemporal * valid);
@@ -1244,7 +1258,24 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID, uint3
                         // holding it would only make it trail (measured: +15% change in a pan without this).
                         const float motionPx = length((q - uv) * float2(gWidth, gHeight)) / 6.0;
                         const float lowW = gLowTemporal * valid * exp(-step * step) * exp(-motionPx * motionPx);
-                        const float3 lowOut = lerp(lowNow, lowHist, lowW);
+                        float3 lowOut = lerp(lowNow, lowHist, lowW);
+
+                        // Anti light pop-in. The model sees only the frame: a bright light entering it makes
+                        // the model re-grade regions far from the light, whose own picture did not change at
+                        // all -- the whole image shifts in one frame. A change of the edit's regional light
+                        // where the frame's own regional light stayed put is that re-grade, and it is let
+                        // through at a bounded rate, as an eye adapts. Where the frame did change (a light
+                        // switched on right there, a cut, a revealed area) the change passes at once.
+                        if (gAntiPopStep > 0.0)
+                        {
+                            // The frame's own regional light, now and last frame where this pixel was: the
+                            // quarter-size surroundings, normalised by the white point the model is shown.
+                            const float frameNow = ContextAt(uv);
+                            const float framePrev = ContextPrevAt(q);
+                            const float still = saturate(1.0 - abs(frameNow - framePrev) / max(gAntiPopFrameTol, 1e-3)) * valid;
+                            const float dl = dot(lowOut - lowHist, kLuma);
+                            lowOut += (clamp(dl, -gAntiPopStep, gAntiPopStep) - dl) * still;
+                        }
 
                         hist += lc - lh;
                         const float3 detail = lerp(e - lowNow, hist - lowHist, gTemporal * valid);
@@ -1376,7 +1407,7 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID, uint3
         const float weight = saturate(gGuidedStrength) * saturate(meta.z / 2.0);
         const float3 edit = ClampEdit(lerp(raw, rebuilt, weight), max(gLowGain, gHighGain));
 
-        if (gTemporal > 0.0)
+        if (gTemporal > 0.0 || gAntiPopStep > 0.0)
         {
             gOut3[id.xy] = float4(edit, 1.0);
             return;

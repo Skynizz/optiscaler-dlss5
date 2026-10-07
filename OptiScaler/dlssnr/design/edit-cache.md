@@ -110,6 +110,25 @@ fingerprint, orange by depth), the edit's age in frames and its staleness (motio
 Memory, when on: two RGBA16F frame-size textures each for the fingerprint and the meta (about 60 MB at
 1440p); the guided filter adds three more at full or half size.
 
+## Anti light pop-in (`CacheAntiPop`, `CacheAntiPopRate`)
+
+The model only sees the frame. A bright light entering it makes the model re-grade regions far from the
+light, whose own picture did not change: the whole image shifts in one frame. The game's lighting is not
+what pops -- it already lit the scene with the light off screen -- only the model's re-interpretation does,
+and that passes through this pass.
+
+In mode 10, after the luminance stability, the edit's regional light (the 12 px tent) is compared with last
+frame's shown one, reprojected. Where the frame's own regional log luma (the guides, same tent) changed by
+less than 0.15 stop, the regional edit may move by at most `CacheAntiPopRate` stops per second (turned into a
+per-frame step with the measured frame time); where the frame changed -- a light switched on right there, a
+cut, a revealed area -- the change passes at once. Mode 10 therefore also runs before the upscaler when
+this is on (the temporal stabiliser stays off there); refresh frames go through it too, which is where a pop
+lands.
+
+Offline, on the Control dumps (model every frame, no real light entering): no effect on the pan and the
+still scene (lag 0.0001 stop), the regional jumps of the debris scene cut by a third (p99 0.050 to 0.033
+stop) for a lag of 0.0014 stop. A 0.5 stop re-grade fades in about a third of a second at 1.5 stops/s.
+
 ## Pre-SR placement (`PreSr`)
 
 Off by default. On, the pass runs before the game's DLSS Super Resolution instead of after it: in

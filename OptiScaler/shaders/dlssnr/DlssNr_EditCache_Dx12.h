@@ -178,7 +178,7 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
     ID3D12Resource* _constantBuffers[DLSSNR_CACHE_NUM_OF_HEAPS] = {};
     uint32_t _heapIndex = 0;
 
-    static constexpr uint32_t kSrvCount = 18;
+    static constexpr uint32_t kSrvCount = 19;
     static constexpr uint32_t kUavCount = 9;
 
     // The frame-sized history, two of each so one is read while the other is written.
@@ -192,6 +192,12 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
     bool _finalValid = false;
     float _temporal = 0.5f;
     float _lowTemporal = 0.95f;
+
+    // Anti light pop-in: this frame's bound on the regional edit's step, from the rate and the real frame
+    // time (0 is off).
+    float _antiPopStep = 0.0f;
+    long long _lastBeginTicks = 0;
+    double _frameSeconds = 1.0 / 60.0;
 
     void TemporalPass(ID3D12GraphicsCommandList* cmd, ID3D12Resource* target, ID3D12Resource* original,
                       const DlssNrCacheInputs& in, ID3D12Resource* edit);
@@ -207,6 +213,9 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
     ID3D12Resource* _histPrint[2] = {};  // the source's fingerprint, carried (ping-pong with the edit)
     ID3D12Resource* _histMeta[2] = {};   // age, validity, staleness, tap validity
     ID3D12Resource* _context = nullptr;  // this frame's surroundings, a quarter of the frame
+    ID3D12Resource* _contextPrev = nullptr; // last frame's (the anti pop-in compares the two)
+    unsigned long long _contextFrame = 0;
+    bool _contextPrevValid = false;
     ID3D12Resource* _guideSum[2] = {};   // guided filter: half-size sums (32-bit: they are differenced)
     ID3D12Resource* _guideCoef[2] = {};  // guided filter: the coefficients a and b
     ID3D12Resource* _guidedOut = nullptr; // guided filter: its edit, for the temporal stabiliser

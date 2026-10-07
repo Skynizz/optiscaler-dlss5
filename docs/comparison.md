@@ -110,6 +110,31 @@ Two runs, each with its own references (off and vanilla), Quality preset:
 - A second pass costs a full model run and makes the effect clearly stronger. With the cache (model
   every other frame), two passes cost the same as one pass every frame.
 
+## Strong preset, light pop-in smoothing, richer benchmark (8 October)
+
+Control Resonant with Ray Reconstruction on this time, so pre-SR falls back to after the upscaler (the
+benchmark now says so) and the base frame rate is lower than above. Strong preset: after the upscaler,
+model at 67% with JBU, Natural style, 2 passes, model every other frame.
+
+| Mode | FPS | DLSS 5 cost | Flicker | Detail | Effect | Pacing |
+|---|---:|---:|---:|---:|---:|---:|
+| DLSS 5 off | 42.0 | - | 0.17% | x1.00 | - | 7.0 ms |
+| DLSS 5 as OptiScaler ships it | 25.9 | 13.7 ms | 0.53% | x1.30 | 0.27 stop | 3.9 ms |
+| **Strong** | **32.2** (+24%) | 5.6 ms | 0.43% | x1.31 | **0.54 stop** | 3.5 ms |
+| Strong with 1 pass | 35.6 | 3.9 ms | 0.27% | x1.18 | 0.33 stop | 4.9 ms |
+
+Strong gives twice the effect of the stock pass with as much detail, and still renders 24% more frames.
+*Pacing* is new in the benchmark: the mean change of frame time from one frame to the next, which is where
+a model run one frame in two shows (the average hides it). The off phase is high because the game's own
+frame times swing in that scene.
+
+Light pop-in smoothing (`CacheAntiPop`, on by default): four alternating runs on and off, Strong settings.
+DLSS 5 cost 5.25 / 5.32 ms on, 5.26 / 5.30 ms off: nothing measurable. Flicker 0.44 / 0.30% on, 0.31 /
+0.34% off: within the scene's noise (animated debris). Offline on the dumps (model every frame), it cuts the
+model's regional jumps where the frame did not change by a third in the debris scene (p99 0.050 to 0.033
+stop) for a lag of 0.0014 stop, and changes nothing in the pan and the still scene. Those dumps hold no
+light entering the frame: a real pop of 0.5 stop is turned into a fade of about a third of a second.
+
 ## Captures
 
 | | |
