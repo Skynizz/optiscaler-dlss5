@@ -550,6 +550,7 @@ bool DlssNrEditCache_Dx12::BeginFrame(const Config& cfg, ID3D12Device* device, u
     // (measured in Control: detail x1.05 with them, x1.15 without, against x1.20 for vanilla).
     // The regional light (luminance stability) is broad enough not to care, and stays.
     _temporal = preSr ? 0.0f : std::clamp(cfg.DlssNrCacheTemporal.value_or_default(), 0.0f, 0.9f);
+    _noiseAware = cfg.DlssNrCacheNoiseAware.value_or_default();
     _lowTemporal = std::clamp(cfg.DlssNrCacheLowTemporal.value_or_default(), 0.0f, 0.95f);
 
     // Anti light pop-in: a rate in stops per second, turned into this frame's step with the real time
@@ -599,6 +600,11 @@ bool DlssNrEditCache_Dx12::BeginFrame(const Config& cfg, ID3D12Device* device, u
 
     if (cfg.DlssNrCacheGuided.value_or_default())
         ghost |= DlssNrCacheGhost_Guided;
+
+    // With the model on every frame nothing is ever carried: the anti-ghosting would only cost time (the
+    // anti pop-in, which acts on the model's own answers, stays).
+    if (std::clamp(cfg.DlssNrCacheInterval.value_or_default(), 1u, 16u) <= 1)
+        ghost = 0;
 
     _ghostFlags = ghost;
     EnsureGhostResources(device);
@@ -885,6 +891,7 @@ DlssNrCacheConstants DlssNrEditCache_Dx12::BaseConstants(const DlssNrCacheInputs
     // Needs last frame's surroundings to tell a re-grade from a real change; without them it stands aside.
     c.AntiPopStep = (_debugView == 0 && _contextPrevValid) ? _antiPopStep : 0.0f;
     c.AntiPopFrameTolerance = 0.15f;
+    c.NoiseAware = _noiseAware ? 1u : 0u;
     return c;
 }
 

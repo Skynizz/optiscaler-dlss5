@@ -383,6 +383,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrCacheMotionPriority.set_from_config(readFloat("DlssNr", "CacheMotionPriority"));
             DlssNrCacheBudgetMs.set_from_config(readFloat("DlssNr", "CacheBudgetMs"));
             DlssNrCacheStillMax.set_from_config(readUInt("DlssNr", "CacheStillMax"));
+            DlssNrCacheNoiseAware.set_from_config(readBool("DlssNr", "CacheNoiseAware"));
             DlssNrJbuUpsample.set_from_config(readBool("DlssNr", "JbuUpsample"));
             DlssNrJbuSigma.set_from_config(readFloat("DlssNr", "JbuSigma"));
             UseGenericAppIdWithDlss.set_from_config(readBool("DLSS", "UseGenericAppIdWithDlss"));
@@ -1336,6 +1337,8 @@ bool Config::SaveIni()
                  GetFloatValue(Instance()->DlssNrCacheMotionPriority.value_for_config()).c_str());
     ini.SetValue("DlssNr", "CacheBudgetMs", GetFloatValue(Instance()->DlssNrCacheBudgetMs.value_for_config()).c_str());
     ini.SetValue("DlssNr", "CacheStillMax", GetIntValue(Instance()->DlssNrCacheStillMax.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheNoiseAware",
+                 GetBoolValue(Instance()->DlssNrCacheNoiseAware.value_for_config()).c_str());
     ini.SetValue("DlssNr", "JbuUpsample", GetBoolValue(Instance()->DlssNrJbuUpsample.value_for_config()).c_str());
     ini.SetValue("DlssNr", "JbuSigma", GetFloatValue(Instance()->DlssNrJbuSigma.value_for_config()).c_str());
         ini.SetValue("DLSS", "RenderPresetOverride",

@@ -642,6 +642,21 @@ void CheckCaptureTrigger()
             else if (k == "WorkingScale") c->DlssNrWorkingScale = v;
             else if (k == "JbuUpsample") c->DlssNrJbuUpsample = b;
             else if (k == "Enabled") c->DlssNrEnabled = b;
+            else if (k == "CacheNoiseAware") c->DlssNrCacheNoiseAware = b;
+            else if (k == "CacheFingerprint") c->DlssNrCacheFingerprint = b;
+            else if (k == "CacheContext") c->DlssNrCacheContext = b;
+            else if (k == "CacheFingerprintTolerance") c->DlssNrCacheFingerprintTolerance = v;
+            else if (k == "CacheSurfaceFill") c->DlssNrCacheSurfaceFill = b;
+            else if (k == "CacheCrossfadeFrames") c->DlssNrCacheCrossfadeFrames = (uint32_t) v;
+            else if (k == "CacheGuided") c->DlssNrCacheGuided = b;
+            else if (k == "CacheAging") c->DlssNrCacheAging = b;
+            else if (k == "CacheAdaptiveSpeed") c->DlssNrCacheAdaptiveSpeed = b;
+            else if (k == "CacheAdaptiveMin") c->DlssNrCacheAdaptiveMin = (uint32_t) v;
+            else if (k == "CacheMotionPriority") c->DlssNrCacheMotionPriority = v;
+            else if (k == "CacheBudgetMs") c->DlssNrCacheBudgetMs = v;
+            else if (k == "CacheStillMax") c->DlssNrCacheStillMax = (uint32_t) v;
+            else if (k == "CacheAntiPop") c->DlssNrCacheAntiPop = b;
+            else if (k == "CacheAntiPopRate") c->DlssNrCacheAntiPopRate = v;
             else
             {
                 LOG_WARN("DLSS-NR dlssnr-set.txt: unknown key {}", k);

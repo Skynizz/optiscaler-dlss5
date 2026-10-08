@@ -405,8 +405,15 @@ void RenderMenu(Config* config, float menuResScale)
             ImGui::TextUnformatted("Presets:");
             ImGui::SameLine();
 
+            // The model every frame after the upscaler with the edge-aware enlargement: at 4K, 67% is what a
+            // tester on an RTX 5090 found indistinguishable from the stock pass at 3.8 ms instead of 5.15.
             if (ImGui::SmallButton("Max quality"))
-                preset(1, 1.0f, 0.5f, false);
+            {
+                // At least 1440 lines for the model: 67% at 4K, full size at 1440p and below, where 67% visibly
+                // loses detail (measured in Control with Ray Reconstruction at 1440p: x1.16 against x1.41).
+                const float outH = ImGui::GetIO().DisplaySize.y;
+                preset(1, outH > 0.0f ? std::clamp(1440.0f / outH, 0.67f, 1.0f) : 1.0f, 0.5f, false);
+            }
 
             ImGui::SameLine();
 
@@ -438,7 +445,8 @@ void RenderMenu(Config* config, float menuResScale)
             HelpMarker("Starting points -- each sets the controls below, which stay editable. Measured in"
                        "\nControl (RTX 4070, 1440p, DLSS Balanced, frames the game renders). Vanilla: 34 fps,"
                        "\nflicker 0.6%, detail added x1.11:"
-                       "\n\n  Max quality  after the upscaler, full size, every frame: 34 fps"
+                       "\n\n  Max quality  after the upscaler, every frame, the model on at least 1440 lines (67% at"
+                       "\n               4K, full size at 1440p): the stock look, cheaper at 4K"
                        "\n  Strong       after the upscaler, Natural style, 2 passes, every other frame: twice"
                        "\n               vanilla's effect with as much detail, and faster (measured with Ray"
                        "\n               Reconstruction on: vanilla 26 fps, Strong 32 fps)"
@@ -783,6 +791,18 @@ void RenderMenu(Config* config, float menuResScale)
                            "\nstop or more and back again: that is the black popping, and this holds it."
                            "\n\nLower is steadier; too low and genuine changes (a light switching on) arrive"
                            "\nover a few frames instead of at once. 0 turns it off.");
+
+                bool noiseAware = config->DlssNrCacheNoiseAware.value_or_default();
+
+                if (ImGui::Checkbox("Noise-aware checks", &noiseAware))
+                    config->DlssNrCacheNoiseAware = noiseAware;
+
+                HelpMarker("Path-traced and Ray Reconstruction shadows are noisy from frame to frame. Without"
+                           "\nthis, that noise failed the colour check on every frame, so the carried detail was"
+                           "\ndimmed on the frames without the model (thinner shadows flickering at half the frame"
+                           "\nrate), and the anti-flicker switched on and off pixel by pixel -- worst at its"
+                           "\ndefault. On: the check compares with the pixel's neighbourhood, and the"
+                           "\nanti-flicker fades in and limits softly.");
 
                 bool despeckle = config->DlssNrCacheDespeckle.value_or_default();
 

@@ -61,6 +61,7 @@ cbuffer Params : register(b0)
     uint  gHalfH;
     float gAntiPopStep;     // anti light pop-in: max change of the regional edit per frame where the frame is still (0 off)
     float gAntiPopFrameTol; // anti light pop-in: the frame's own regional change, in stops, that counts as a real change
+    uint  gNoiseAware;      // colour test against this frame's 3x3 range, anti-flicker faded and soft-limited
 };
 
 Texture2D<float4>   gHistEdit  : register(t0); // rgb: log2 edit, a: high-band confidence
@@ -228,15 +229,33 @@ float3 ClampEdit(float3 e, float scale)
 // by at most gStabilize stops. The model re-decides small things every run -- that is detail, and it
 // passes -- but now and then it re-decides a dark patch by a stop or more and back again, which is
 // the black popping. A limit on the step lets the first through and holds the second.
+//
+// Noise-aware: in a noisy area (path-traced shadows, Ray Reconstruction) the trust of neighbouring pixels
+// hovers around the threshold, and with a switch and a hard clamp neighbours flipped between limited and
+// not from frame to frame -- the limiter made a flicker of its own, worst at its default (0 never limits,
+// a large value almost never binds). So it fades in with trust, and limits with a soft knee: small steps
+// pass untouched, large ones are compressed toward the bound instead of cut at it.
 float3 Stabilize(float3 fresh, float3 carried, float trust)
 {
-    if (gStabilize <= 0.0 || trust < 0.5)
+    if (gStabilize <= 0.0)
         return fresh;
 
     const float lf = dot(fresh, kLuma);
     const float lc = dot(carried, kLuma);
-    const float l = lc + clamp(lf - lc, -gStabilize, gStabilize);
-    return fresh + (l - lf);
+
+    if (gNoiseAware == 0)
+    {
+        if (trust < 0.5)
+            return fresh;
+
+        const float l = lc + clamp(lf - lc, -gStabilize, gStabilize);
+        return fresh + (l - lf);
+    }
+
+    const float w = smoothstep(0.2, 0.8, trust);
+    const float x = (lf - lc) / gStabilize;
+    const float l = lc + gStabilize * x / sqrt(1.0 + x * x); // soft limit, tends to +-gStabilize
+    return fresh + (l - lf) * w;
 }
 
 // The model's edit for one pixel, and whether to believe it. A model answer that is black where the
@@ -737,7 +756,7 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID, uint3
             sMotion = 0u;
         }
 
-        if (Ghost(kGhostPrint))
+        if (Ghost(kGhostPrint) || gNoiseAware != 0)
             LoadPrintTile(gid, gtid);
 
         GroupMemoryBarrierWithGroupSync();
@@ -767,7 +786,21 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID, uint3
             // Colour: the same surface should look roughly the same. A leaf that swayed, a particle,
             // water: the frame under the edit is no longer the frame it was computed for. This
             // rejects only the high band -- the low band is a property of the region, and survives.
-            const float colourDiff = abs(logLuma - h.logLuma);
+            float colourDiff = abs(logLuma - h.logLuma);
+
+            // Noise-aware: last frame's value against the range this frame spans over the 3x3 neighbourhood,
+            // as TAA clamps its history. Noise and sub-pixel shimmer stay inside the range; a surface that
+            // really changed does not. Against the pixel alone, the noise of path-traced shadows failed the
+            // test every frame, so the carried detail was dimmed every other frame -- thinner shadows that
+            // flickered at half the frame rate.
+            if (gNoiseAware != 0)
+            {
+                float3 nlo, nhi;
+                PrintRange(gtid, nlo, nhi);
+                const float logWhite = log2(WhitePoint());
+                colourDiff = Outside(h.logLuma - logWhite, nlo.x, nhi.x);
+            }
+
             const float vColour = saturate((2.0 * colourTol - colourDiff) / colourTol);
 
             // Anti-ghosting. The fingerprint: does the frame still look like what the edit was computed

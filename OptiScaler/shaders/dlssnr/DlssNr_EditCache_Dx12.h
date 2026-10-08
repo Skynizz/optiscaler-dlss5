@@ -254,6 +254,7 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
     // 1 drops to the shortest interval at a fifth of the speed. And the GPU budget: the shortest interval
     // whose average cost stays under CacheBudgetMs, from the measured costs.
     float _motionPriority = 0.0f;
+    bool _noiseAware = true;
     unsigned int _stillMax = 8;
     float _budgetMs = 0.0f;
     double _costRefresh = 0.0;

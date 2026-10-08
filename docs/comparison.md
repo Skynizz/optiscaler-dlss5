@@ -135,6 +135,33 @@ model's regional jumps where the frame did not change by a third in the debris s
 stop) for a lag of 0.0014 stop, and changes nothing in the pan and the still scene. Those dumps hold no
 light entering the frame: a real pop of 0.5 stop is turned into a fade of about a third of a second.
 
+## Following a tester's report (RTX 5090, 4K)
+
+A tester found *Max quality* (model at full size every frame) slower than the stock pass with no visible gain,
+*Balanced* / *Performance* (model every other frame) thinner in light and shadow with flicker, the
+anti-flicker at its default 0.5 worse than at 0 or 1, and the best trade-off at 67% every frame (3.8 ms
+against 5.15, indistinguishable). Ten live runs in Control with Ray Reconstruction on, 1440p, two rounds:
+
+| | Flicker | Effect | Detail | DLSS 5 cost |
+|---|---:|---:|---:|---:|
+| Stock pass | - | 0.33 stop | x1.41 | 13.7 ms |
+| 67% every frame, anti-flicker 0.5, old checks | 0.34 / 0.31% | 0.27 stop | x1.16 | 8.4 ms |
+| same, noise-aware checks | 0.33 / 0.28% | 0.28 stop | x1.16 | 8.5 ms |
+| same, anti-flicker 0 | 0.32 / 0.30% | 0.28 stop | x1.15 | 8.4 ms |
+| 67% every other frame, old checks | 0.28 / 0.26% | 0.27 stop | x1.16 | 4.9 ms |
+| same, noise-aware checks | 0.25 / 0.29% | 0.28 stop | x1.16 | 4.8 ms |
+
+* In this scene none of the differences is beyond the run-to-run noise: the still-camera flicker does not
+  show the tester's shadow flicker (likely path tracing, much noisier). The noise-aware checks
+  (`CacheNoiseAware`: the colour test against the 3x3 range, the anti-flicker faded in with trust and
+  soft-limited) cost nothing measurable and stay on; whether they fix the tester's case is to be checked in
+  a path-traced game.
+* Every other frame looks the same as every frame here (same effect and detail on the captured frame).
+* What does show: at 1440p with Ray Reconstruction, 67% loses detail (x1.16 against x1.41). At 4K, 67% is a
+  1440-line model, which the tester saw as identical. *Max quality* now runs the model on at least 1440
+  lines: 67% at 4K, full size at 1440p and below.
+* With the model on every frame nothing is ever carried, so the anti-ghosting work is skipped there.
+
 ## Captures
 
 | | |

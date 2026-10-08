@@ -621,6 +621,12 @@ class Config
     // With CacheAdaptiveSpeed: the longest interval while the camera stands still (4-16). Nothing moves, so
     // nothing ghosts -- dialogue, aiming, standing about cost the model this rarely. 8 is as before.
     CustomOptional<uint32_t> DlssNrCacheStillMax { 8 };
+    // Noise-aware checks: the colour test compares last frame with this frame's 3x3 range instead of the
+    // pixel alone, and the anti-flicker (CacheStabilize) fades in with trust and soft-limits instead of
+    // switching on and clamping. Path-traced and Ray Reconstruction shadows are noisy enough that the old
+    // tests made shadows thinner on cached frames and the anti-flicker flicker at its default. false is as
+    // before.
+    CustomOptional<bool> DlssNrCacheNoiseAware { true };
 
     // Joint bilateral enlargement of a below-size model's answer, guided by the full-size frame.
     // Only acts when the model resolution is under 100%; off is the resolve exactly as it was.

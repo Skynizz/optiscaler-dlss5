@@ -170,4 +170,8 @@ struct alignas(256) DlssNrCacheConstants
     // in stops, before the region counts as changed.
     float AntiPopStep;
     float AntiPopFrameTolerance;
+
+    // Noise-aware checks: the colour test against the 3x3 range of this frame (not the pixel alone), and the
+    // anti-flicker faded in with trust and soft-limited rather than switched on and clamped. 0 is as before.
+    uint32_t NoiseAware;
 };
