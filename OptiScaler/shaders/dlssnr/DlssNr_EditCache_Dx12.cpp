@@ -294,7 +294,8 @@ void DlssNrEditCache_Dx12::ReleaseAll(bool immediately)
                                &_accMv[0],     &_accMv[1],     &_histPrint[0], &_histPrint[1],  &_histMeta[0],
                                &_histMeta[1],  &_context,      &_contextPrev,  &_guideSum[0],   &_guideSum[1],
                                &_guideCoef[0], &_dilatedMv,    &_regNow,       &_regPrev,
-                               &_guideCoef[1], &_guidedOut,    &_levelGuideCoarse[0], &_levelGuideCoarse[1] };
+                               &_guideCoef[1], &_guidedOut,    &_levelGuideCoarse[0], &_levelGuideCoarse[1],
+                               &_asyncWarp };
 
     for (ID3D12Resource** r : all)
     {
@@ -514,9 +515,14 @@ void DlssNrEditCache_Dx12::Invalidate()
 }
 
 bool DlssNrEditCache_Dx12::BeginFrame(const Config& cfg, ID3D12Device* device, unsigned int width,
-                                      unsigned int height, DXGI_FORMAT format, bool reset, bool preSr)
+                                      unsigned int height, DXGI_FORMAT format, bool reset, bool preSr, bool async,
+                                      bool asyncBusy)
 {
     ++_frame;
+    _async = async;
+
+    if (!async)
+        Park(_asyncWarp);
     TickRetired();
     _contextPrevValid = false; // set again by this frame's ContextPass, if it runs
     _dilatedReady = false;     // set again by this frame's DilatePass
@@ -603,8 +609,10 @@ bool DlssNrEditCache_Dx12::BeginFrame(const Config& cfg, ID3D12Device* device, u
         ghost |= DlssNrCacheGhost_Guided;
 
     // With the model on every frame nothing is ever carried: the anti-ghosting would only cost time (the
-    // anti pop-in, which acts on the model's own answers, stays).
-    if (std::clamp(cfg.DlssNrCacheInterval.value_or_default(), 1u, 16u) <= 1)
+    // anti pop-in, which acts on the model's own answers, stays). In the background it is never every frame.
+    const unsigned int intervalFloor = async ? kAsyncMinInterval : 1u;
+
+    if (std::max(std::clamp(cfg.DlssNrCacheInterval.value_or_default(), 1u, 16u), intervalFloor) <= 1)
         ghost = 0;
 
     _ghostFlags = ghost;
@@ -621,20 +629,28 @@ bool DlssNrEditCache_Dx12::BeginFrame(const Config& cfg, ID3D12Device* device, u
     _guidedStrength = std::clamp(cfg.DlssNrCacheGuidedStrength.value_or_default(), 0.0f, 1.0f);
     _crossfadeFrames = std::min(cfg.DlssNrCacheCrossfadeFrames.value_or_default(), 16u);
     _adaptiveSpeed = cfg.DlssNrCacheAdaptiveSpeed.value_or_default();
-    _adaptiveMin = std::clamp(cfg.DlssNrCacheAdaptiveMin.value_or_default(), 1u, 16u);
+    _adaptiveMin = std::max(std::clamp(cfg.DlssNrCacheAdaptiveMin.value_or_default(), 1u, 16u), intervalFloor);
     _motionPriority = std::clamp(cfg.DlssNrCacheMotionPriority.value_or_default(), 0.0f, 1.0f);
     _budgetMs = std::clamp(cfg.DlssNrCacheBudgetMs.value_or_default(), 0.0f, 100.0f);
     _stillMax = std::clamp(cfg.DlssNrCacheStillMax.value_or_default(), 4u, 16u);
 
-    const unsigned int interval = std::clamp(cfg.DlssNrCacheInterval.value_or_default(), 1u, 16u);
+    const unsigned int interval = std::max(std::clamp(cfg.DlssNrCacheInterval.value_or_default(), 1u, 16u), intervalFloor);
     const bool adaptive = cfg.DlssNrCacheAdaptive.value_or_default();
     const float threshold = std::clamp(cfg.DlssNrCacheAdaptiveThreshold.value_or_default(), 0.001f, 1.0f);
     const bool bySpeed = adaptive && _adaptiveSpeed && interval > 1;
 
     const char* why = nullptr;
 
-    if (!_historyValid)
+    if (asyncBusy)
+    {
+        // CacheAsync: an answer is on its way, and nothing starts another run until it has landed. The cadence
+        // is still followed, for the overlay and the speed regime.
+        _intervalNow = bySpeed ? SpeedInterval(interval) : EffectiveInterval(interval, adaptive, threshold);
+    }
+    else if (!_historyValid)
         why = "no history";
+    else if (_refreshNext)
+        why = "the model's queue was behind last frame";
     else if (reset)
         why = "the game or the model reset";
     else if (_dumpWanted > 0 && !_dumpObserve)
@@ -653,6 +669,7 @@ bool DlssNrEditCache_Dx12::BeginFrame(const Config& cfg, ID3D12Device* device, u
     const unsigned int intervalNow = std::max(1u, _intervalNow);
     const unsigned int span = _crossfadeFrames > 0 ? std::min(intervalNow, _crossfadeFrames) : intervalNow;
     const unsigned int since = (unsigned int) (_frame - _lastRefresh);
+    _crossfadeSpan = span;
 
     if (why == nullptr)
     {
@@ -664,6 +681,7 @@ bool DlssNrEditCache_Dx12::BeginFrame(const Config& cfg, ID3D12Device* device, u
 
     _crossfade = 1.0f / (float) span;
     _guidedNow = false; // the model's own answer is left alone
+    _refreshNext = false;
 
     _refreshReason = why;
     _lastRefresh = _frame;
@@ -951,7 +969,8 @@ bool DlssNrEditCache_Dx12::Pass(ID3D12GraphicsCommandList* cmd, const DlssNrCach
 
 void DlssNrEditCache_Dx12::Accumulate(ID3D12GraphicsCommandList* cmd, const DlssNrCacheInputs& in)
 {
-    if (_modelHistory != 1 || _accMv[0] == nullptr || in.motion == nullptr)
+    // CacheAsync carries the background answer along the same chain, whatever the model is handed.
+    if ((_modelHistory != 1 && !_async) || _accMv[0] == nullptr || in.motion == nullptr)
         return;
 
     ID3D12Resource* prev = _accMv[_accCur];
@@ -1307,7 +1326,7 @@ void DlssNrEditCache_Dx12::TemporalPass(ID3D12GraphicsCommandList* cmd, ID3D12Re
 }
 
 bool DlssNrEditCache_Dx12::RunCached(ID3D12GraphicsCommandList* cmd, ID3D12Device* device, ID3D12Resource* target,
-                                     ID3D12Resource* keep, const DlssNrCacheInputs& in)
+                                     ID3D12Resource* keep, const DlssNrCacheInputs& in, bool accumulate)
 {
     if (!_init || target == nullptr || keep == nullptr || in.depth == nullptr || in.motion == nullptr)
         return false;
@@ -1315,7 +1334,7 @@ bool DlssNrEditCache_Dx12::RunCached(ID3D12GraphicsCommandList* cmd, ID3D12Devic
     _exposure = in.useGameExposure ? in.exposure : nullptr;
     StampBegin(cmd);
 
-    if (_modelHistory == 1 && EnsureAccumulator(device, in.motion))
+    if (accumulate && (_modelHistory == 1 || _async) && EnsureAccumulator(device, in.motion))
         Accumulate(cmd, in);
 
     const unsigned int prev = _cur;
@@ -1430,14 +1449,24 @@ ID3D12Resource* DlssNrEditCache_Dx12::ModelMotion(ID3D12GraphicsCommandList* cmd
 {
     resetModel = false;
 
+    // CacheAsync: the background answer is carried from this frame on, whatever the model is handed.
     if (_modelHistory == 2)
     {
         resetModel = true;
+
+        if (_async)
+            _accReset = true;
+
         return nullptr;
     }
 
     if (_modelHistory != 1 || in.motion == nullptr || !EnsureAccumulator(device, in.motion))
+    {
+        if (_async)
+            _accReset = true;
+
         return nullptr;
+    }
 
     Accumulate(cmd, in);
 
@@ -1452,7 +1481,7 @@ ID3D12Resource* DlssNrEditCache_Dx12::ModelMotion(ID3D12GraphicsCommandList* cmd
 
 bool DlssNrEditCache_Dx12::CaptureRefresh(ID3D12GraphicsCommandList* cmd, ID3D12Device* device,
                                           ID3D12Resource* target, ID3D12Resource* original,
-                                          const DlssNrCacheInputs& in)
+                                          const DlssNrCacheInputs& in, ID3D12Resource* nrFrame)
 {
     if (!_init || target == nullptr || original == nullptr || in.depth == nullptr || in.motion == nullptr)
         return false;
@@ -1481,9 +1510,10 @@ bool DlssNrEditCache_Dx12::CaptureRefresh(ID3D12GraphicsCommandList* cmd, ID3D12
 
     DlssNrCacheConstants c = BaseConstants(in);
     c.Mode = DlssNrCacheMode_Capture;
+    c.AsyncWarp = nrFrame != nullptr ? 1u : 0u;
     {
         ID3D12Resource* srv[kSrvCount] = { _histEdit[prev], _histGuide[prev], original, in.depth,
-                                           in.motion,       target,           nullptr,  nullptr,
+                                           in.motion,       nrFrame != nullptr ? nrFrame : target, nullptr, nullptr,
                                            nullptr,         _histPrint[prev], nullptr,  _histTarget[prev] };
         srv[12] = _histMeta[prev];
         srv[13] = context ? _context : nullptr;
@@ -1516,7 +1546,8 @@ bool DlssNrEditCache_Dx12::CaptureRefresh(ID3D12GraphicsCommandList* cmd, ID3D12
     const bool rewrite = (_refreshBlend < 0.999f && wasValid) || std::abs(_lowGain - 1.0f) > 1e-3f ||
                          std::abs(_highGain - 1.0f) > 1e-3f || _debugView != 0 || (_stabilize > 0.0f && wasValid) ||
                          _despeckle || (_crossfadeOn && wasValid && _crossfade < 0.999f) || _temporal > 0.0f ||
-                         _antiPopStep > 0.0f; // a pop lands on the frame the model runs: that is where it is held
+                         _antiPopStep > 0.0f || // a pop lands on the frame the model runs: that is where it is held
+                         nrFrame != nullptr;    // the background answer: target is still the game's frame
 
     Barrier(cmd, target, kSrv, kUav);
 
@@ -1535,6 +1566,53 @@ bool DlssNrEditCache_Dx12::CaptureRefresh(ID3D12GraphicsCommandList* cmd, ID3D12
     }
 
     return true;
+}
+
+bool DlssNrEditCache_Dx12::ConsumeAsync(ID3D12GraphicsCommandList* cmd, ID3D12Device* device, ID3D12Resource* target,
+                                        ID3D12Resource* keep, ID3D12Resource* composed, ID3D12Resource* launchFrame,
+                                        ID3D12Resource* launchDepth, const DlssNrCacheInputs& in)
+{
+    if (!_init || target == nullptr || keep == nullptr || composed == nullptr || launchFrame == nullptr ||
+        launchDepth == nullptr || in.depth == nullptr || in.motion == nullptr || !EnsureAccumulator(device, in.motion))
+        return false;
+
+    if (_asyncWarp == nullptr)
+        _asyncWarp = CreateTexture(device, DXGI_FORMAT_R16G16B16A16_FLOAT, _width, _height, true, kUav);
+
+    if (_asyncWarp == nullptr)
+        return false;
+
+    _exposure = in.useGameExposure ? in.exposure : nullptr;
+
+    // The motion from this frame back to the one the model saw, chained since that frame.
+    Accumulate(cmd, in);
+    ID3D12Resource* acc = _accMv[_accCur];
+
+    // This frame stands in for a frame the model runs on: the crossfade starts its walk, nothing is guided.
+    _crossfade = 1.0f / (float) std::max(_crossfadeSpan, 1u);
+    _guidedNow = false;
+
+    DlssNrCacheConstants c = BaseConstants(in);
+    c.Mode = DlssNrCacheMode_AsyncWarp;
+
+    Barrier(cmd, target, kUav, kSrv);
+    Barrier(cmd, acc, kUav, kSrv);
+    {
+        ID3D12Resource* srv[kSrvCount] = { nullptr,  nullptr,     target,      in.depth, in.motion,
+                                           composed, launchFrame, launchDepth, acc };
+        ID3D12Resource* uav[kUavCount] = { keep, _asyncWarp };
+        Pass(cmd, c, srv, uav, Groups(_width), Groups(_height));
+    }
+    Barrier(cmd, acc, kSrv, kUav);
+    Barrier(cmd, target, kSrv, kUav);
+    Barrier(cmd, keep, kUav, kSrv);
+    Barrier(cmd, _asyncWarp, kUav, kSrv);
+
+    const bool ok = CaptureRefresh(cmd, device, target, keep, in, _asyncWarp);
+
+    Barrier(cmd, _asyncWarp, kSrv, kUav);
+    Barrier(cmd, keep, kSrv, kUav);
+    return ok;
 }
 
 void DlssNrEditCache_Dx12::EndFrame(ID3D12GraphicsCommandList* cmd)

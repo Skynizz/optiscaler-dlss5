@@ -682,6 +682,35 @@ void RenderMenu(Config* config, float menuResScale)
                            "\nit, and so on -- less the small cost of carrying the edit. 1 runs it every frame"
                            "\n(the filters below still steady it).");
 
+                bool async = config->DlssNrCacheAsync.value_or_default();
+
+                if (ImGui::Checkbox("Model in the background (async compute)", &async))
+                    config->DlssNrCacheAsync = async;
+
+                if (async)
+                {
+                    const auto as = DlssNr::GetCacheStatus();
+                    ImGui::SameLine();
+
+                    if (as.asyncOn && as.asyncModelMs > 0.0)
+                        ImGui::TextDisabled("(running: model %.2f ms, in parallel)", as.asyncModelMs);
+                    else if (as.asyncOn)
+                        ImGui::TextDisabled("(running)");
+                    else if (as.asyncWhy != nullptr && as.asyncWhy[0] != 0)
+                        ImGui::TextDisabled("(not running: %s)", as.asyncWhy);
+                }
+
+                HelpMarker("On the frames the model runs, it runs on a GPU queue of its own, in parallel with"
+                           "\nthe game's next frame, instead of inside the frame it ran on. Its answer is laid"
+                           "\ndown two frames later, carried along the motion like the frames in between."
+                           "\n\nThe model's cost no longer lands on one frame in N: it overlaps the game's own"
+                           "\nwork. At least 3 frames between runs; the answer is two frames older, which the"
+                           "\nanti-ghosting handles like any carried frame."
+                           "\n\nBest at long intervals: at 8 frames (Control, RTX 4070) frame pacing halves and"
+                           "\n1% lows rise about 14%; at 3 frames it gains nothing."
+                           "\n\nAfter the upscaler, one pass, model at or below 100%. Otherwise the model runs"
+                           "\nas usual. Switching it rebuilds the model (one frame without it).");
+
                 bool adaptive = config->DlssNrCacheAdaptive.value_or_default();
 
                 if (ImGui::Checkbox("Adapt to motion", &adaptive))
@@ -2074,6 +2103,10 @@ void RenderOverlay(float alpha)
 
                 if (used > 0)
                     ImGui::TextDisabled("GPU ms: %s  |  frame without the model %.3f", line, total);
+
+                if (cs.asyncOn)
+                    ImGui::TextDisabled("Model in the background: %.2f ms on its own queue, lands 2 frames later (%llu so far)",
+                                        cs.asyncModelMs, cs.asyncLanded);
             }
         }
     }

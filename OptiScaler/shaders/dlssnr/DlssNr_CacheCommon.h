@@ -35,7 +35,8 @@ enum DlssNrCacheMode : uint32_t
     DlssNrCacheMode_GuidedCoef = 14,  // guided filter: per-window linear model of the edit on the frame
     DlssNrCacheMode_GuidedApply = 15, // guided filter: the edit rebuilt from the frame, then composed
     DlssNrCacheMode_DilateMotion = 16, // once per frame: each depth texel's nearest-surface motion, in uv
-    DlssNrCacheMode_RegionalLow = 17  // the 12 px tent of an edit, at a quarter of the frame
+    DlssNrCacheMode_RegionalLow = 17, // the 12 px tent of an edit, at a quarter of the frame
+    DlssNrCacheMode_AsyncWarp = 18    // CacheAsync: the background answer carried to this frame
 };
 
 // Anti-ghosting switches (GhostFlags). Each one off is the cache exactly as it was before it.
@@ -181,4 +182,8 @@ struct alignas(256) DlssNrCacheConstants
     // 3x3 nearest surface themselves. And the regional lows of mode 10 are precomputed at t20 / t21.
     uint32_t DilatedReady;
     uint32_t RegionalReady;
+
+    // CacheAsync: the capture's model frame is the background answer carried to this frame (mode 18), and a
+    // pixel it could not reach holds nothing of its own. 0 is as before.
+    uint32_t AsyncWarp;
 };

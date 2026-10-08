@@ -201,6 +201,12 @@ struct CacheStatus
     double costRefresh = 0.0;     // the pass on a frame the model runs, ms
     double costCached = 0.0;      // the pass on a cached frame, ms
 
+    // CacheAsync: the model in the background.
+    bool asyncOn = false;              // on this frame
+    double asyncModelMs = 0.0;         // the model's time on our compute queue, ms (0 until measured)
+    unsigned long long asyncLanded = 0; // answers laid down so far
+    const char* asyncWhy = "";         // why it is not running, when it is asked for
+
     // GPU time of the cache's own passes (ms, -1 when not measured: only while ShowStats is on).
     static constexpr int kStages = 7;
     double stageMs[kStages] = { -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0 };

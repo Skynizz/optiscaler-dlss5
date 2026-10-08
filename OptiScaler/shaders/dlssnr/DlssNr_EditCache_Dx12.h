@@ -119,11 +119,19 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
     // Decides this frame. True means the model must run (a refresh); false means a cached frame.
     // Call once per frame while the cache is active, before anything else here.
     // preSr: the frame is the game's jittered render, before its upscaler (see BeginFrame).
+    // async: the model runs in the background (CacheAsync) -- at least kAsyncMinInterval frames apart, and
+    // asyncBusy (an answer on its way) holds the next run until it has landed.
     bool BeginFrame(const Config& cfg, ID3D12Device* device, unsigned int width, unsigned int height,
-                    DXGI_FORMAT format, bool reset, bool preSr = false);
+                    DXGI_FORMAT format, bool reset, bool preSr = false, bool async = false, bool asyncBusy = false);
+
+    // CacheAsync: a run launched on frame N lands on N + 2 at the earliest, so the next can start on N + 3.
+    static constexpr unsigned int kAsyncMinInterval = 3;
 
     // Forget the history: the next active frame is a refresh.
     void Invalidate();
+
+    // CacheAsync: the model could not run on the frame meant for it; the next frame is a refresh.
+    void RefreshNext() { _refreshNext = true; }
 
     // The whole pass's GPU cost on a frame the model runs and on a cached frame, measured by the caller:
     // what the GPU budget (CacheBudgetMs) is held to. 0 while not yet measured.
@@ -135,8 +143,9 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
 
     // A cached frame: target (UNORDERED_ACCESS, holding the upscaler's frame) is rewritten as that frame
     // times the carried edit. keep (UNORDERED_ACCESS) receives the untouched frame on the way.
+    // accumulate: chain this frame's motion onto the model's (false where ModelMotion just did).
     bool RunCached(ID3D12GraphicsCommandList* cmd, ID3D12Device* device, ID3D12Resource* target,
-                   ID3D12Resource* keep, const DlssNrCacheInputs& in);
+                   ID3D12Resource* keep, const DlssNrCacheInputs& in, bool accumulate = true);
 
     // A refresh, before the model is evaluated: the motion vectors to hand it, so its own history is
     // reprojected across every frame it skipped. Returns nullptr to keep the game's own. resetModel is
@@ -150,8 +159,18 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
     // A refresh, after the resolve: target (UNORDERED_ACCESS) holds the model's frame, original
     // (NON_PIXEL_SHADER_RESOURCE) the upscaler's. Stores the edit; rewrites target only when the
     // refresh blend or the band gains say the stored edit differs from the model's own.
+    // nrFrame: the model's frame when it is not target (CacheAsync); target is then always rewritten.
     bool CaptureRefresh(ID3D12GraphicsCommandList* cmd, ID3D12Device* device, ID3D12Resource* target,
-                        ID3D12Resource* original, const DlssNrCacheInputs& in);
+                        ID3D12Resource* original, const DlssNrCacheInputs& in, ID3D12Resource* nrFrame = nullptr);
+
+    // CacheAsync: the model's answer for an earlier frame lands on this one. composed is that frame composed
+    // with the answer, launchFrame that frame as the upscaler wrote it, launchDepth its depth (all three
+    // NON_PIXEL_SHADER_RESOURCE, left so). The answer is carried here along the motion chained since, then
+    // captured as on a frame the model runs; target (UNORDERED_ACCESS, this frame) is rewritten with it and
+    // keep (UNORDERED_ACCESS) receives the untouched frame on the way.
+    bool ConsumeAsync(ID3D12GraphicsCommandList* cmd, ID3D12Device* device, ID3D12Resource* target,
+                      ID3D12Resource* keep, ID3D12Resource* composed, ID3D12Resource* launchFrame,
+                      ID3D12Resource* launchDepth, const DlssNrCacheInputs& in);
 
     // Puts back anything left in a transient state this frame. Every active frame ends with it.
     void EndFrame(ID3D12GraphicsCommandList* cmd);
@@ -213,10 +232,16 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
     void TemporalPass(ID3D12GraphicsCommandList* cmd, ID3D12Resource* target, ID3D12Resource* original,
                       const DlssNrCacheInputs& in, ID3D12Resource* edit);
 
+    // CacheAsync: the background answer carried to this frame, as the capture reads it.
+    bool _async = false;
+    bool _refreshNext = false;
+    ID3D12Resource* _asyncWarp = nullptr;
+
     // Keyframe crossfade: the model's latest answer, carried alongside what is shown.
     ID3D12Resource* _histTarget[2] = {};
     bool _crossfadeOn = false;
     float _crossfade = 1.0f;
+    unsigned int _crossfadeSpan = 1; // this interval's walk length, for a background answer's landing
     unsigned int _cur = 0;
     unsigned int _crossfadeFrames = 0; // the walk's length cap, 0 = the whole interval
 

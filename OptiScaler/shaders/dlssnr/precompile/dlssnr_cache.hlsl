@@ -64,6 +64,7 @@ cbuffer Params : register(b0)
     uint  gNoiseAware;      // colour test against this frame's 3x3 range, anti-flicker faded and soft-limited
     uint  gDilatedReady;    // this frame's dilated motion is at t19
     uint  gRegionalReady;   // mode 10's regional lows are at t20 (this frame's edit) and t21 (last frame's)
+    uint  gAsyncWarp;       // CacheAsync: the capture reads the background answer carried here by mode 18
 };
 
 Texture2D<float4>   gHistEdit  : register(t0); // rgb: log2 edit, a: high-band confidence
@@ -379,6 +380,33 @@ float2 MotionUvOffset(float2 uv)
     // elsewhere and the motion vectors leave that out, so the change of jitter is added here (0 after
     // the upscaler, where the frame is not jittered).
     return motion + float2(gJitterDeltaX, gJitterDeltaY);
+}
+
+// CacheAsync: where this pixel was on the frame the model last saw -- the motion chained since then by mode
+// 5 (gAux3, in the game's units at the motion texture's resolution) -- read at the nearest surface, as above.
+float2 AccumulatedUvOffset(int2 c)
+{
+    int2 best = c;
+    float bestLin = 3.4e38;
+
+    [unroll] for (int dy = -1; dy <= 1; ++dy)
+    {
+        [unroll] for (int dx = -1; dx <= 1; ++dx)
+        {
+            const int2 t = clamp(c + int2(dx, dy), int2(0, 0), int2(gDepthW, gDepthH) - 1);
+            const float l = LinDepth(gDepth.Load(int3(t, 0)).r);
+
+            if (l < bestLin)
+            {
+                bestLin = l;
+                best = t;
+            }
+        }
+    }
+
+    const float2 bestUv = (float2(best) + 0.5) / float2(gDepthW, gDepthH);
+    const float2 mv = gAux3.Load(int3(MotionTexel(bestUv), 0)).xy * float2(gMvScaleX, gMvScaleY);
+    return mv / float2(gMotionW, gMotionH);
 }
 
 // The history at q, with each of the four bilinear taps admitted only if its depth agrees with this
@@ -1018,6 +1046,20 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID, uint3
                 {
                     gOut0[id.xy] = float4(edit, 1.0);
                 }
+
+                // CacheAsync: where the background answer could not be carried to this pixel and no carried
+                // edit stands either, the pixel holds nothing of its own and the apply fills it from its
+                // region, as it fills a rejected pixel of a cached frame. Read as an answer, the gap would be
+                // a dark hole.
+                if (gAsyncWarp != 0 && ok < 0.5 && keep < 0.5)
+                {
+                    edit = 0.0;
+                    w = 0.0;
+                    gOut0[id.xy] = float4(0.0, 0.0, 0.0, 0.0);
+
+                    if (gCrossfadeOn != 0)
+                        gOut6[id.xy] = float4(0.0, 0.0, 0.0, 0.0);
+                }
             }
 
             gOut1[id.xy] = float4(linC, logLuma, 0.0, 0.0);
@@ -1441,6 +1483,57 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID, uint3
         // Once per frame, per depth texel (dispatched over the depth's valid region): the nearest-surface
         // motion every pass reads, instead of each pixel of each pass searching the 3x3 again.
         gOut0[id.xy] = float4(NearestSurfaceMotion(int2(id.xy)), 0.0, 0.0);
+        return;
+    }
+
+    if (gMode == 18)
+    {
+        // CacheAsync. The model ran in the background on the frame two before this one (or more): gAux0 is
+        // that frame composed with its answer, gAux1 that frame as the upscaler wrote it, gAux2 its depth. Its
+        // edit is carried here along the motion chained since (gAux3), each tap admitted only where that
+        // frame's depth agrees with this pixel's -- a cached frame's reprojection, the frames between at once.
+        // Written as this frame times the carried edit (gOut1), so the capture reads it exactly as it reads the
+        // model's own frame on a frame the model runs; black where nothing could be carried, which the capture
+        // reads as no answer. gOut0 keeps this frame untouched for the capture and the apply.
+        const float4 colour = gColour.Load(int3(id.xy, 0));
+        gOut0[id.xy] = colour;
+
+        const float linC = LinDepth(gDepth.Load(int3(DepthTexel(uv), 0)).r);
+        const float2 q = uv + AccumulatedUvOffset(DepthTexel(uv));
+        float3 carried = 0.0;
+
+        if (all(q >= 0.0) && all(q <= 1.0))
+        {
+            const float2 size = float2(gWidth, gHeight);
+            const float2 pos = q * size - 0.5;
+            const int2 i0 = (int2) floor(pos);
+            const float2 f = pos - floor(pos);
+            float3 acc = 0.0;
+            float wsum = 0.0;
+
+            [unroll] for (int k = 0; k < 4; ++k)
+            {
+                const int2 o = int2(k & 1, k >> 1);
+                const int2 t = clamp(i0 + o, int2(0, 0), int2(gWidth, gHeight) - 1);
+                const float wb = (o.x ? f.x : 1.0 - f.x) * (o.y ? f.y : 1.0 - f.y);
+                const float linThen = LinDepth(gAux2.Load(int3(DepthTexel((float2(t) + 0.5) / size), 0)).r);
+                const float wd = saturate((2.0 * gDepthTol - RelDepthDiff(linThen, linC)) / max(gDepthTol, 1e-6));
+
+                float ok;
+                const float3 e = FreshEdit(gAux0.Load(int3(t, 0)).rgb, gAux1.Load(int3(t, 0)).rgb, ok);
+                const float w = wb * wd * ok;
+                acc += e * w;
+                wsum += w;
+            }
+
+            if (wsum > 0.5)
+            {
+                const float eps = Eps();
+                carried = max((max(colour.rgb, 0.0) + eps) * exp2(acc / wsum) - eps, 0.0);
+            }
+        }
+
+        gOut1[id.xy] = float4(carried, colour.a);
         return;
     }
 

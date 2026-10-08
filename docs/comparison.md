@@ -162,6 +162,24 @@ against 5.15, indistinguishable). Ten live runs in Control with Ray Reconstructi
   lines: 67% at 4K, full size at 1440p and below.
 * With the model on every frame nothing is ever carried, so the anti-ghosting work is skipped there.
 
+## The model in the background (8 October)
+
+`CacheAsync` runs the model on a compute queue of its own, in parallel with the game's next frame, and lays
+its answer down two frames later (see `OptiScaler/dlssnr/design/edit-cache.md`). Control, 4070, 1440p, Ray
+Reconstruction, 67% model, fixed interval, one session:
+
+| | fps | 1% low | Frame pacing (mean / p99) | Flicker |
+|---|---:|---:|---:|---:|
+| Every 8 frames, in step | 24.8 | 19.5 | 4.96 / 16.8 ms | 0.22% |
+| Every 8 frames, in the background | 25.3 | 22.3 | 2.19 / 6.9 ms | 0.20% |
+| Every 3 frames, in step | 23.8 | 19.4 | 5.09 / 14.5 ms | 0.26% |
+| Every 3 frames, in the background | 21.7 | 18.1 | 7.27 / 14.9 ms | 0.27% |
+
+(The last run's stock-pass phase was 7% slower than the others, so part of the drop at 3 frames is the
+session; normalised by it, the background is 2% behind at 3 frames and 3% ahead at 8.) The first version used
+a second model instance beside the main one: VRAM went to 11.6 of 12 GB and every frame slowed down, the stock
+pass included. It now uses the one feature, built on the queue it runs on.
+
 ## Captures
 
 | | |

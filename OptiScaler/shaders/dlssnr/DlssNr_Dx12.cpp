@@ -188,6 +188,9 @@ struct NrState
     NVSDK_NGX_Parameter* capabilityParams = nullptr;
     void* feature = nullptr;
 
+    // CacheAsync: the feature was built on our compute queue, and is evaluated there and nowhere else.
+    bool featureOnCompute = false;
+
     // A feature per extra pass, each with its own temporal history.
     //
     // One feature run three times in a frame is told three frames passed with nothing moving between
@@ -388,6 +391,66 @@ std::unique_ptr<DlssNr_Dx12> g_compose;
 // use only -- with both options off nothing of it exists.
 std::unique_ptr<DlssNrEditCache_Dx12> g_cache;
 
+// CacheAsync: the model on a compute queue of our own, in parallel with the game's frame. See AsyncLaunch for
+// the frame-by-frame flow. Nothing of it exists until it is switched on.
+struct AsyncState
+{
+    static constexpr unsigned int kAllocators = 3;
+    static constexpr unsigned int kStampSlots = 4;
+
+    ID3D12CommandQueue* queue = nullptr;
+    ID3D12CommandAllocator* alloc[kAllocators] = {};
+    UINT64 allocDone[kAllocators] = {}; // the run after which each allocator is free again
+    unsigned int allocCur = 0;
+    ID3D12GraphicsCommandList* list = nullptr;
+    ID3D12Fence* inputsReady = nullptr; // signalled on the game's queue after the launch frame
+    ID3D12Fence* modelDone = nullptr;   // signalled on ours after the model
+    UINT64 inputsValue = 0;
+    UINT64 doneValue = 0;
+    ID3D12CommandQueue* gameQueue = nullptr;
+
+    ID3D12Resource* output = nullptr;   // the model's answer, at the working size
+    ID3D12Resource* depth = nullptr;    // the launch frame's guides, as the model and the landing read them
+    ID3D12Resource* motion = nullptr;
+    ID3D12Resource* keep = nullptr;     // the cache's untouched frame, while hdrCopy holds the launch frame
+    ID3D12Resource* composed = nullptr; // the launch frame composed with the answer, at the landing
+
+    // The run in flight: 0 none, 1 recorded (sent to our queue at the next frame), 2 on our queue.
+    int phase = 0;
+    unsigned long long launchFrame = 0;
+    UINT64 job = 0;
+    bool held = false;                   // the launch frame's proxy and frame kept readable until the landing
+    ID3D12Resource* heldInput = nullptr; // what the model reads: colorSmall, or colorCopy at full size
+    bool reduced = false;
+    DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+    unsigned int width = 0;
+    unsigned int height = 0;
+    unsigned int workW = 0;
+    unsigned int workH = 0;
+    float whitePoint = 1.0f;
+
+    // The model's time on our queue.
+    ID3D12QueryHeap* stamps = nullptr;
+    ID3D12Resource* stampsBack = nullptr;
+    UINT64 stampJob[kStampSlots] = {};
+    unsigned int stampSlot = 0;
+    double modelMs = 0.0;
+
+    unsigned long long launches = 0;
+    unsigned long long landed = 0;
+    bool active = false;  // on this frame
+    bool broken = false;  // something refused: the model runs in step for the rest of the session
+    const char* why = ""; // why it is not running, when it is asked for
+};
+
+AsyncState g_async;
+
+// A run launched on frame N lands on N + 2: the model runs alongside N + 1.
+constexpr unsigned long long kAsyncLatency = 2;
+
+// The pass's cost on a landing frame, for the GPU budget.
+double g_costLand = 0.0;
+
 // The pass's cost averaged over frames, because with the cache on consecutive frames cost very
 // different amounts and the last reading alone says little.
 double g_avgGpuTime = 0.0;
@@ -551,6 +614,9 @@ unsigned long long g_captureWriteAtFrame = 0;
 
 // Dropping a file named dlssnr-capture.trigger beside OptiScaler requests a capture, so a session can
 // be asked for one from outside the game -- no alt-tab, no menu. Checked once a second, effectively.
+// Set by dlssnr-asyncprobe.trigger: the next frame the model runs also runs RunAsyncProbe.
+bool g_asyncProbeWanted = false;
+
 void CheckCaptureTrigger()
 {
     // Every rendered frame reaches here, the pass on or off, so it keeps its own count.
@@ -567,6 +633,16 @@ void CheckCaptureTrigger()
         std::filesystem::remove(trigger, ec);
         DlssNr::RequestCapture(capture::kMaxFrames);
         LOG_INFO("DLSS-NR capture requested by trigger file");
+    }
+
+    // The async compute probe (RunAsyncProbe), the same way: run once on the next frame the model runs.
+    const auto asyncTrigger = Util::DllPath().remove_filename() / "dlssnr-asyncprobe.trigger";
+
+    if (std::filesystem::exists(asyncTrigger, ec))
+    {
+        std::filesystem::remove(asyncTrigger, ec);
+        g_asyncProbeWanted = true;
+        LOG_INFO("DLSS-NR async probe requested by trigger file");
     }
 
     // The edit cache's measurement dump, the same way.
@@ -643,6 +719,7 @@ void CheckCaptureTrigger()
             else if (k == "JbuUpsample") c->DlssNrJbuUpsample = b;
             else if (k == "Enabled") c->DlssNrEnabled = b;
             else if (k == "CacheNoiseAware") c->DlssNrCacheNoiseAware = b;
+            else if (k == "CacheAsync") c->DlssNrCacheAsync = b;
             else if (k == "CacheFingerprint") c->DlssNrCacheFingerprint = b;
             else if (k == "CacheContext") c->DlssNrCacheContext = b;
             else if (k == "CacheFingerprintTolerance") c->DlssNrCacheFingerprintTolerance = v;
@@ -1716,6 +1793,674 @@ constexpr unsigned long long kSettleFrames = 30;
 
 // The extras the official integration sets: global tone (read at create) and the interface inputs.
 // Written before every create and evaluate, nulls included, so nothing stale ever sits in the block.
+// Async compute feasibility probe. Running the model on a compute queue of our own, in parallel with the
+// game's rendering, only works if NGX accepts a feature built and evaluated on a COMPUTE command list. This
+// answers that, once, without touching the normal pass: a separate feature on blank inputs of our own,
+// recorded on our own compute list, executed on our own compute queue and waited for here (one hitch). The
+// log says whether the feature was built, what the evaluate returned, whether the GPU finished, whether the
+// device survived, and how long the model took on that queue.
+void SetExtras(const Config& cfg, ID3D12Resource* ui, ID3D12Resource* backbuffer, unsigned int uiWidth,
+               unsigned int uiHeight, unsigned int bbWidth, unsigned int bbHeight);
+
+void RunAsyncProbe(ID3D12Device* device, const Config& cfg, DXGI_FORMAT format, unsigned int w, unsigned int h,
+                   unsigned int gw, unsigned int gh)
+{
+    g_asyncProbeWanted = false;
+    LOG_INFO("DLSS-NR async probe: model {}x{}, guides {}x{}, format {}", w, h, gw, gh, (int) format);
+
+    ID3D12CommandQueue* queue = nullptr;
+    ID3D12CommandAllocator* alloc = nullptr;
+    ID3D12GraphicsCommandList* list = nullptr;
+    ID3D12Fence* fence = nullptr;
+    ID3D12QueryHeap* stamps = nullptr;
+    ID3D12Resource* stampsBack = nullptr;
+    ID3D12Resource* in = nullptr;
+    ID3D12Resource* depth = nullptr;
+    ID3D12Resource* motion = nullptr;
+    ID3D12Resource* out = nullptr;
+    void* feature = nullptr;
+    HANDLE done = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+
+    auto cleanup = [&]()
+    {
+        if (feature != nullptr && g_nr.release != nullptr)
+            g_nr.release(feature);
+
+        for (ID3D12Resource* r : { in, depth, motion, out, stampsBack })
+        {
+            if (r != nullptr)
+                r->Release();
+        }
+
+        if (stamps != nullptr)
+            stamps->Release();
+
+        if (list != nullptr)
+            list->Release();
+
+        if (alloc != nullptr)
+            alloc->Release();
+
+        if (fence != nullptr)
+            fence->Release();
+
+        if (queue != nullptr)
+            queue->Release();
+
+        if (done != nullptr)
+            CloseHandle(done);
+    };
+
+    D3D12_COMMAND_QUEUE_DESC qd {};
+    qd.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+
+    if (FAILED(device->CreateCommandQueue(&qd, IID_PPV_ARGS(&queue))) ||
+        FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE, IID_PPV_ARGS(&alloc))) ||
+        FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COMPUTE, alloc, nullptr, IID_PPV_ARGS(&list))) ||
+        FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))))
+    {
+        LOG_ERROR("DLSS-NR async probe: could not create a compute queue, list or fence");
+        cleanup();
+        return;
+    }
+
+    D3D12_QUERY_HEAP_DESC hd {};
+    hd.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+    hd.Count = 2;
+    device->CreateQueryHeap(&hd, IID_PPV_ARGS(&stamps));
+
+    {
+        D3D12_HEAP_PROPERTIES rb {};
+        rb.Type = D3D12_HEAP_TYPE_READBACK;
+        D3D12_RESOURCE_DESC bd {};
+        bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        bd.Width = 16;
+        bd.Height = 1;
+        bd.DepthOrArraySize = 1;
+        bd.MipLevels = 1;
+        bd.SampleDesc.Count = 1;
+        bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        device->CreateCommittedResource(&rb, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                        IID_PPV_ARGS(&stampsBack));
+    }
+
+    in = CreateScratch(device, format, w, h);
+    depth = CreateScratch(device, DXGI_FORMAT_R32_FLOAT, gw, gh);
+    motion = CreateScratch(device, DXGI_FORMAT_R16G16_FLOAT, gw, gh);
+    out = CreateScratch(device, format, w, h);
+
+    auto snippet = Util::FindFilePath(g_dllDir, "nvngx_dlssnr.dll");
+
+    if (!snippet.has_value())
+        snippet = Util::FindFilePath(Util::ExePath().remove_filename(), "nvngx_dlssnr.dll");
+
+    if (in == nullptr || depth == nullptr || motion == nullptr || out == nullptr || !snippet.has_value() ||
+        g_nr.create == nullptr || g_nr.evaluate == nullptr)
+    {
+        LOG_ERROR("DLSS-NR async probe: no inputs or no runtime");
+        cleanup();
+        return;
+    }
+
+    // Inputs as the model reads them; all three states are allowed on a compute queue.
+    Barrier(list, in, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    Barrier(list, depth, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    Barrier(list, motion, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+
+    SetExtras(cfg, nullptr, nullptr, 0, 0, 0, 0);
+    feature = g_nr.create(snippet->wstring().c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(), device, list,
+                          g_nr.capabilityParams, w, h, (int) cfg.DlssNrPreset.value_or_default(),
+                          cfg.DlssNrIntensity.value_or_default(), (int) EffStyle(cfg),
+                          cfg.DlssNrLocalStructure.value_or_default(), cfg.DlssNrLocalTone.value_or_default(),
+                          cfg.DlssNrSkinStructure.value_or_default(), cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, 1);
+
+    if (feature == nullptr)
+    {
+        LOG_ERROR("DLSS-NR async probe: the feature could NOT be built on a compute command list");
+        list->Close();
+        cleanup();
+        return;
+    }
+
+    if (stamps != nullptr)
+        list->EndQuery(stamps, D3D12_QUERY_TYPE_TIMESTAMP, 0);
+
+    const int result = g_nr.evaluate(list, feature, g_nr.capabilityParams, in, depth, motion, out, w, h, gw, gh,
+                                     g_nr.guideDepthInverted ? 1 : 0, 1, cfg.DlssNrIntensity.value_or_default(),
+                                     (int) EffStyle(cfg), cfg.DlssNrLocalStructure.value_or_default(),
+                                     cfg.DlssNrLocalTone.value_or_default(), cfg.DlssNrSkinStructure.value_or_default(),
+                                     cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, 1.0f, 1.0f);
+
+    if (stamps != nullptr && stampsBack != nullptr)
+    {
+        list->EndQuery(stamps, D3D12_QUERY_TYPE_TIMESTAMP, 1);
+        list->ResolveQueryData(stamps, D3D12_QUERY_TYPE_TIMESTAMP, 0, 2, stampsBack, 0);
+    }
+
+    const HRESULT closed = list->Close();
+    bool finished = false;
+
+    if (SUCCEEDED(closed))
+    {
+        ID3D12CommandList* lists[] = { list };
+        queue->ExecuteCommandLists(1, lists);
+        queue->Signal(fence, 1);
+        fence->SetEventOnCompletion(1, done);
+        finished = WaitForSingleObject(done, 5000) == WAIT_OBJECT_0;
+    }
+
+    const HRESULT removed = device->GetDeviceRemovedReason();
+    double ms = -1.0;
+    UINT64 freq = 0;
+
+    if (finished && stampsBack != nullptr && SUCCEEDED(queue->GetTimestampFrequency(&freq)) && freq != 0)
+    {
+        UINT64* t = nullptr;
+        D3D12_RANGE r { 0, 16 };
+
+        if (SUCCEEDED(stampsBack->Map(0, &r, (void**) &t)) && t != nullptr)
+        {
+            if (t[1] >= t[0])
+                ms = (double) (t[1] - t[0]) * 1000.0 / (double) freq;
+
+            D3D12_RANGE none { 0, 0 };
+            stampsBack->Unmap(0, &none);
+        }
+    }
+
+    LOG_INFO("DLSS-NR async probe: feature built on a compute list, evaluate returned {} ({}), list close 0x{:X}, "
+             "GPU {}, device {} (0x{:X}), model on the compute queue {:.2f} ms",
+             result, NgxResultName((unsigned int) result), (uint32_t) closed, finished ? "finished" : "DID NOT FINISH",
+             removed == S_OK ? "fine" : "REMOVED", (uint32_t) removed, ms);
+
+    cleanup();
+}
+
+// ---------------------------------------------------------------------------------------------
+// CacheAsync: the model on a compute queue of our own.
+//
+// On the frame the model would run on (the launch), its evaluate is recorded on our list instead, against
+// copies of the guides (the game rewrites its own), and the frame shows the carried edit as a cached frame
+// does. The list goes to our queue at the next frame, behind a fence the game's queue signals after everything
+// it has been given by then -- the launch frame included -- so the model runs alongside that next frame. The
+// frame after it (the landing) makes the game's queue wait for the model, which has normally long finished,
+// composes the answer with the launch frame into a texture of ours and hands it to the edit cache, which
+// carries it to the frame on screen along the motion since and stores it as on a frame the model runs.
+//
+// The model's cost leaves the game's queue; the price is two frames of latency on its answer, which the
+// cache's reprojection carries. There is one feature, built on our queue while this runs (AsyncBuildMain), and
+// rebuilt on the game's list -- the model in step, as without this -- whenever a condition is missing: before
+// the upscaler, more than one pass, a model above 100%, an instrument on.
+// ---------------------------------------------------------------------------------------------
+
+// Lets everything go. Waits for our queue first (a second at most): nothing of ours may be freed under it.
+void AsyncDestroy()
+{
+    if (g_async.modelDone != nullptr && g_async.doneValue > 0 &&
+        g_async.modelDone->GetCompletedValue() < g_async.doneValue)
+    {
+        if (HANDLE done = CreateEventW(nullptr, FALSE, FALSE, nullptr))
+        {
+            if (SUCCEEDED(g_async.modelDone->SetEventOnCompletion(g_async.doneValue, done)))
+                WaitForSingleObject(done, 1000);
+
+            CloseHandle(done);
+        }
+    }
+
+    for (ID3D12Resource** r : { &g_async.output, &g_async.depth, &g_async.motion, &g_async.keep, &g_async.composed,
+                                &g_async.stampsBack })
+    {
+        if (*r != nullptr)
+        {
+            (*r)->Release();
+            *r = nullptr;
+        }
+    }
+
+    if (g_async.stamps != nullptr)
+        g_async.stamps->Release();
+
+    if (g_async.list != nullptr)
+        g_async.list->Release();
+
+    for (auto*& a : g_async.alloc)
+    {
+        if (a != nullptr)
+            a->Release();
+
+        a = nullptr;
+    }
+
+    if (g_async.inputsReady != nullptr)
+        g_async.inputsReady->Release();
+
+    if (g_async.modelDone != nullptr)
+        g_async.modelDone->Release();
+
+    if (g_async.queue != nullptr)
+        g_async.queue->Release();
+
+    g_async.stamps = nullptr;
+    g_async.list = nullptr;
+    g_async.inputsReady = nullptr;
+    g_async.modelDone = nullptr;
+    g_async.queue = nullptr;
+    g_async.phase = 0;
+    g_async.held = false;
+}
+
+bool AsyncEnsureQueue(ID3D12Device* device)
+{
+    if (g_async.queue != nullptr)
+        return true;
+
+    if (g_async.broken)
+        return false;
+
+    D3D12_COMMAND_QUEUE_DESC qd {};
+    qd.Type = D3D12_COMMAND_LIST_TYPE_COMPUTE;
+
+    bool ok = SUCCEEDED(device->CreateCommandQueue(&qd, IID_PPV_ARGS(&g_async.queue)));
+
+    for (auto*& a : g_async.alloc)
+        ok = ok && SUCCEEDED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_COMPUTE, IID_PPV_ARGS(&a)));
+
+    ok = ok && SUCCEEDED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_COMPUTE, g_async.alloc[0], nullptr,
+                                                   IID_PPV_ARGS(&g_async.list)));
+    ok = ok && SUCCEEDED(g_async.list->Close());
+    ok = ok && SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&g_async.inputsReady)));
+    ok = ok && SUCCEEDED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&g_async.modelDone)));
+
+    if (!ok)
+    {
+        AsyncDestroy();
+        g_async.broken = true;
+        g_async.why = "no compute queue could be created";
+        LOG_ERROR("DLSS-NR async: {}; the model runs in step", g_async.why);
+        return false;
+    }
+
+    g_async.queue->SetName(L"DLSS-NR model (CacheAsync)");
+
+    // The model's time on our queue, for the overlay. Optional.
+    D3D12_QUERY_HEAP_DESC hd {};
+    hd.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+    hd.Count = 2 * AsyncState::kStampSlots;
+
+    if (SUCCEEDED(device->CreateQueryHeap(&hd, IID_PPV_ARGS(&g_async.stamps))))
+    {
+        D3D12_HEAP_PROPERTIES rb {};
+        rb.Type = D3D12_HEAP_TYPE_READBACK;
+
+        D3D12_RESOURCE_DESC bd {};
+        bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        bd.Width = 2 * AsyncState::kStampSlots * sizeof(UINT64);
+        bd.Height = 1;
+        bd.DepthOrArraySize = 1;
+        bd.MipLevels = 1;
+        bd.SampleDesc.Count = 1;
+        bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+        if (FAILED(device->CreateCommittedResource(&rb, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COPY_DEST,
+                                                   nullptr, IID_PPV_ARGS(&g_async.stampsBack))))
+        {
+            g_async.stampsBack = nullptr;
+            g_async.stamps->Release();
+            g_async.stamps = nullptr;
+        }
+    }
+    else
+    {
+        g_async.stamps = nullptr;
+    }
+
+    LOG_INFO("DLSS-NR async: compute queue ready");
+    return true;
+}
+
+// Whether this frame may run the model in the background, and when it is asked for and may not, why.
+bool AsyncWanted(const Config& cfg, float workScale)
+{
+    if (!cfg.DlssNrCacheAsync.value_or_default() || g_async.broken)
+        return false;
+
+    const char* why = nullptr;
+
+    if (!EffCache(cfg))
+        why = "needs the edit cache";
+    else if (g_preSrDispatch)
+        why = "runs after the upscaler only";
+    else if (workScale > 1.0f)
+        why = "not with a model above 100%";
+    else if (EffPasses(cfg) > 1)
+        why = "one pass only";
+    else if (cfg.DlssNrHoldFrame.value_or_default() || cfg.DlssNrCompare.value_or_default() != 0 ||
+             cfg.DlssNrDebugView.value_or_default() != 0 || cfg.DlssNrUseProxy.value_or_default() ||
+             g_capture.isActive() || (g_cache != nullptr && g_cache->DumpActive()))
+        why = "stands aside while an instrument is on";
+
+    g_async.why = why != nullptr ? why : "";
+    return why == nullptr;
+}
+
+// Our queue, the game's, and the frame-sized textures: all a launch or a landing needs but the feature.
+bool AsyncReady(ID3D12Device* device, ID3D12CommandQueue* timingQueue, DXGI_FORMAT format, unsigned int width,
+                unsigned int height)
+{
+    if (!AsyncEnsureQueue(device))
+        return false;
+
+    // The queue the game submits the upscaler's list on: the one it says, or the one it presents with.
+    auto* gameQueue =
+        timingQueue != nullptr ? timingQueue : (ID3D12CommandQueue*) State::Instance().currentCommandQueue;
+
+    if (gameQueue == nullptr)
+    {
+        g_async.why = "the game's queue is not known";
+        return false;
+    }
+
+    // A run in flight keeps the queue it was launched on.
+    if (g_async.phase == 0)
+        g_async.gameQueue = gameQueue;
+
+    for (ID3D12Resource** r : { &g_async.keep, &g_async.composed })
+    {
+        if (*r != nullptr)
+        {
+            const D3D12_RESOURCE_DESC d = (*r)->GetDesc();
+
+            if ((unsigned int) d.Width != width || d.Height != height || d.Format != format)
+                ParkNrResource(*r);
+        }
+
+        if (*r == nullptr)
+            *r = CreateScratch(device, format, width, height);
+
+        if (*r == nullptr)
+        {
+            g_async.why = "no memory for its textures";
+            return false;
+        }
+    }
+
+    return true;
+}
+
+// The launch frame's proxy and frame back to rest, and no run in flight.
+void AsyncRelease(ID3D12GraphicsCommandList* cmdList)
+{
+    if (g_async.held)
+    {
+        constexpr auto read = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        constexpr auto rest = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+
+        if (g_nr.colorCopy != nullptr)
+            Barrier(cmdList, g_nr.colorCopy, read, rest);
+
+        if (g_nr.hdrCopy != nullptr)
+            Barrier(cmdList, g_nr.hdrCopy, read, rest);
+
+        if (g_async.reduced && g_nr.colorSmall != nullptr)
+            Barrier(cmdList, g_nr.colorSmall, read, rest);
+
+        g_async.held = false;
+    }
+
+    g_async.phase = 0;
+}
+
+// A run that can no longer land is let go. The game's queue waits for it -- nothing after may touch what it
+// reads before it is done -- and the model starts again from nothing the next time it runs here.
+void AsyncAbandon(ID3D12GraphicsCommandList* cmdList)
+{
+    if (g_async.phase == 2 && g_async.gameQueue != nullptr)
+        g_async.gameQueue->Wait(g_async.modelDone, g_async.job);
+
+    AsyncRelease(cmdList);
+    g_nr.reset = true;
+}
+
+// The run recorded on the last frame goes to our queue, behind a fence the game's queue signals after all it has
+// been given so far -- the launch frame's list included, since a game submits a frame before it records the
+// next. The model then runs alongside the rest of this frame.
+void AsyncSubmit()
+{
+    if (g_async.phase != 1 || g_async.gameQueue == nullptr)
+        return;
+
+    g_async.gameQueue->Signal(g_async.inputsReady, ++g_async.inputsValue);
+    g_async.queue->Wait(g_async.inputsReady, g_async.inputsValue);
+
+    ID3D12CommandList* lists[] = { g_async.list };
+    g_async.queue->ExecuteCommandLists(1, lists);
+    g_async.queue->Signal(g_async.modelDone, ++g_async.doneValue);
+
+    g_async.job = g_async.doneValue;
+    g_async.allocDone[g_async.allocCur] = g_async.job;
+    g_async.stampJob[g_async.stampSlot] = g_async.job;
+    g_async.stampSlot = (g_async.stampSlot + 1) % AsyncState::kStampSlots;
+    g_async.phase = 2;
+}
+
+// The model's time on our queue, from the runs that have finished.
+void AsyncReadStamps()
+{
+    UINT64 frequency = 0;
+
+    if (g_async.stampsBack == nullptr || g_async.modelDone == nullptr ||
+        FAILED(g_async.queue->GetTimestampFrequency(&frequency)) || frequency == 0)
+        return;
+
+    const UINT64 done = g_async.modelDone->GetCompletedValue();
+
+    for (unsigned int s = 0; s < AsyncState::kStampSlots; ++s)
+    {
+        if (g_async.stampJob[s] == 0 || done < g_async.stampJob[s])
+            continue;
+
+        D3D12_RANGE range { 2 * s * sizeof(UINT64), (2 * s + 2) * sizeof(UINT64) };
+        void* mapped = nullptr;
+
+        if (SUCCEEDED(g_async.stampsBack->Map(0, &range, &mapped)) && mapped != nullptr)
+        {
+            const UINT64* t = (const UINT64*) mapped + 2 * s;
+
+            if (t[1] > t[0])
+            {
+                const double ms = (double) (t[1] - t[0]) * 1000.0 / (double) frequency;
+                g_async.modelMs = g_async.modelMs <= 0.0 ? ms : g_async.modelMs * 0.9 + ms * 0.1;
+            }
+
+            D3D12_RANGE nothing { 0, 0 };
+            g_async.stampsBack->Unmap(0, &nothing);
+        }
+
+        g_async.stampJob[s] = 0;
+    }
+}
+
+// Off, or standing aside: the textures go (the queue stays; it costs nothing). Memory matters here -- with a second
+// instance of the model beside the main one, Control at 1440p went past a 12 GB card's budget and every frame
+// slowed down, the stock pass included.
+void AsyncTrim()
+{
+    for (ID3D12Resource** r : { &g_async.output, &g_async.depth, &g_async.motion, &g_async.keep, &g_async.composed })
+        ParkNrResource(*r);
+}
+
+// The main feature, built on our compute queue: with CacheAsync the model runs only there, so there is one
+// feature and not a second beside it. A feature runs on the kind of queue it was built on; this one is never
+// evaluated on the game's list (it is rebuilt there when the background stands aside). The build is executed at
+// once on our queue; the first evaluate comes on a later frame, in a later list of the same queue.
+// busy: our queue is too far behind to take it now (try again next frame).
+void* AsyncBuildMain(ID3D12Device* device, const Config& cfg, const wchar_t* snippet, unsigned int workW,
+                     unsigned int workH, bool& busy)
+{
+    busy = false;
+    const unsigned int a = (g_async.allocCur + 1) % AsyncState::kAllocators;
+
+    if (g_async.modelDone->GetCompletedValue() < g_async.allocDone[a])
+    {
+        busy = true;
+        return nullptr;
+    }
+
+    if (FAILED(g_async.alloc[a]->Reset()) || FAILED(g_async.list->Reset(g_async.alloc[a], nullptr)))
+        return nullptr;
+
+    SetExtras(cfg, nullptr, nullptr, 0, 0, 0, 0);
+    void* feature = g_nr.create(snippet, State::Instance().NVNGX_ApplicationDataPath.c_str(), device, g_async.list,
+                                g_nr.capabilityParams, workW, workH, (int) cfg.DlssNrPreset.value_or_default(),
+                                cfg.DlssNrIntensity.value_or_default(), (int) EffStyle(cfg),
+                                cfg.DlssNrLocalStructure.value_or_default(), cfg.DlssNrLocalTone.value_or_default(),
+                                cfg.DlssNrSkinStructure.value_or_default(),
+                                cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, 1);
+
+    const HRESULT closed = g_async.list->Close();
+
+    if (feature == nullptr || FAILED(closed))
+    {
+        // Its list never ran, so nothing on the GPU refers to it.
+        if (feature != nullptr && g_nr.release != nullptr)
+            g_nr.release(feature);
+
+        return nullptr;
+    }
+
+    ID3D12CommandList* lists[] = { g_async.list };
+    g_async.queue->ExecuteCommandLists(1, lists);
+    g_async.queue->Signal(g_async.modelDone, ++g_async.doneValue);
+    g_async.allocDone[a] = g_async.doneValue;
+    g_async.allocCur = a;
+    return feature;
+}
+
+// A copy of a guide (NON_PIXEL_SHADER_RESOURCE, left so) the game cannot rewrite before the model reads it. The
+// copy rests in NON_PIXEL_SHADER_RESOURCE.
+bool AsyncSnapshot(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device, ID3D12Resource* src,
+                   ID3D12Resource*& snap)
+{
+    if (src == nullptr)
+        return false;
+
+    const D3D12_RESOURCE_DESC want = src->GetDesc();
+    bool fresh = false;
+
+    if (snap != nullptr)
+    {
+        const D3D12_RESOURCE_DESC have = snap->GetDesc();
+
+        if (have.Width != want.Width || have.Height != want.Height || have.Format != TypedGuideFormat(want.Format) ||
+            have.MipLevels != want.MipLevels)
+            ParkNrResource(snap);
+    }
+
+    if (snap == nullptr)
+    {
+        snap = CreateGuideClone(device, src); // created in COPY_DEST
+        fresh = true;
+
+        if (snap == nullptr)
+            return false;
+    }
+
+    if (!fresh)
+        Barrier(cmdList, snap, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_DEST);
+
+    Barrier(cmdList, src, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, D3D12_RESOURCE_STATE_COPY_SOURCE);
+    cmdList->CopyResource(snap, src);
+    Barrier(cmdList, src, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    Barrier(cmdList, snap, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
+    return true;
+}
+
+// The launch: the model's run recorded on our list against copies of this frame's guides, and the proxy and the
+// frame held readable for the landing. False holds nothing: the frame is then shown from the cache.
+bool AsyncLaunch(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device, const Config& cfg,
+                 ID3D12Resource* modelInput, ID3D12Resource* depthIn, ID3D12Resource* motionIn, DXGI_FORMAT format,
+                 unsigned int width, unsigned int height, unsigned int workW, unsigned int workH, unsigned int guideW,
+                 unsigned int guideH, float mvScaleX, float mvScaleY, bool reduced, bool reset)
+{
+    if (g_nr.feature == nullptr || !g_nr.featureOnCompute)
+        return false;
+
+    // Each allocator comes round every third run, many frames on: one still busy means the GPU is that far behind.
+    const unsigned int a = (g_async.allocCur + 1) % AsyncState::kAllocators;
+
+    if (g_async.modelDone->GetCompletedValue() < g_async.allocDone[a])
+        return false;
+
+    if (g_async.output != nullptr)
+    {
+        const D3D12_RESOURCE_DESC d = g_async.output->GetDesc();
+
+        if ((unsigned int) d.Width != workW || d.Height != workH || d.Format != format)
+            ParkNrResource(g_async.output);
+    }
+
+    if (g_async.output == nullptr)
+        g_async.output = CreateScratch(device, format, workW, workH);
+
+    if (g_async.output == nullptr || !AsyncSnapshot(cmdList, device, depthIn, g_async.depth) ||
+        !AsyncSnapshot(cmdList, device, motionIn, g_async.motion))
+        return false;
+
+    if (FAILED(g_async.alloc[a]->Reset()) || FAILED(g_async.list->Reset(g_async.alloc[a], nullptr)))
+        return false;
+
+    const unsigned int s = g_async.stampSlot;
+    g_async.stampJob[s] = 0;
+
+    if (g_async.stamps != nullptr)
+        g_async.list->EndQuery(g_async.stamps, D3D12_QUERY_TYPE_TIMESTAMP, 2 * s);
+
+    SetExtras(cfg, nullptr, nullptr, 0, 0, 0, 0);
+    const int result = g_nr.evaluate(
+        g_async.list, g_nr.feature, g_nr.capabilityParams, modelInput, g_async.depth, g_async.motion,
+        g_async.output, workW, workH, guideW, guideH, g_nr.guideDepthInverted ? 1 : 0, reset ? 1 : 0, cfg.DlssNrIntensity.value_or_default(), (int) EffStyle(cfg),
+        cfg.DlssNrLocalStructure.value_or_default(), cfg.DlssNrLocalTone.value_or_default(),
+        cfg.DlssNrSkinStructure.value_or_default(), cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, mvScaleX, mvScaleY);
+
+    if (g_async.stamps != nullptr && g_async.stampsBack != nullptr)
+    {
+        g_async.list->EndQuery(g_async.stamps, D3D12_QUERY_TYPE_TIMESTAMP, 2 * s + 1);
+        g_async.list->ResolveQueryData(g_async.stamps, D3D12_QUERY_TYPE_TIMESTAMP, 2 * s, 2, g_async.stampsBack,
+                                       2 * s * sizeof(UINT64));
+    }
+
+    const HRESULT closed = g_async.list->Close();
+
+    if (result != NVSDK_NGX_Result_Success || FAILED(closed))
+    {
+        g_async.broken = true;
+        g_async.why = "the model refused to run on a compute queue";
+        LOG_ERROR("DLSS-NR async: evaluate on our queue returned 0x{:X} ({}), list close 0x{:X}; the model runs "
+                  "in step from now on",
+                  (uint32_t) result, NgxResultName((unsigned int) result), (uint32_t) closed);
+        return false;
+    }
+
+    g_async.allocCur = a;
+    g_async.phase = 1;
+    g_async.launchFrame = g_frames;
+    g_async.held = true;
+    g_async.heldInput = modelInput;
+    g_async.reduced = reduced;
+    g_async.format = format;
+    g_async.width = width;
+    g_async.height = height;
+    g_async.workW = workW;
+    g_async.workH = workH;
+    ++g_async.launches;
+    return true;
+}
+
+// What the edit cache's GPU budget weighs a model run at in the background: the launch and the landing on the
+// game's queue, and the model's own time on ours.
+double AsyncRefreshCost() { return g_costRefresh + std::max(0.0, g_costLand - g_costCached) + g_async.modelMs; }
+
 void SetExtras(const Config& cfg, ID3D12Resource* ui, ID3D12Resource* backbuffer, unsigned int uiWidth,
                unsigned int uiHeight, unsigned int bbWidth, unsigned int bbHeight)
 {
@@ -2107,6 +2852,24 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const auto workHeight = (unsigned int) (height * workScale + 0.5f);
     const bool reduced = workWidth != width || workHeight != height;
 
+    // CacheAsync: the run recorded on the last frame goes to our queue now (AsyncSubmit); one whose frame no
+    // longer matches this one is let go first.
+    const bool asyncWanted =
+        AsyncWanted(cfg, workScale) && AsyncReady(device, timingQueue, desc.Format, width, height);
+    AsyncReadStamps();
+
+    if (g_async.phase != 0 &&
+        (!asyncWanted || frame.Reset || desc.Format != g_async.format || width != g_async.width ||
+         height != g_async.height || workWidth != g_async.workW || workHeight != g_async.workH ||
+         !TuningMatchesFeature(cfg)))
+        AsyncAbandon(cmdList);
+
+    if (g_async.phase == 1)
+        AsyncSubmit();
+
+    if (!asyncWanted && g_async.phase == 0)
+        AsyncTrim();
+
     ReleaseSurfacesIfFormatChanged(desc.Format);
 
     const bool resolutionChanged = g_nr.width != width || g_nr.height != height ||
@@ -2118,7 +2881,11 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // else -- a resolution change -- happened to force a rebuild by accident.
     const bool tuningChanged = !TuningMatchesFeature(cfg);
 
-    if (g_nr.feature != nullptr && (resolutionChanged || tuningChanged))
+    // CacheAsync: the feature lives on our queue while the model runs in the background, on the game's list
+    // otherwise; never evaluated on the other one, it is rebuilt when that changes.
+    const bool queueChanged = g_nr.feature != nullptr && g_nr.featureOnCompute != asyncWanted;
+
+    if (g_nr.feature != nullptr && (resolutionChanged || tuningChanged || queueChanged))
     {
         // Parked rather than released: with frame generation the GPU can still be several frames
         // deep in work that references all of it.
@@ -2206,7 +2973,42 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             return;
         }
 
+        // CacheAsync: on our compute queue, where it will run.
+        if (asyncWanted)
+        {
+            bool busy = false;
+            g_nr.feature = AsyncBuildMain(device, cfg, snippet->wstring().c_str(), workWidth, workHeight, busy);
+
+            if (g_nr.feature == nullptr)
+            {
+                // Not now, or not at all: the background then stands aside and the next frame builds the
+                // feature on the game's list, as without it.
+                if (!busy)
+                {
+                    g_async.broken = true;
+                    g_async.why = "the model could not be built on a compute queue";
+                    LOG_ERROR("DLSS-NR async: {}; the model runs in step", g_async.why);
+                }
+
+                device->Release();
+                return;
+            }
+
+            g_nr.featureOnCompute = true;
+            g_nr.width = width;
+            g_nr.height = height;
+            g_nr.reset = true;
+            RecordBuiltTuning(cfg);
+            LOG_INFO("DLSS-NR running at {}x{}, guides {}x{} (preset {}, intensity {}, style {}), the model on its "
+                     "own compute queue",
+                     width, height, guideWidth, guideHeight, g_nr.builtPreset, g_nr.builtIntensity,
+                     g_nr.builtStyle);
+            device->Release();
+            return;
+        }
+
         SetExtras(cfg, nullptr, nullptr, 0, 0, 0, 0);
+        g_nr.featureOnCompute = false;
         g_nr.feature =
             g_nr.create(snippet->wstring().c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(),
                         device, cmdList, g_nr.capabilityParams, workWidth, workHeight,
@@ -2523,6 +3325,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                              !cfg.DlssNrUseProxy.value_or_default() && !g_capture.isActive();
     bool cacheActive = false;
     bool cacheRefresh = true;
+    bool asyncOn = false;
 
     if (cacheWanted)
     {
@@ -2532,9 +3335,16 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         if (g_cache != nullptr && g_cache->IsInit())
         {
             cacheActive = true;
-            g_cache->SetFrameCosts(g_costRefresh, g_costCached);
+
+            // CacheAsync: the model in the background, on the feature built for it.
+            asyncOn = asyncWanted && g_nr.featureOnCompute;
+
+            if (!asyncOn && g_async.phase != 0)
+                AsyncAbandon(cmdList);
+
+            g_cache->SetFrameCosts(asyncOn ? AsyncRefreshCost() : g_costRefresh, g_costCached);
             cacheRefresh = g_cache->BeginFrame(cfg, device, width, height, desc.Format, frame.Reset || g_nr.reset,
-                                               g_preSrDispatch);
+                                               g_preSrDispatch, asyncOn, g_async.phase != 0);
             g_frameKind = cacheRefresh ? 1 : 2;
         }
         else
@@ -2547,6 +3357,11 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // Whatever it holds is from before it stood aside; switching back on starts from a refresh.
         g_cache->Invalidate();
     }
+
+    if (!cacheActive && g_async.phase != 0)
+        AsyncAbandon(cmdList);
+
+    g_async.active = asyncOn;
 
     // Pre-SR: the frame is the game's jittered render, a different sub-pixel sample of the scene every
     // frame, and the game's motion vectors leave the jitter out. A carried edit is moved by the change
@@ -2607,6 +3422,32 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         return in;
     };
 
+    // The composition's constants: the model path's, and CacheAsync's landing with the launch frame's white point.
+    auto composeParams = [&](float wp)
+    {
+        DlssNrConstants p {};
+        p.Mode = DlssNrMode_Resolve;
+        p.WhitePoint = wp;
+        p.UseGameExposure = useGameExposure;
+        p.ExposurePreMul = exposurePreMul;
+        p.Width = width;
+        p.Height = height;
+        p.TransferStrength = cfg.DlssNrTransferStrength.value_or_default();
+        p.ColourStrength = cfg.DlssNrColourStrength.value_or_default();
+        p.DebugView = cfg.DlssNrDebugView.value_or_default();
+        p.MaxRatio = cfg.DlssNrMaxRatio.value_or_default();
+        p.Transfer = cfg.DlssNrTransfer.value_or_default();
+        p.DebugScale = cfg.DlssNrWhitePointScale.value_or_default();
+        p.Passthrough = isHdrBuffer ? 0u : 1u;
+        p.ReversibleMode = cfg.DlssNrReversibleMode.value_or_default();
+        p.ApplyModel = cfg.DlssNrApplyModel.value_or_default() ? 1u : 0u;
+        p.CompareMode = cfg.DlssNrCompare.value_or_default();
+        p.CompareSplit = cfg.DlssNrCompareSplit.value_or_default();
+        p.CompareZoom = std::max(1.0f, cfg.DlssNrCompareZoom.value_or_default());
+        p.CompareSwap = cfg.DlssNrCompareSwap.value_or_default() ? 1u : 0u;
+        return p;
+    };
+
     if (cacheActive && !cacheRefresh)
     {
         // A cached frame: no encode, no model, no resolve. The carried edit is laid on the frame the
@@ -2616,8 +3457,63 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         ID3D12Resource* depthIn = ReadableGuide(device, cmdList, depth, &g_nr.depthClone);
         ID3D12Resource* motionIn = ReadableGuide(device, cmdList, motion, &g_nr.motionClone);
 
-        if (depthIn != nullptr && motionIn != nullptr)
-            g_cache->RunCached(cmdList, device, target, g_nr.hdrCopy, cacheInputs(depthIn, motionIn));
+        if (asyncOn && g_async.phase == 2 && g_frames >= g_async.launchFrame + kAsyncLatency)
+        {
+            // CacheAsync: the answer of the run launched two frames ago lands here. The game's queue waits for it
+            // first; it has normally long finished, having run alongside the frame between.
+            g_frameKind = 3;
+            g_async.gameQueue->Wait(g_async.modelDone, g_async.job);
+
+            bool landed = false;
+
+            if (depthIn != nullptr && motionIn != nullptr)
+            {
+                // The launch frame composed with the answer, exactly as on a frame the model runs, into a texture
+                // of ours; the edit cache carries it to this frame.
+                constexpr auto read = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+                constexpr auto rest = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+                ID3D12Resource* proxy = g_async.heldInput;
+                ID3D12Resource* answer = g_async.output;
+                bool jbuOk = false;
+
+                Barrier(cmdList, g_async.output, rest, read);
+
+                if (g_async.reduced && EffJbu(cfg))
+                {
+                    if (ID3D12Resource* up = g_cache->UpsampleModel(cmdList, device, g_nr.colorCopy, g_async.heldInput,
+                                                                    g_async.output, !isHdrBuffer,
+                                                                    cfg.DlssNrJbuSigma.value_or_default()))
+                    {
+                        proxy = g_nr.colorCopy;
+                        answer = up;
+                        jbuOk = true;
+                    }
+                }
+
+                DispatchPass(cmdList, composeParams(g_async.whitePoint), proxy, answer, g_nr.hdrCopy, motionIn,
+                             exposureTex, g_async.composed, nullptr);
+                Barrier(cmdList, g_async.output, read, rest);
+
+                if (jbuOk)
+                    g_cache->FinishUpsample(cmdList);
+
+                Barrier(cmdList, g_async.composed, rest, read);
+                landed = g_cache->ConsumeAsync(cmdList, device, target, g_async.keep, g_async.composed, g_nr.hdrCopy,
+                                               g_async.depth, cacheInputs(depthIn, motionIn));
+                Barrier(cmdList, g_async.composed, read, rest);
+            }
+
+            AsyncRelease(cmdList);
+
+            if (landed)
+                ++g_async.landed;
+        }
+        else if (depthIn != nullptr && motionIn != nullptr)
+        {
+            // CacheAsync holds the launch frame in hdrCopy until its answer lands; the cache keeps its own copy.
+            g_cache->RunCached(cmdList, device, target, asyncOn ? g_async.keep : g_nr.hdrCopy,
+                               cacheInputs(depthIn, motionIn));
+        }
 
         g_cache->EndFrame(cmdList);
         FinishPassTiming(cmdList, timingQueue);
@@ -2754,12 +3650,11 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // all of them (same units, same scale) -- or told to reset, as configured. The cache itself keeps
     // the game's own one-frame vectors.
     DlssNrCacheInputs cacheIn {};
+    bool resetModel = false;
 
     if (cacheActive)
     {
         cacheIn = cacheInputs(depthIn, motionIn);
-
-        bool resetModel = false;
 
         if (ID3D12Resource* accumulated = g_cache->ModelMotion(cmdList, device, cacheIn, resetModel))
             motionIn = accumulated;
@@ -2774,6 +3669,65 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     const float mvToWork = width != 0 ? (float) workWidth / (float) width : 1.0f;
 
     SetExtras(cfg, nullptr, nullptr, 0, 0, 0, 0);
+
+    // CacheAsync: this frame launches the model on our queue instead of running it here, and shows the carried
+    // edit as a cached frame does; the answer lands two frames on. A feature built for our queue never runs on the
+    // game's list: when it cannot launch, the frame is shown from the cache and the model runs at the next.
+    if (asyncOn || g_nr.featureOnCompute)
+    {
+        const bool launched =
+            asyncOn && g_async.phase == 0 &&
+            AsyncLaunch(cmdList, device, cfg, modelInput, depthIn, motionIn, desc.Format, width, height, workWidth,
+                        workHeight, guideWidth, guideHeight, g_nr.guideMvScaleX * mvToWork,
+                        g_nr.guideMvScaleY * mvToWork, reduced, g_nr.reset);
+
+        if (launched)
+        {
+            g_async.whitePoint = whitePoint;
+            g_nr.reset = false;
+        }
+        else
+        {
+            // Not this frame (our queue is behind, or the cache stood aside): the feature runs only on our queue,
+            // so the frame is shown as a cached one, and the model runs at the next.
+            ReportSkipOnce("the model's queue could not take a run; the frame was shown from the cache");
+            g_nr.reset = true;
+
+            if (cacheActive)
+                g_cache->RefreshNext();
+
+            constexpr auto read = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            constexpr auto rest = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+            Barrier(cmdList, g_nr.colorCopy, read, rest);
+            Barrier(cmdList, g_nr.hdrCopy, read, rest);
+
+            if (reduced && g_nr.colorSmall != nullptr)
+                Barrier(cmdList, g_nr.colorSmall, read, rest);
+        }
+
+        // The motion since the model's last run was just taken for it; this frame's is not chained again.
+        if (cacheActive && g_async.keep != nullptr)
+            g_cache->RunCached(cmdList, device, target, g_async.keep, cacheIn, false);
+
+        if (cacheActive)
+            g_cache->EndFrame(cmdList);
+
+        FinishPassTiming(cmdList, timingQueue);
+
+        // The guide clones as at the end of the model path. On a launch the proxy and the frame stay readable until
+        // the landing: the model reads one on our queue, the landing reads both.
+        if (g_nr.depthClone != nullptr)
+            Barrier(cmdList, g_nr.depthClone, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_COPY_DEST);
+
+        if (g_nr.motionClone != nullptr)
+            Barrier(cmdList, g_nr.motionClone, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
+                    D3D12_RESOURCE_STATE_COPY_DEST);
+
+        Barrier(cmdList, target, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, outputArrival);
+        device->Release();
+        return;
+    }
 
     // The proxy path, when asked for. Same inputs, same model -- the difference is who calls it.
     //
@@ -2910,6 +3864,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     g_nr.reset = false;
 
+    if (g_asyncProbeWanted)
+        RunAsyncProbe(device, cfg, desc.Format, workWidth, workHeight, guideWidth, guideHeight);
+
     // Supersampling probe: report the model working ABOVE native so a test log tells us whether NGX even
     // accepts a super-native evaluate and what it returns. Once per working-size change, or on any error.
     if (workWidth > width || workHeight > height)
@@ -2970,26 +3927,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // Resolve takes the difference between what the model returned and what it was shown, and adds
         // that back to the frame. At strength zero the result is what the upscaler produced, exactly, and
         // anything the model left alone is untouched rather than round-tripped through the curve.
-        DlssNrConstants resolveParams {};
-        resolveParams.Mode = DlssNrMode_Resolve;
-        resolveParams.WhitePoint = whitePoint;
-        resolveParams.UseGameExposure = useGameExposure;
-        resolveParams.ExposurePreMul = exposurePreMul;
-        resolveParams.Width = width;
-        resolveParams.Height = height;
-        resolveParams.TransferStrength = cfg.DlssNrTransferStrength.value_or_default();
-        resolveParams.ColourStrength = cfg.DlssNrColourStrength.value_or_default();
-        resolveParams.DebugView = cfg.DlssNrDebugView.value_or_default();
-        resolveParams.MaxRatio = cfg.DlssNrMaxRatio.value_or_default();
-        resolveParams.Transfer = cfg.DlssNrTransfer.value_or_default();
-        resolveParams.DebugScale = cfg.DlssNrWhitePointScale.value_or_default();
-        resolveParams.Passthrough = isHdrBuffer ? 0u : 1u;
-        resolveParams.ReversibleMode = cfg.DlssNrReversibleMode.value_or_default();
-        resolveParams.ApplyModel = cfg.DlssNrApplyModel.value_or_default() ? 1u : 0u;
-        resolveParams.CompareMode = cfg.DlssNrCompare.value_or_default();
-        resolveParams.CompareSplit = cfg.DlssNrCompareSplit.value_or_default();
-        resolveParams.CompareZoom = std::max(1.0f, cfg.DlssNrCompareZoom.value_or_default());
-        resolveParams.CompareSwap = cfg.DlssNrCompareSwap.value_or_default() ? 1u : 0u;
+        const DlssNrConstants resolveParams = composeParams(whitePoint);
 
         // The numbers the composition actually ran with, logged when any of them changes.
         //
@@ -3194,7 +4132,7 @@ void FinishPassTiming(ID3D12GraphicsCommandList* cmdList, ID3D12CommandQueue* ti
 
                 // The reading is the frame two starts ago: its kind is in the slot after this one.
                 const int kind = g_timeKind[(g_timeStarts + 1) % 3];
-                double& cost = kind == 1 ? g_costRefresh : g_costCached;
+                double& cost = kind == 1 ? g_costRefresh : kind == 3 ? g_costLand : g_costCached;
 
                 if (kind != 0)
                     cost = cost <= 0.0 ? ms.value() : cost * 0.9 + ms.value() * 0.1;
@@ -3436,10 +4374,12 @@ void BenchFinishPhase()
     }
 
     LOG_INFO("DLSS-NR benchmark: {} -> {:.1f} fps, 1% low {:.1f}, frame {:.2f} ms, NR pass {:.2f} ms ({} frames), "
-             "pacing {:.2f} ms (p99 {:.2f}), placement {}{}, model on {:.0f}% of frames",
+             "pacing {:.2f} ms (p99 {:.2f}), placement {}{}, model on {:.0f}% of frames{}",
              DlssNr::BenchmarkPhaseName(g_bench.phase), r.fps, r.low1, r.frameMs, r.nrMs, r.frames, r.pacingMs,
              r.pacingP99, r.placement == 2 ? "before the upscaler" : r.placement == 1 ? "after the upscaler" : "none",
-             r.preSrFellBack ? " (pre-SR fell back)" : "", r.modelShare < 0.0f ? 100.0f : 100.0f * r.modelShare);
+             r.preSrFellBack ? " (pre-SR fell back)" : "", r.modelShare < 0.0f ? 100.0f : 100.0f * r.modelShare,
+             g_async.active ? std::format(", in the background ({:.2f} ms on our queue)", g_async.modelMs)
+                            : std::string());
 }
 
 // The frame times of one phase as an SVG polyline, averaged down to at most `points` points.
@@ -4674,6 +5614,10 @@ CacheStatus GetCacheStatus()
 {
     CacheStatus s {};
     s.averageMs = g_avgGpuTime;
+    s.asyncOn = g_async.active;
+    s.asyncModelMs = g_async.modelMs;
+    s.asyncLanded = g_async.landed;
+    s.asyncWhy = g_async.why;
 
     if (g_cache == nullptr)
         return s;
@@ -4725,6 +5669,9 @@ void RequestCacheDump()
 void Shutdown()
 {
     std::lock_guard<std::mutex> nrLock(g_nrMutex);
+
+    AsyncDestroy();
+    g_async = AsyncState {};
 
     for (auto& r : g_nrRetired)
     {

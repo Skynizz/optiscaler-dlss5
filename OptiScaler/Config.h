@@ -630,6 +630,12 @@ class Config
     // tests made shadows thinner on cached frames and the anti-flicker flicker at its default. false is as
     // before.
     CustomOptional<bool> DlssNrCacheNoiseAware { true };
+    // The model in the background (async compute): on the frames it runs, it runs on a compute queue of its
+    // own, in parallel with the game's next frame, and its answer is laid down two frames later, carried along
+    // the motion like a cached frame. Its cost leaves the game's queue; at least 3 frames between runs, best at
+    // long ones. After the upscaler, one pass, a model at or below 100% (otherwise the model runs as usual).
+    // false is as before.
+    CustomOptional<bool> DlssNrCacheAsync { false };
 
     // Joint bilateral enlargement of a below-size model's answer, guided by the full-size frame.
     // Only acts when the model resolution is under 100%; off is the resolve exactly as it was.

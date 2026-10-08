@@ -156,6 +156,51 @@ Offline, on the Control dumps (model every frame, no real light entering): no ef
 still scene (lag 0.0001 stop), the regional jumps of the debris scene cut by a third (p99 0.050 to 0.033
 stop) for a lag of 0.0014 stop. A 0.5 stop re-grade fades in about a third of a second at 1.5 stops/s.
 
+## Model in the background (`CacheAsync`)
+
+Off by default. On, the model runs on a COMPUTE queue of ours instead of inside the game's frame:
+
+* **Launch** (the frame the model would run on): the encode and the shrink run as usual, then the evaluate is
+  recorded on our list against copies of the depth and motion guides (the game rewrites its own). The frame
+  shows the carried edit, as a cached frame does. The proxy (`colorCopy` / `colorSmall`) and the frame
+  (`hdrCopy`) stay readable until the landing; the cache keeps its untouched frame in a texture of its own
+  meanwhile.
+* **Next frame**: the game's queue signals a fence after everything it has been given so far -- the launch
+  frame's list included, since a game submits a frame before it records the next upscaler call -- and our
+  queue waits on it, runs the model and signals a fence of its own. The model runs alongside this frame.
+* **Landing** (two frames after the launch): the game's queue waits for our fence (normally long passed), the
+  composition runs on the launch frame into a texture of ours, and cache mode 18 carries its edit to this
+  frame along the motion chained since the launch (mode 5's accumulator, run whatever `CacheModelHistory`
+  says), each bilinear tap admitted only where the launch frame's depth agrees. It is written as this frame
+  times the carried edit, so the capture (mode 2) reads it exactly like the model's own frame; a pixel nothing
+  could reach holds nothing and the apply fills it from its region, as it fills a rejected pixel.
+
+There is one feature. While this runs it is built on our queue and evaluated only there (the probe showed
+NGX accepts a feature built and evaluated on a compute list); when the background stands aside it is rebuilt
+on the game's list. A second instance beside the main one was tried first: Control at 1440p then went past a
+12 GB card's memory and every frame slowed down, the stock pass included (24.2 to 19.8 fps).
+
+At least 3 frames between runs (launch N, landing N+2, next launch N+3). It stands aside -- the model in step,
+as without it -- before the upscaler, with more than one pass, above 100%, and while an instrument (hold,
+compare, debug view, proxy, capture, dump) is on. With `CacheBudgetMs`, a run is weighed at the launch and the
+landing plus the model's time on our queue, which is longer than its cost since it shares the GPU: the budget
+is conservative.
+
+Measured in Control (4070, 1440p, Ray Reconstruction, 67% model, interval fixed, same session, each run
+normalised by its own stock-pass phase):
+
+| | fps | 1% low | pacing (mean / p99) | / stock pass |
+|---|---:|---:|---:|---:|
+| x8 in step | 24.8 | 19.5 | 4.96 / 16.8 ms | 1.28 |
+| x8 in the background | 25.3 | 22.3 | 2.19 / 6.9 ms | 1.32 |
+| x3 in step | 23.8 | 19.4 | 5.09 / 14.5 ms | 1.23 |
+| x3 in the background | 21.7 | 18.1 | 7.27 / 14.9 ms | 1.21 |
+
+At long intervals the spike of the frame the model runs on is gone: pacing halves, 1% lows +14%, a little
+faster. At 3 frames there is nothing to gain: the model shares the GPU with every other frame (28 ms of wall
+time on our queue against 16 at x8) and the landing adds its own pass. Same flicker on the still capture
+(0.20% against 0.22% at x8).
+
 ## Pre-SR placement (`PreSr`)
 
 Off by default. On, the pass runs before the game's DLSS Super Resolution instead of after it: in
@@ -215,9 +260,8 @@ reprojection and low band only.
 ## Known limits
 
 * **Frame pacing.** Refresh frames cost what they always did and cached frames very little, so frame
-  time alternates. Frame generation and VRR hide part of it. The fix is running the model on an async
-  compute queue, one or two frames of latency, which the cache already tolerates (the edit is
-  reprojected forward anyway) -- not done yet.
+  time alternates. Frame generation and VRR hide part of it; `CacheAsync` removes it at long intervals
+  (the model on its own queue, its answer two frames late), not at short ones.
 * **Tiles.** The model is evaluated whole; there is no partial-frame evaluate in the forwarder, so
   "priority tiles" are realised as priority-weighted refresh scheduling instead.
 * **Depth without the projection.** Validation compares a pseudo-linear depth (`1/d` reversed, `1/(1-d)`
@@ -233,6 +277,9 @@ The cache also stands aside -- running the model every frame, unchanged -- while
 Debug view, the proxy path or a capture is active.
 
 `PreSr = false` (the default) never swaps anything; `CompareKey` can be unbound (-1).
+
+`CacheAsync = false` (the default) creates no queue, no fence and no texture, and the feature is built on
+the game's list as before; switching it off releases the textures and rebuilds the feature there.
 
 Removal: delete `DlssNr_EditCache_Dx12.*`, `DlssNr_CacheCommon.h`, `DlssNr_Shot_Dx12.*`,
 `precompile/dlssnr_cache.hlsl` and `DlssNr_Cache_Shader.h`, the `Cache*`/`Jbu*`/`PreSr`/`CompareKey`/
