@@ -189,7 +189,7 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
     ID3D12Resource* _constantBuffers[DLSSNR_CACHE_NUM_OF_HEAPS] = {};
     uint32_t _heapIndex = 0;
 
-    static constexpr uint32_t kSrvCount = 19;
+    static constexpr uint32_t kSrvCount = 22;
     static constexpr uint32_t kUavCount = 9;
 
     // The frame-sized history, two of each so one is read while the other is written.
@@ -225,6 +225,17 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
     ID3D12Resource* _histMeta[2] = {};   // age, validity, staleness, tap validity
     ID3D12Resource* _context = nullptr;  // this frame's surroundings, a quarter of the frame
     ID3D12Resource* _contextPrev = nullptr; // last frame's (the anti pop-in compares the two)
+
+    // Performance. The nearest-surface motion, once per depth texel per frame (every pass used to search
+    // the 3x3 for every pixel), kept readable between passes; and mode 10's regional lows at a quarter of
+    // the frame (it used to take eighteen taps per pixel).
+    ID3D12Resource* _dilatedMv = nullptr;
+    bool _dilatedIsSrv = false;
+    bool _dilatedReady = false;
+    ID3D12Resource* _regNow = nullptr;
+    ID3D12Resource* _regPrev = nullptr;
+    void DilatePass(ID3D12GraphicsCommandList* cmd, const DlssNrCacheInputs& in);
+    unsigned long long _timingLogFrame = 0;
     unsigned long long _contextFrame = 0;
     bool _contextPrevValid = false;
     ID3D12Resource* _guideSum[2] = {};   // guided filter: half-size sums (32-bit: they are differenced)

@@ -33,7 +33,9 @@ enum DlssNrCacheMode : uint32_t
     DlssNrCacheMode_Context = 12,     // anti-ghosting: this frame's surroundings (log luma, 1/4 size)
     DlssNrCacheMode_GuidedDown = 13,  // guided filter: the frame and the edit's local sums (1/2 size)
     DlssNrCacheMode_GuidedCoef = 14,  // guided filter: per-window linear model of the edit on the frame
-    DlssNrCacheMode_GuidedApply = 15  // guided filter: the edit rebuilt from the frame, then composed
+    DlssNrCacheMode_GuidedApply = 15, // guided filter: the edit rebuilt from the frame, then composed
+    DlssNrCacheMode_DilateMotion = 16, // once per frame: each depth texel's nearest-surface motion, in uv
+    DlssNrCacheMode_RegionalLow = 17  // the 12 px tent of an edit, at a quarter of the frame
 };
 
 // Anti-ghosting switches (GhostFlags). Each one off is the cache exactly as it was before it.
@@ -174,4 +176,9 @@ struct alignas(256) DlssNrCacheConstants
     // Noise-aware checks: the colour test against the 3x3 range of this frame (not the pixel alone), and the
     // anti-flicker faded in with trust and soft-limited rather than switched on and clamped. 0 is as before.
     uint32_t NoiseAware;
+
+    // The per-frame dilated motion (mode 16) is ready at t19: the passes read it instead of searching the
+    // 3x3 nearest surface themselves. And the regional lows of mode 10 are precomputed at t20 / t21.
+    uint32_t DilatedReady;
+    uint32_t RegionalReady;
 };

@@ -62,6 +62,8 @@ cbuffer Params : register(b0)
     float gAntiPopStep;     // anti light pop-in: max change of the regional edit per frame where the frame is still (0 off)
     float gAntiPopFrameTol; // anti light pop-in: the frame's own regional change, in stops, that counts as a real change
     uint  gNoiseAware;      // colour test against this frame's 3x3 range, anti-flicker faded and soft-limited
+    uint  gDilatedReady;    // this frame's dilated motion is at t19
+    uint  gRegionalReady;   // mode 10's regional lows are at t20 (this frame's edit) and t21 (last frame's)
 };
 
 Texture2D<float4>   gHistEdit  : register(t0); // rgb: log2 edit, a: high-band confidence
@@ -86,6 +88,9 @@ Texture2D<float4>   gGuide1    : register(t15); // guided filter: half-size sums
 Texture2D<float4>   gAux4      : register(t16); // L2 guide (log2 depth, log luma), for the same-surface fill
 Texture2D<float4>   gAux5      : register(t17); // L3 guide
 Texture2D<float4>   gContextPrev : register(t18); // anti pop-in: last frame's surroundings
+Texture2D<float4>   gDilated   : register(t19); // per depth texel: the nearest surface's motion, uv (mode 16)
+Texture2D<float4>   gRegNow    : register(t20); // mode 10: the 12 px tent of this frame's edit, quarter size
+Texture2D<float4>   gRegPrev   : register(t21); // mode 10: the same of last frame's shown edit
 
 RWTexture2D<float4> gOut0  : register(u0);
 RWTexture2D<float4> gOut1  : register(u1);
@@ -336,9 +341,10 @@ int2 MotionTexel(float2 uv)
 // The vector is taken from the nearest surface in a 3x3 neighbourhood rather than the pixel itself,
 // as every TAA does: at a silhouette the render-resolution vector under a display pixel can belong to
 // the background while the pixel shows the foreground, and the foreground is the one that moved.
-float2 MotionUvOffset(float2 uv)
+// The search below, for one depth texel. Every pixel that falls on the same depth texel gets the same
+// answer, so mode 16 runs it once per texel per frame and the passes read the result.
+float2 NearestSurfaceMotion(int2 c)
 {
-    const int2 c = DepthTexel(uv);
     int2 best = c;
     float bestLin = 3.4e38;
 
@@ -359,11 +365,20 @@ float2 MotionUvOffset(float2 uv)
 
     const float2 bestUv = (float2(best) + 0.5) / float2(gDepthW, gDepthH);
     const float2 mv = gMotion.Load(int3(MotionTexel(bestUv), 0)).xy * float2(gMvScaleX, gMvScaleY);
+    return mv / float2(gMotionW, gMotionH);
+}
+
+float2 MotionUvOffset(float2 uv)
+{
+    // Read from this frame's precomputed field when it is there (mode 16), searched here otherwise -- the
+    // same answer either way.
+    const float2 motion = gDilatedReady != 0 ? gDilated.Load(int3(DepthTexel(uv), 0)).xy
+                                             : NearestSurfaceMotion(DepthTexel(uv));
 
     // Pre-SR works on the game's jittered render: each frame samples the scene a fraction of a pixel
     // elsewhere and the motion vectors leave that out, so the change of jitter is added here (0 after
     // the upscaler, where the frame is not jittered).
-    return mv / float2(gMotionW, gMotionH) + float2(gJitterDeltaX, gJitterDeltaY);
+    return motion + float2(gJitterDeltaX, gJitterDeltaY);
 }
 
 // The history at q, with each of the four bilinear taps admitted only if its depth agrees with this
@@ -593,6 +608,81 @@ groupshared uint sMotion;        // the group's motion, in eighths of a pixel
 // 3x3 range is nine reads of shared memory rather than nine of the frame.
 groupshared float3 sPrint[100];
 
+// The fresh edit's luma over the group and a one-pixel border, and whether the model answered there, for
+// the despeckle: each pixel's eight neighbours are read here instead of computed again from the frame.
+groupshared float2 sFresh[100];
+
+// Mode 10: the edit's luma over the group and a one-pixel border, for its 3x3 variance.
+groupshared float sEditLuma[100];
+
+void LoadFreshTile(uint3 gid, uint3 gtid)
+{
+    const int2 origin = int2(gid.xy) * 8 - 1;
+    const uint li = gtid.y * 8 + gtid.x;
+
+    [unroll] for (uint k = 0; k < 2; ++k)
+    {
+        const uint j = li + k * 64;
+
+        if (j < 100)
+        {
+            const int2 t = clamp(origin + int2(j % 10, j / 10), int2(0, 0), int2(gWidth, gHeight) - 1);
+            float ok;
+            const float3 e = FreshEdit(gAux0.Load(int3(t, 0)).rgb, gColour.Load(int3(t, 0)).rgb, ok);
+            sFresh[j] = float2(dot(e, kLuma), ok);
+        }
+    }
+}
+
+void LoadEditLumaTile(uint3 gid, uint3 gtid)
+{
+    const int2 origin = int2(gid.xy) * 8 - 1;
+    const uint li = gtid.y * 8 + gtid.x;
+
+    [unroll] for (uint k = 0; k < 2; ++k)
+    {
+        const uint j = li + k * 64;
+
+        if (j < 100)
+        {
+            const int2 t = clamp(origin + int2(j % 10, j / 10), int2(0, 0), int2(gWidth, gHeight) - 1);
+            sEditLuma[j] = dot(gAux0.Load(int3(t, 0)).rgb, kLuma);
+        }
+    }
+}
+
+// FreshEditAt for the capture, its neighbours from the tile above: the same result, a ninth of the work.
+float3 FreshEditTiled(uint3 gtid, int2 pos, out float ok)
+{
+    const float3 e = FreshEdit(gAux0.Load(int3(pos, 0)).rgb, gColour.Load(int3(pos, 0)).rgb, ok);
+
+    if (gDespeckle == 0)
+        return e;
+
+    float lo = 1e9, hi = -1e9;
+
+    [unroll] for (int k = 0; k < 9; ++k)
+    {
+        if (k == 4)
+            continue;
+
+        const float2 n = sFresh[(gtid.y + k / 3) * 10 + gtid.x + k % 3];
+
+        if (n.y > 0.5)
+        {
+            lo = min(lo, n.x);
+            hi = max(hi, n.x);
+        }
+    }
+
+    if (hi < lo)
+        return e;
+
+    const float l = dot(e, kLuma);
+    const float lc = clamp(l, lo - 0.1, hi + 0.1);
+    return e + (lc - l);
+}
+
 void LoadPrintTile(uint3 gid, uint3 gtid)
 {
     const int2 origin = int2(gid.xy) * 8 - 1;
@@ -745,6 +835,13 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID, uint3
         return;
     }
 
+    // Mode 10's 3x3 variance reads its tile; every thread of the group loads it before any may leave.
+    if (gMode == 10)
+    {
+        LoadEditLumaTile(gid, gtid);
+        GroupMemoryBarrierWithGroupSync();
+    }
+
     // Reproject (1) and capture (2) share the history read and the shared-memory reduction, so no
     // thread may leave before the barrier inside it -- out-of-range threads contribute zero weight.
     if (gMode == 1 || gMode == 2)
@@ -758,6 +855,9 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID, uint3
 
         if (Ghost(kGhostPrint) || gNoiseAware != 0)
             LoadPrintTile(gid, gtid);
+
+        if (gMode == 2 && gDespeckle != 0)
+            LoadFreshTile(gid, gtid);
 
         GroupMemoryBarrierWithGroupSync();
 
@@ -880,7 +980,7 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID, uint3
             {
                 float ok;
                 // An edit the fingerprint rejected is not something to hold the new answer to.
-                const float3 fresh = Stabilize(FreshEditAt(int2(id.xy), int2(id.xy), int2(gWidth, gHeight), ok),
+                const float3 fresh = Stabilize(FreshEditTiled(gtid, int2(id.xy), ok),
                                                h.edit, gHistValid != 0 ? h.valid * vColour * validity : 0.0);
 
                 // Optional temporal smoothing of the refresh: where the carried edit is still valid,
@@ -1201,8 +1301,7 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID, uint3
 
         [unroll] for (int k = 0; k < 9; ++k)
         {
-            const int2 t = clamp(int2(id.xy) + int2(k % 3 - 1, k / 3 - 1), int2(0, 0), int2(gWidth, gHeight) - 1);
-            const float l = dot(gAux0.Load(int3(t, 0)).rgb, kLuma);
+            const float l = sEditLuma[(gtid.y + k / 3) * 10 + gtid.x + k % 3];
             m1 += l;
             m2 += l * l;
         }
@@ -1217,7 +1316,13 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID, uint3
         float3 lowNow = 0.0;
         const bool split = gLowTemporal > 0.0 || gAntiPopStep > 0.0;
 
-        if (split)
+        if (split && gRegionalReady != 0)
+        {
+            // Precomputed at a quarter of the frame (mode 17): the tent is 36 pixels wide, so one bilinear
+            // read of it is the nine taps' answer.
+            lowNow = gRegNow.SampleLevel(gLinear, uv, 0).rgb;
+        }
+        else if (split)
         {
             [unroll] for (int r = 0; r < 9; ++r)
             {
@@ -1277,11 +1382,18 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID, uint3
                         // once, so the light follows the scene and only the trembling is held.
                         float3 lowHist = 0.0;
 
-                        [unroll] for (int r = 0; r < 9; ++r)
+                        if (gRegionalReady != 0)
                         {
-                            const float2 o = float2(r % 3 - 1, r / 3 - 1);
-                            const float wt = (o.x == 0 ? 2.0 : 1.0) * (o.y == 0 ? 2.0 : 1.0) / 16.0;
-                            lowHist += gAux1.SampleLevel(gLinear, q + o * texel, 0).rgb * wt;
+                            lowHist = gRegPrev.SampleLevel(gLinear, q, 0).rgb;
+                        }
+                        else
+                        {
+                            [unroll] for (int r = 0; r < 9; ++r)
+                            {
+                                const float2 o = float2(r % 3 - 1, r / 3 - 1);
+                                const float wt = (o.x == 0 ? 2.0 : 1.0) * (o.y == 0 ? 2.0 : 1.0) / 16.0;
+                                lowHist += gAux1.SampleLevel(gLinear, q + o * texel, 0).rgb * wt;
+                            }
                         }
 
                         const float step = dot(lowHist - lowNow, kLuma) / 0.35;
@@ -1321,6 +1433,31 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID, uint3
         const float eps = Eps();
         gOut0[id.xy] = float4(max((max(original.rgb, 0.0) + eps) * exp2(outEdit) - eps, 0.0), original.a);
         gOut3[id.xy] = float4(outEdit, 1.0);
+        return;
+    }
+
+    if (gMode == 16)
+    {
+        // Once per frame, per depth texel (dispatched over the depth's valid region): the nearest-surface
+        // motion every pass reads, instead of each pixel of each pass searching the 3x3 again.
+        gOut0[id.xy] = float4(NearestSurfaceMotion(int2(id.xy)), 0.0, 0.0);
+        return;
+    }
+
+    if (gMode == 17)
+    {
+        // The 12 px tent of gAux0 at the centres of a quarter-size grid (gSrcW/H is the frame).
+        const float2 texel = 12.0 / float2(gSrcW, gSrcH);
+        float3 acc = 0.0;
+
+        [unroll] for (int r = 0; r < 9; ++r)
+        {
+            const float2 o = float2(r % 3 - 1, r / 3 - 1);
+            const float wt = (o.x == 0 ? 2.0 : 1.0) * (o.y == 0 ? 2.0 : 1.0) / 16.0;
+            acc += gAux0.SampleLevel(gLinear, uv + o * texel, 0).rgb * wt;
+        }
+
+        gOut0[id.xy] = float4(acc, 0.0);
         return;
     }
 
