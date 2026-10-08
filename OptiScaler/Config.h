@@ -586,8 +586,11 @@ class Config
     // similar is near, no edit rather than another surface's.
     CustomOptional<bool> DlssNrCacheSurfaceFill { true };
     // The keyframe crossfade reaches the model's answer within this many frames. 0 walks over the whole
-    // interval, as before -- which at long intervals kept the previous answer on screen far too long.
-    CustomOptional<uint32_t> DlssNrCacheCrossfadeFrames { 3 };
+    // interval, as before. A short walk trails less but concentrates each model run's change on a few
+    // frames: at long intervals the brightness pulses at the refresh rate (measured: the step after a run
+    // 6.5x the change on other frames with 3, 3.9x with the whole interval). The fingerprint already makes
+    // the stale pixels jump, so the whole interval is the default.
+    CustomOptional<uint32_t> DlssNrCacheCrossfadeFrames { 0 };
     // Guided filter: the carried edit rebuilt from the current frame, window by window, so it keeps
     // structure only where the frame has some. Cached frames only, by how far the edit has travelled.
     CustomOptional<bool> DlssNrCacheGuided { false };
@@ -608,7 +611,7 @@ class Config
     // same, the edit's regional light may then change by at most AntiPopRate stops a second; where the frame
     // changed (a light switched on there, a cut) it passes at once. Needs the edit cache.
     CustomOptional<bool> DlssNrCacheAntiPop { true };
-    CustomOptional<float> DlssNrCacheAntiPopRate { 1.5f };
+    CustomOptional<float> DlssNrCacheAntiPopRate { 0.75f };
 
     // With CacheAdaptiveSpeed: motion priority (0-1). Ghosting only exists in motion, so the model can run
     // at the long interval standing still and far more often moving. 0 is the speed regime as it was; 1

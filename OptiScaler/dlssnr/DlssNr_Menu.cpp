@@ -384,13 +384,13 @@ void RenderMenu(Config* config, float menuResScale)
                 config->DlssNrCacheContext = true;
                 config->DlssNrCacheFingerprintTolerance = 0.25f;
                 config->DlssNrCacheSurfaceFill = true;
-                config->DlssNrCacheCrossfadeFrames = 3u;
+                config->DlssNrCacheCrossfadeFrames = 0u;
                 config->DlssNrCacheGuided = false;
                 config->DlssNrCacheAging = false;
                 config->DlssNrCacheAdaptiveSpeed = true;
                 config->DlssNrCacheAdaptiveMin = 2u;
                 config->DlssNrCacheAntiPop = true;
-                config->DlssNrCacheAntiPopRate = 1.5f;
+                config->DlssNrCacheAntiPopRate = 0.75f;
                 config->DlssNrCacheMotionPriority = 0.5f;
                 config->DlssNrCacheBudgetMs = 0.0f;
                 config->DlssNrCacheStillMax = 8u;
@@ -776,8 +776,9 @@ void RenderMenu(Config* config, float menuResScale)
                     if (ImGui::SliderFloat("Fade speed", &rate, 0.25f, 8.0f, "%.2f stops/s", ImGuiSliderFlags_Logarithmic))
                         config->DlssNrCacheAntiPopRate = std::clamp(rate, 0.1f, 20.0f);
 
-                    HelpMarker("How fast a held change comes through. Lower hides pop-in more but the model's"
-                               "\nanswer arrives later; 1.5 fades a typical pop in about a third of a second.");
+                    HelpMarker("How fast a held change comes through. Lower hides pop-in -- and the small brightness"
+                               "\nstep of each model run at long intervals -- more, but the model's answer arrives"
+                               "\nlater; 0.75 fades a typical pop in about two thirds of a second.");
                 }
 
                 float stabilize = config->DlssNrCacheStabilize.value_or_default();
@@ -884,9 +885,10 @@ void RenderMenu(Config* config, float menuResScale)
                     if (preSrOn || !crossfade)
                         ImGui::EndDisabled();
 
-                    HelpMarker("Smooth model updates reach the model's answer within this many frames. Spread over"
-                               "\nthe whole interval, at 8 frames the previous answer stayed on screen for up to 16:"
-                               "\na trail of its own. No effect at 3 frames between runs or fewer.");
+                    HelpMarker("Smooth model updates reach the model's answer within this many frames. Shorter trails"
+                               "\nless but puts each model run's change on a few frames: at long intervals the"
+                               "\nbrightness then pulses at the refresh rate. The whole interval is the default (the"
+                               "\nfingerprint already makes stale pixels jump). No effect at 3 frames or fewer.");
 
                     bool guided = config->DlssNrCacheGuided.value_or_default();
 
