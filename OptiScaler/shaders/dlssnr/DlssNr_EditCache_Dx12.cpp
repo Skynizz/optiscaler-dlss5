@@ -295,7 +295,7 @@ void DlssNrEditCache_Dx12::ReleaseAll(bool immediately)
                                &_histMeta[1],  &_context,      &_contextPrev,  &_guideSum[0],   &_guideSum[1],
                                &_guideCoef[0], &_dilatedMv,    &_regNow,       &_regPrev,
                                &_guideCoef[1], &_guidedOut,    &_levelGuideCoarse[0], &_levelGuideCoarse[1],
-                               &_asyncWarp };
+                               &_asyncWarp,    &_pulse[0],     &_pulse[1],     &_pulseStats };
 
     for (ID3D12Resource** r : all)
     {
@@ -322,6 +322,22 @@ void DlssNrEditCache_Dx12::ReleaseAll(bool immediately)
 
         _statsPending[i] = false;
     }
+
+    for (unsigned int i = 0; i < kPulseSlots; ++i)
+    {
+        if (immediately)
+        {
+            SAFE_RELEASE(_pulseReadback[i]);
+        }
+        else
+        {
+            Park(_pulseReadback[i]);
+        }
+
+        _pulseFrame[i] = 0;
+    }
+
+    _pulsePrevValid = false;
 
     if (immediately)
     {
@@ -536,7 +552,10 @@ bool DlssNrEditCache_Dx12::BeginFrame(const Config& cfg, ID3D12Device* device, u
     _timing = cfg.DlssNrShowStats.value_or_default();
 
     if (_timing)
+    {
         ConsumeStamps();
+        ConsumePulse();
+    }
     else
         std::fill(std::begin(_stageSeen), std::end(_stageSeen), false);
 
@@ -559,6 +578,7 @@ bool DlssNrEditCache_Dx12::BeginFrame(const Config& cfg, ID3D12Device* device, u
     _temporal = preSr ? 0.0f : std::clamp(cfg.DlssNrCacheTemporal.value_or_default(), 0.0f, 0.9f);
     _noiseAware = cfg.DlssNrCacheNoiseAware.value_or_default();
     _lowTemporal = std::clamp(cfg.DlssNrCacheLowTemporal.value_or_default(), 0.0f, 0.95f);
+    _softRefresh = cfg.DlssNrCacheSoftRefresh.value_or_default();
 
     // Anti light pop-in: a rate in stops per second, turned into this frame's step with the real time
     // between frames (smoothed), so the fade takes the same time at 40 fps as at 120.
@@ -893,6 +913,7 @@ DlssNrCacheConstants DlssNrEditCache_Dx12::BaseConstants(const DlssNrCacheInputs
     c.Crossfade = _crossfade;
     c.Temporal = _debugView == 0 ? _temporal : 0.0f;
     c.LowTemporal = _lowTemporal;
+    c.SoftRefresh = _softRefresh ? 1u : 0u;
     c.TemporalValid = _finalValid ? 1u : 0u;
     c.JitterDeltaX = in.jitterDeltaX;
     c.JitterDeltaY = in.jitterDeltaY;
@@ -1440,6 +1461,9 @@ bool DlssNrEditCache_Dx12::RunCached(ID3D12GraphicsCommandList* cmd, ID3D12Devic
         Barrier(cmd, target, kSrv, kUav);
     }
 
+    if (_timing)
+        PulseProbe(cmd, target, keep, in);
+
     Barrier(cmd, keep, kSrv, kUav);
     return true;
 }
@@ -1511,9 +1535,15 @@ bool DlssNrEditCache_Dx12::CaptureRefresh(ID3D12GraphicsCommandList* cmd, ID3D12
     DlssNrCacheConstants c = BaseConstants(in);
     c.Mode = DlssNrCacheMode_Capture;
     c.AsyncWarp = nrFrame != nullptr ? 1u : 0u;
+
+    // Soft refresh: last frame's edit on screen (the temporal stabiliser's), for the pixels that have nothing
+    // carried to walk from.
+    ID3D12Resource* shown = (_softRefresh && _crossfadeOn && _finalValid) ? _finalHist[_finalCur] : nullptr;
+    c.SoftRefresh = shown != nullptr ? 1u : 0u;
+    Barrier(cmd, shown, kUav, kSrv);
     {
         ID3D12Resource* srv[kSrvCount] = { _histEdit[prev], _histGuide[prev], original, in.depth,
-                                           in.motion,       nrFrame != nullptr ? nrFrame : target, nullptr, nullptr,
+                                           in.motion,       nrFrame != nullptr ? nrFrame : target, shown, nullptr,
                                            nullptr,         _histPrint[prev], nullptr,  _histTarget[prev] };
         srv[12] = _histMeta[prev];
         srv[13] = context ? _context : nullptr;
@@ -1522,6 +1552,8 @@ bool DlssNrEditCache_Dx12::CaptureRefresh(ID3D12GraphicsCommandList* cmd, ID3D12
         Pass(cmd, c, srv, uav, Groups(_width), Groups(_height));
         Stamp(cmd, 6);
     }
+
+    Barrier(cmd, shown, kSrv, kUav);
 
     Barrier(cmd, _histEdit[prev], kSrv, kUav);
     Barrier(cmd, _histGuide[prev], kSrv, kUav);
@@ -1564,6 +1596,9 @@ bool DlssNrEditCache_Dx12::CaptureRefresh(ID3D12GraphicsCommandList* cmd, ID3D12
         DumpRecord(cmd, device, target, original, in);
         Barrier(cmd, target, kSrv, kUav);
     }
+
+    if (_timing)
+        PulseProbe(cmd, target, original, in);
 
     return true;
 }
@@ -1784,6 +1819,7 @@ void DlssNrEditCache_Dx12::DumpRecord(ID3D12GraphicsCommandList* cmd, ID3D12Devi
 
     DumpFrame& f = _dumpFrames[_dumpCaptured];
     f.whitePoint = in.passthrough ? 1.0f : in.whitePoint;
+    f.sinceRun = (unsigned int) (_frame - _lastRefresh);
 
     for (int i = 0; i < 3; ++i)
     {
@@ -1820,6 +1856,7 @@ void DlssNrEditCache_Dx12::DumpWrite()
     static const unsigned int kBpp[3] = { 8, 8, 16 };
 
     std::string whitePoints;
+    std::string sinceRun;
 
     for (unsigned int k = 0; k < _dumpCaptured; ++k)
     {
@@ -1844,6 +1881,7 @@ void DlssNrEditCache_Dx12::DumpWrite()
         char wp[32];
         snprintf(wp, sizeof(wp), "%s%.6f", k == 0 ? "" : ", ", f.whitePoint);
         whitePoints += wp;
+        sinceRun += std::format("{}{}", k == 0 ? "" : ", ", f.sinceRun);
     }
 
     std::ofstream manifest(dir / "manifest.json");
@@ -1852,6 +1890,7 @@ void DlssNrEditCache_Dx12::DumpWrite()
              << "  \"width\": " << _width << ",\n"
              << "  \"height\": " << _height << ",\n"
              << "  \"white_points\": [" << whitePoints << "],\n"
+             << "  \"frames_since_model\": [" << sinceRun << "],\n"
              << "  \"epsilon_rule\": \"white_point / 512\",\n"
              << "  \"observe\": " << (_dumpObserve ? "true" : "false") << ",\n"
              << "  \"orig\": \"the frame as the upscaler wrote it, linear, RGBA float16\",\n"
@@ -1882,6 +1921,183 @@ void DlssNrEditCache_Dx12::DumpRelease()
     _dumpFrames.clear();
     _dumpCaptured = 0;
     _dumpWriteAt = 0;
+}
+
+// The pulse probe. target (UNORDERED_ACCESS) holds the frame on screen, original (NON_PIXEL_SHADER_RESOURCE) the
+// untouched one; both are left so. Mode 19 at a quarter of the frame, its sums copied home with the frame's
+// position in the model's cycle.
+void DlssNrEditCache_Dx12::PulseProbe(ID3D12GraphicsCommandList* cmd, ID3D12Resource* target,
+                                      ID3D12Resource* original, const DlssNrCacheInputs& in)
+{
+    const unsigned int qw = LevelDim(_width, 0);
+    const unsigned int qh = LevelDim(_height, 0);
+
+    for (ID3D12Resource** r : { &_pulse[0], &_pulse[1] })
+    {
+        if (*r == nullptr)
+            *r = CreateTexture(_device, DXGI_FORMAT_R32_FLOAT, qw, qh, true, kUav);
+    }
+
+    if (_pulseStats == nullptr)
+        _pulseStats = CreateTexture(_device, DXGI_FORMAT_R32_UINT, kPulseSlots, 3, true, kUav);
+
+    const unsigned int slot = _pulseSlot;
+
+    if (_pulseReadback[slot] == nullptr)
+        _pulseReadback[slot] = CreateReadback(_device, 256 * 3);
+
+    if (_pulse[0] == nullptr || _pulse[1] == nullptr || _pulseStats == nullptr || _pulseReadback[slot] == nullptr)
+        return;
+
+    ID3D12Resource* now = _pulse[_pulseCur];
+    ID3D12Resource* prev = _pulse[1 - _pulseCur];
+
+    // Last frame's surroundings and this frame's, where both were built (the anti pop-in and the fingerprint's
+    // context build them): the step is only counted where the frame itself stayed put.
+    const bool contexts = _context != nullptr && _contextPrev != nullptr && _contextFrame == _frame && _contextPrevValid;
+
+    DlssNrCacheConstants c = BaseConstants(in);
+    c.StatsSlot = slot;
+
+    c.Mode = DlssNrCacheMode_ClearStats;
+    {
+        ID3D12Resource* srv[kSrvCount] = {};
+        ID3D12Resource* uav[kUavCount] = {};
+        uav[5] = _pulseStats;
+        Pass(cmd, c, srv, uav, 1, 1);
+    }
+
+    D3D12_RESOURCE_BARRIER uavBarrier {};
+    uavBarrier.Type = D3D12_RESOURCE_BARRIER_TYPE_UAV;
+    uavBarrier.UAV.pResource = _pulseStats;
+    cmd->ResourceBarrier(1, &uavBarrier);
+
+    Barrier(cmd, target, kUav, kSrv);
+    Barrier(cmd, prev, kUav, kSrv);
+
+    if (contexts)
+    {
+        Barrier(cmd, _context, kUav, kSrv);
+        Barrier(cmd, _contextPrev, kUav, kSrv);
+    }
+
+    c.Mode = DlssNrCacheMode_PulseProbe;
+    c.Width = qw;
+    c.Height = qh;
+    c.SourceWidth = _width;
+    c.SourceHeight = _height;
+    c.HistoryValid = _pulsePrevValid && _pulsePrevFrame + 1 == _frame ? 1u : 0u;
+    c.ProbeContext = contexts ? 1u : 0u;
+    {
+        ID3D12Resource* srv[kSrvCount] = { nullptr, nullptr, original, in.depth, in.motion, target, prev };
+        srv[13] = contexts ? _context : nullptr;
+        srv[18] = contexts ? _contextPrev : nullptr;
+        ID3D12Resource* uav[kUavCount] = { now };
+        uav[5] = _pulseStats;
+        Pass(cmd, c, srv, uav, Groups(qw), Groups(qh));
+    }
+
+    if (contexts)
+    {
+        Barrier(cmd, _context, kSrv, kUav);
+        Barrier(cmd, _contextPrev, kSrv, kUav);
+    }
+
+    Barrier(cmd, prev, kSrv, kUav);
+    Barrier(cmd, target, kSrv, kUav);
+
+    {
+        D3D12_TEXTURE_COPY_LOCATION src {};
+        src.pResource = _pulseStats;
+        src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+
+        D3D12_TEXTURE_COPY_LOCATION dst {};
+        dst.pResource = _pulseReadback[slot];
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        dst.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R32_UINT;
+        dst.PlacedFootprint.Footprint.Width = kPulseSlots;
+        dst.PlacedFootprint.Footprint.Height = 3;
+        dst.PlacedFootprint.Footprint.Depth = 1;
+        dst.PlacedFootprint.Footprint.RowPitch = 256;
+
+        Barrier(cmd, _pulseStats, kUav, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        cmd->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        Barrier(cmd, _pulseStats, D3D12_RESOURCE_STATE_COPY_SOURCE, kUav);
+    }
+
+    _pulseFrame[slot] = _frame;
+    _pulsePhase[slot] = (unsigned int) std::min<unsigned long long>(_frame - _lastRefresh, Status::kPulsePhases - 1);
+    _pulseSlot = (slot + 1) % kPulseSlots;
+    _pulseCur = 1 - _pulseCur;
+    _pulsePrevValid = true;
+    _pulsePrevFrame = _frame;
+}
+
+// The probe's sums, four frames late, sorted by frame since the model ran; to the log every 240 frames.
+void DlssNrEditCache_Dx12::ConsumePulse()
+{
+    for (unsigned int s = 0; s < kPulseSlots; ++s)
+    {
+        if (_pulseFrame[s] == 0 || _frame - _pulseFrame[s] < 4 || _pulseReadback[s] == nullptr)
+            continue;
+
+        void* mapped = nullptr;
+        D3D12_RANGE range { 0, 256 * 3 };
+
+        if (SUCCEEDED(_pulseReadback[s]->Map(0, &range, &mapped)) && mapped != nullptr)
+        {
+            const uint32_t* row0 = (const uint32_t*) mapped;
+            const uint32_t* row1 = (const uint32_t*) ((const unsigned char*) mapped + 256);
+            const uint32_t* row2 = (const uint32_t*) ((const unsigned char*) mapped + 512);
+            const unsigned int p = _pulsePhase[s];
+            const double texels = (double) LevelDim(_width, 0) * (double) LevelDim(_height, 0);
+
+            _pulseSum[p] += row0[s] * 1e-4;
+            _pulseWeight[p] += row1[s] * 1e-3;
+            _pulseDetailSum[p] += texels > 0.0 ? row2[s] * 1e-4 / texels : 0.0;
+            ++_pulseDetailCount[p];
+            ++_pulseMeasured;
+
+            D3D12_RANGE nothing { 0, 0 };
+            _pulseReadback[s]->Unmap(0, &nothing);
+        }
+
+        _pulseFrame[s] = 0;
+    }
+
+    if (_pulseMeasured < 240)
+        return;
+
+    std::string steps, details;
+    double all = 0.0, allWeight = 0.0;
+    unsigned int phases = 0;
+
+    for (int p = 0; p < Status::kPulsePhases; ++p)
+    {
+        if (_pulseDetailCount[p] == 0)
+            continue;
+
+        phases = (unsigned int) p + 1;
+        const double step = _pulseWeight[p] > 1e-6 ? _pulseSum[p] / _pulseWeight[p] : -1.0;
+        const double detail = _pulseDetailSum[p] / _pulseDetailCount[p];
+        _pulseShownStep[p] = (float) step;
+        _pulseShownDetail[p] = (float) detail;
+        steps += std::format(" {:.4f}", step);
+        details += std::format(" {:.4f}", detail);
+        all += _pulseSum[p];
+        allWeight += _pulseWeight[p];
+    }
+
+    _pulseShownPhases = phases;
+    LOG_INFO("DLSS-NR pulse (model every {} frames): regional step {:.4f} stop per frame; by frame since the "
+             "model ran:{} | detail:{}",
+             std::max(1u, _intervalNow), allWeight > 1e-6 ? all / allWeight : -1.0, steps, details);
+
+    std::fill(std::begin(_pulseSum), std::end(_pulseSum), 0.0);
+    std::fill(std::begin(_pulseWeight), std::end(_pulseWeight), 0.0);
+    std::fill(std::begin(_pulseDetailSum), std::end(_pulseDetailSum), 0.0);
+    std::fill(std::begin(_pulseDetailCount), std::end(_pulseDetailCount), 0u);
+    _pulseMeasured = 0;
 }
 
 const char* DlssNrEditCache_Dx12::StageName(int stage)
@@ -2032,6 +2248,14 @@ DlssNrEditCache_Dx12::Status DlssNrEditCache_Dx12::GetStatus() const
 
     for (int i = 0; i < Status::kStages; ++i)
         s.stageMs[i] = _stageSeen[i] ? _stageMs[i] : -1.0;
+
+    s.pulsePhases = _timing ? _pulseShownPhases : 0;
+
+    for (int i = 0; i < Status::kPulsePhases; ++i)
+    {
+        s.pulseStep[i] = _pulseShownStep[i];
+        s.pulseDetail[i] = _pulseShownDetail[i];
+    }
 
     return s;
 }

@@ -180,6 +180,35 @@ session; normalised by it, the background is 2% behind at 3 frames and 3% ahead 
 a second model instance beside the main one: VRAM went to 11.6 of 12 GB and every frame slowed down, the stock
 pass included. It now uses the one feature, built on the queue it runs on.
 
+## The light pulsing at 8 frames between runs (9 October)
+
+At long intervals the light seemed to move a little, in step with the model. A pulse probe (`ShowStats`) now
+measures, every frame, how much the edit's regional light moves, sorted by frames since the model ran. Control,
+4070, 1440p, Ray Reconstruction, still view, 8 frames between runs, in stops per frame:
+
+| | the model's frame | the others | Detail over the interval |
+|---|---:|---:|---:|
+| Model every frame (reference) | 0.0018 | 0.0018 | 0.053 |
+| Before | 0.0023-0.0027 | 0.0012-0.0015 | 0.049 falling to 0.048 |
+| Now (soft refresh, detail without decay) | 0.0013-0.0014 | 0.0014-0.0018 | 0.052, flat |
+
+The frame the model ran on moved twice as much as the others. Frame dumps placed it on things that move
+without motion vectors (a paper in the wind, debris, the character's hands): the fingerprint rightly drops the
+background's edit they inherit, and the model's run gave them their own answer for one frame. They now fade to
+it from what was on screen. The model's frame moves no more than the others, and the light is steadier than
+with the model on every frame.
+
+Cost: none measurable. Alternating benchmarks in one session, the pass at 2.86-2.97 ms throughout:
+
+| | fps | Frame pacing | Flicker |
+|---|---:|---:|---:|
+| Before (two runs) | 24.6 / 22.9 | 4.89 / 6.23 ms | 0.233 / 0.242% |
+| Now (two runs) | 24.1 / 24.0 | 5.25 / 5.08 ms | 0.232 / 0.259% |
+
+Tried and dropped, no measurable effect: a dead band on the regional light, stronger luminance stability,
+the fingerprint's tolerance (0.25 to 1 stop) and context term, a doubt that has to hold two frames, keeping
+the edit where the fingerprint rejects two intervals running.
+
 ## Captures
 
 | | |

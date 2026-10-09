@@ -65,6 +65,8 @@ cbuffer Params : register(b0)
     uint  gDilatedReady;    // this frame's dilated motion is at t19
     uint  gRegionalReady;   // mode 10's regional lows are at t20 (this frame's edit) and t21 (last frame's)
     uint  gAsyncWarp;       // CacheAsync: the capture reads the background answer carried here by mode 18
+    uint  gProbeContext;    // mode 19: this frame's and last frame's surroundings are at t13 / t18
+    uint  gSoftRefresh;     // crossfade: a pixel without a carried edit starts the walk from what was on screen
 };
 
 Texture2D<float4>   gHistEdit  : register(t0); // rgb: log2 edit, a: high-band confidence
@@ -422,6 +424,7 @@ struct History
     float valid; // the fraction of the bilinear weight that passed, 0..1
     float4 print; // anti-ghosting: the source's fingerprint, carried
     float4 meta;  // anti-ghosting: age, validity, staleness, tap validity
+    float3 shown; // soft refresh (capture only): last frame's edit on screen, at the same taps
 };
 
 // A history texture at uv q, Catmull-Rom filtered in five bilinear taps (the usual TAA arrangement).
@@ -466,6 +469,8 @@ History ReadHistory(float2 q, float linC, float tol)
     h.valid = 0.0;
     h.print = 0.0;
     h.meta = 0.0;
+    h.shown = 0.0;
+    const bool readShown = gMode == 2 && gSoftRefresh != 0 && gTemporalValid != 0;
 
     const float2 pos = q * float2(gWidth, gHeight) - 0.5;
     const int2 i0 = (int2) floor(pos);
@@ -496,6 +501,9 @@ History ReadHistory(float2 q, float linC, float tol)
         const float4 e = gHistEdit.Load(int3(t, 0));
         h.edit += e.rgb * w;
         h.confidence += e.a * w;
+
+        if (readShown)
+            h.shown += gAux1.Load(int3(t, 0)).rgb * w;
         h.logLuma += g.y * w;
         wsum += w;
         lo = min(lo, e.rgb);
@@ -533,6 +541,7 @@ History ReadHistory(float2 q, float linC, float tol)
         h.logLuma /= wsum;
         h.target /= wsum;
         h.targetConfidence /= wsum;
+        h.shown /= wsum;
     }
 
     // Where all four taps are the same surface, the edit is read with Catmull-Rom instead of bilinear.
@@ -1037,9 +1046,33 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID, uint3
                     // the walk toward it, from what was shown before -- where that is still the same
                     // surface; elsewhere there is nothing to walk from, and the answer is shown at once.
                     const bool carry = gHistValid != 0 && h.valid > 0.5 && ok > 0.5 && validity > 0.5;
-                    const float a = carry ? saturate(gCrossfade) : 1.0;
+                    float a = carry ? saturate(gCrossfade) : 1.0;
+                    float3 from = h.edit;
+
+                    // Soft refresh. A pixel without a carried edit to walk from -- the fingerprint dropped it, or
+                    // something moved in without motion vectors (a paper in the wind, debris, a hand) -- showed
+                    // the region's light on the frames before, and took the model's answer at once here; the
+                    // frame after, it is dropped again. On a long interval that is a flash on every run, and it
+                    // was most of what moved on the frame the model ran. It now walks from what was on screen,
+                    // like everything else: read at the history's taps where they hold this surface, and where
+                    // they do not and the view is still, at the pixel itself -- only where something came in front
+                    // (this surface no farther than last frame's): where the background reappears, walking from what
+                    // stood there would drag its light along, so that takes the answer at once, as before.
+                    if (gSoftRefresh != 0 && gTemporalValid != 0 && gHistValid != 0 && !carry && ok > 0.5 && onScreen)
+                    {
+                        const bool atTaps = h.valid > 0.5;
+                        const float lastDepth = gHistGuide.Load(int3(clamp(int2(q * float2(gWidth, gHeight)), int2(0, 0),
+                                                                           int2(gWidth, gHeight) - 1), 0)).x;
+
+                        if (atTaps || (motionPx < 1.0 && linC <= lastDepth * (1.0 + gDepthTol)))
+                        {
+                            from = atTaps ? h.shown : gAux1.SampleLevel(gLinear, q, 0).rgb;
+                            a = saturate(gCrossfade);
+                        }
+                    }
+
                     gOut6[id.xy] = float4(edit, 1.0);
-                    edit = lerp(h.edit, edit, a);
+                    edit = lerp(from, edit, a);
                     gOut0[id.xy] = float4(edit, carry ? lerp(h.confidence, 1.0, a) : 1.0);
                 }
                 else
@@ -1082,6 +1115,83 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID, uint3
                 if (sMotion > 0u)
                     InterlockedAdd(gStats[uint2(gStatsSlot, 2)], sMotion);
             }
+        }
+
+        return;
+    }
+
+    if (gMode == 19)
+    {
+        // The pulse probe (ShowStats only), at a quarter of the frame. The regional light of the edit on screen --
+        // the 12 px tent of log2(shown / untouched), gAux0 against gColour -- is kept (gOut0) and compared with last
+        // frame's (gAux1) moved here, where the frame's own surroundings stayed put; and the detail around it, the
+        // edit's distance from that regional light over the 4x4 block under the texel. Summed per frame into u5:
+        // row 0 the weighted step (1e-4 stop), row 1 the weight (1e-3), row 2 the detail (1e-4 stop). The CPU
+        // sorts the frames by how long since the model ran: a pulse is a step, or a detail, that follows that cycle.
+        float4 part = 0.0;
+
+        if (inside)
+        {
+            const float2 texel = 12.0 / float2(gSrcW, gSrcH);
+            const float eps = Eps();
+            float reg = 0.0;
+
+            [unroll] for (int r = 0; r < 9; ++r)
+            {
+                const float2 o = float2(r % 3 - 1, r / 3 - 1);
+                const float wt = (o.x == 0 ? 2.0 : 1.0) * (o.y == 0 ? 2.0 : 1.0) / 16.0;
+                const float2 p = uv + o * texel;
+                const float ys = dot(max(gAux0.SampleLevel(gLinear, p, 0).rgb, 0.0), kLuma);
+                const float yo = dot(max(gColour.SampleLevel(gLinear, p, 0).rgb, 0.0), kLuma);
+                reg += log2((ys + eps) / (yo + eps)) * wt;
+            }
+
+            gOut0[id.xy] = float4(reg, 0.0, 0.0, 0.0);
+
+            const int2 base = int2(id.xy) * 4;
+            float detail = 0.0;
+
+            [unroll] for (int k = 0; k < 16; ++k)
+            {
+                const int2 t = min(base + int2(k & 3, k >> 2), int2(gSrcW, gSrcH) - 1);
+                const float ys = dot(max(gAux0.Load(int3(t, 0)).rgb, 0.0), kLuma);
+                const float yo = dot(max(gColour.Load(int3(t, 0)).rgb, 0.0), kLuma);
+                detail += abs(log2((ys + eps) / (yo + eps)) - reg);
+            }
+
+            part.z = detail / 16.0;
+
+            if (gHistValid != 0)
+            {
+                const float2 q = uv + MotionUvOffset(uv);
+
+                if (all(q >= 0.0) && all(q <= 1.0))
+                {
+                    float w = 1.0;
+
+                    if (gProbeContext != 0)
+                        w = saturate(1.0 - abs(ContextAt(uv) - ContextPrevAt(q)) / 0.15);
+
+                    part.x = w * min(abs(reg - gAux1.SampleLevel(gLinear, q, 0).r), 0.2);
+                    part.y = w;
+                }
+            }
+        }
+
+        const uint li = gtid.y * 8 + gtid.x;
+        sEdit[li] = part;
+        GroupMemoryBarrierWithGroupSync();
+
+        if (li == 0)
+        {
+            float4 sum = 0.0;
+
+            for (uint j = 0; j < 64; ++j)
+                sum += sEdit[j];
+
+            InterlockedAdd(gStats[uint2(gStatsSlot, 0)], (uint) (sum.x * 1e4));
+            InterlockedAdd(gStats[uint2(gStatsSlot, 1)], (uint) (sum.y * 1e3));
+            InterlockedAdd(gStats[uint2(gStatsSlot, 2)], (uint) (sum.z * 1e4));
         }
 
         return;

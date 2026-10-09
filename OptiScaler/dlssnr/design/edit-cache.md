@@ -23,8 +23,9 @@ contradict it. It does two things differently:
    answer whole, and nothing is averaged over time unless asked for.
 2. It does not trust the carried fine detail. The edit is split into a low band (lighting, tone --
    broad, slow, and what reprojects well) and a high band (synthesised detail). The low band is carried
-   everywhere; the high band only where depth *and* colour validate, and it decays with age
-   (`CacheHighDecay`). Where the old accumulator moved a disagreement around, the cache drops the part
+   everywhere; the high band only where depth *and* colour validate, and it can decay with age
+   (`CacheHighDecay`, 1 by default: no decay since the fingerprint and the soft refresh, see *The light
+   pulsing at long intervals*). Where the old accumulator moved a disagreement around, the cache drops the part
    that disagrees and keeps the part that does not.
 
 Whether the remainder is good enough is a measurement, not an argument -- see *Measuring* below.
@@ -156,6 +157,44 @@ Offline, on the Control dumps (model every frame, no real light entering): no ef
 still scene (lag 0.0001 stop), the regional jumps of the debris scene cut by a third (p99 0.050 to 0.033
 stop) for a lag of 0.0014 stop. A 0.5 stop re-grade fades in about a third of a second at 1.5 stops/s.
 
+## The light pulsing at long intervals (`CacheSoftRefresh`)
+
+At 8 frames between runs the light seemed to move a little, in step with the model. To see what moved,
+the pulse probe (cache mode 19, only with `ShowStats`) measures every frame, at a quarter of the frame, the
+regional light of the edit on screen -- the 12 px tent of log2(shown / untouched) -- against last frame's
+moved here, where the frame's own surroundings stayed put, and the detail around it. The CPU sorts the
+frames by how long since the model ran and logs it every 240 frames (`DLSS-NR pulse ...`); the overlay
+shows the frame the model ran on against the others.
+
+Control, still view, 8 frames between runs, step of the regional light in stops per frame:
+
+| | the model's frame | the others |
+|---|---:|---:|
+| model every frame (reference) | 0.0018 | 0.0018 |
+| before | 0.0023-0.0027 | 0.0012-0.0015 |
+| fingerprint off | 0.0015 | 0.0013-0.0018 |
+| soft refresh, high band without decay | 0.0013-0.0014 | 0.0014-0.0018 |
+
+The frame the model ran on moved twice as much as the others. Neither a stronger luminance stability, a
+dead band on the regional light, the fingerprint's tolerance (0.25 to 1 stop), its context term, a doubt
+that had to hold two frames, nor keeping the edit where the fingerprint rejected two intervals running
+changed it; turning the fingerprint off removed it. An observation dump (`dlssnr-cacheobserve.trigger`, the
+manifest now says how many frames since the model ran each one is) and `tools/dlssnr_cache/measure_pulse.py`
+located it: almost all of the excess sat on things that move without motion vectors -- a paper in the wind,
+debris, the character's hands. Their carried edit is the background's, so the fingerprint drops it, rightly,
+and the region's light stands in; the model's run then gave them their own answer for one frame, and the
+frame after they lost it again. A flash on every run.
+
+`CacheSoftRefresh` (with the crossfade, on by default): a pixel with nothing carried to walk from walks to
+the model's answer from what was on screen -- last frame's edit, the temporal stabiliser's, read at the
+history's taps where they hold this surface, and at the pixel itself where they do not, the view is still
+and the surface is no farther than last frame's (something came in front). Where the background reappears it
+takes the answer at once, as before: walking from what stood there would drag its light along. The pan
+captures show no trail.
+
+With that, the high band no longer needs to fade between runs (`CacheHighDecay` 0.97 to 1): the detail went
+from 0.0493 falling to 0.0480 over the interval to 0.0522-0.0516, flat, 6% more, with no cost to the pulse.
+
 ## Model in the background (`CacheAsync`)
 
 Off by default. On, the model runs on a COMPUTE queue of ours instead of inside the game's frame:
@@ -256,6 +295,8 @@ luma. `tools/dlssnr_cache/measure_reprojection.py` replays the shader's algorith
 mirror is `nrcache_common.py` -- keep the two in step) and reports, for lags 1/2/4/8, edit error, PSNR
 and the share of Neural Rendering's effect kept, globally and in unstable zones, against no edit, naive
 reprojection and low band only.
+
+The pulse probe and observation dumps: see *The light pulsing at long intervals*.
 
 ## Known limits
 

@@ -207,6 +207,12 @@ struct CacheStatus
     unsigned long long asyncLanded = 0; // answers laid down so far
     const char* asyncWhy = "";         // why it is not running, when it is asked for
 
+    // The pulse probe (ShowStats): the regional step of the edit on screen, in stops, by frame since the model
+    // ran (index 0 is the frame it ran on), over the last measured stretch.
+    static constexpr int kPulsePhases = 16;
+    float pulseStep[kPulsePhases] = {};
+    unsigned int pulsePhases = 0;
+
     // GPU time of the cache's own passes (ms, -1 when not measured: only while ShowStats is on).
     static constexpr int kStages = 7;
     double stageMs[kStages] = { -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0 };

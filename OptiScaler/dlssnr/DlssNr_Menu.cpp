@@ -369,13 +369,14 @@ void RenderMenu(Config* config, float menuResScale)
                 config->DlssNrCacheInterval = interval;
                 config->DlssNrCacheAdaptive = interval > 1;
                 config->DlssNrCacheAdaptiveThreshold = 0.10f;
-                config->DlssNrCacheHighDecay = 0.97f;
+                config->DlssNrCacheHighDecay = 1.0f;
                 config->DlssNrCacheDepthTolerance = 0.10f;
                 config->DlssNrCacheColourTolerance = 0.50f;
                 config->DlssNrCacheRefreshBlend = 1.0f;
                 config->DlssNrCacheModelHistory = 1u;
                 config->DlssNrCacheBilateral = true;
                 config->DlssNrCacheCrossfade = true;
+                config->DlssNrCacheSoftRefresh = true;
                 config->DlssNrCacheStabilize = 0.5f;
                 config->DlssNrCacheDespeckle = true;
                 config->DlssNrCacheTemporal = temporal;
@@ -756,6 +757,21 @@ void RenderMenu(Config* config, float menuResScale)
                            "\nintervals (measured: -48% at 3 frames, -68% at 5). Nothing is averaged: the model's"
                            "\nanswer is always reached in full.");
 
+                if (crossfade)
+                {
+                    ScopedIndent softIndent {};
+                    bool softRefresh = config->DlssNrCacheSoftRefresh.value_or_default();
+
+                    if (ImGui::Checkbox("Soft refresh", &softRefresh))
+                        config->DlssNrCacheSoftRefresh = softRefresh;
+
+                    HelpMarker("Things that move without motion vectors -- paper in the wind, debris, a hand -- have"
+                               "\nno carried edit to walk from: they showed the region's light between runs, took"
+                               "\nthe model's answer at once on the frame it ran, and lost it the next. At long"
+                               "\nintervals that is a flash on every run, and most of what moved on that frame."
+                               "\n\nOn: they walk to the answer from what was on screen, like everything else.");
+                }
+
                 float temporal = config->DlssNrCacheTemporal.value_or_default();
 
                 if (ImGui::SliderFloat("Temporal stability", &temporal, 0.0f, 0.9f, temporal <= 0.0f ? "off" : "%.2f"))
@@ -890,6 +906,7 @@ void RenderMenu(Config* config, float menuResScale)
                         HelpMarker("How far outside its neighbourhood's range the frame may move before the carried"
                                    "\nedit is doubted; at twice this it is dropped. Lower rejects sooner (fewer trails,"
                                    "\nmore of the frame on the broad edit between runs).");
+
                     }
 
                     bool fill = config->DlssNrCacheSurfaceFill.value_or_default();
@@ -2107,6 +2124,27 @@ void RenderOverlay(float alpha)
                 if (cs.asyncOn)
                     ImGui::TextDisabled("Model in the background: %.2f ms on its own queue, lands 2 frames later (%llu so far)",
                                         cs.asyncModelMs, cs.asyncLanded);
+
+                // The pulse probe: how much the edit's regional light moves on the frame the model runs against the
+                // others (the light pulsing at long intervals is the first above the rest).
+                if (cs.pulsePhases > 1)
+                {
+                    float others = 0.0f;
+                    int n = 0;
+
+                    for (unsigned int i = 1; i < cs.pulsePhases; ++i)
+                    {
+                        if (cs.pulseStep[i] >= 0.0f)
+                        {
+                            others += cs.pulseStep[i];
+                            ++n;
+                        }
+                    }
+
+                    if (n > 0 && cs.pulseStep[0] >= 0.0f)
+                        ImGui::TextDisabled("Light steadiness: %.4f stop on the model's frame, %.4f on the others (%.2fx)",
+                                            cs.pulseStep[0], others / n, cs.pulseStep[0] / std::max(others / n, 1e-6f));
+                }
             }
         }
     }

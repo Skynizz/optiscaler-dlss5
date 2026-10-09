@@ -369,6 +369,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrCacheFingerprint.set_from_config(readBool("DlssNr", "CacheFingerprint"));
             DlssNrCacheContext.set_from_config(readBool("DlssNr", "CacheContext"));
             DlssNrCacheFingerprintTolerance.set_from_config(readFloat("DlssNr", "CacheFingerprintTolerance"));
+            DlssNrCacheSoftRefresh.set_from_config(readBool("DlssNr", "CacheSoftRefresh"));
             DlssNrCacheSurfaceFill.set_from_config(readBool("DlssNr", "CacheSurfaceFill"));
             DlssNrCacheCrossfadeFrames.set_from_config(readUInt("DlssNr", "CacheCrossfadeFrames"));
             DlssNrCacheGuided.set_from_config(readBool("DlssNr", "CacheGuided"));
@@ -1316,6 +1317,8 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "CacheContext", GetBoolValue(Instance()->DlssNrCacheContext.value_for_config()).c_str());
     ini.SetValue("DlssNr", "CacheFingerprintTolerance",
                  GetFloatValue(Instance()->DlssNrCacheFingerprintTolerance.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "CacheSoftRefresh",
+                 GetBoolValue(Instance()->DlssNrCacheSoftRefresh.value_for_config()).c_str());
     ini.SetValue("DlssNr", "CacheSurfaceFill",
                  GetBoolValue(Instance()->DlssNrCacheSurfaceFill.value_for_config()).c_str());
     ini.SetValue("DlssNr", "CacheCrossfadeFrames",

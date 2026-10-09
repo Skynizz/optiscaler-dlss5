@@ -704,6 +704,8 @@ void CheckCaptureTrigger()
             else if (k == "CacheCrossfade") c->DlssNrCacheCrossfade = b;
             else if (k == "CacheTemporal") c->DlssNrCacheTemporal = v;
             else if (k == "CacheLowTemporal") c->DlssNrCacheLowTemporal = v;
+            else if (k == "CacheSoftRefresh") c->DlssNrCacheSoftRefresh = b;
+            else if (k == "CacheDebugView") c->DlssNrCacheDebugView = (uint32_t) v;
             else if (k == "CacheModelHistory") c->DlssNrCacheModelHistory = (uint32_t) v;
             else if (k == "CacheDumpFrames") c->DlssNrCacheDumpFrames = (uint32_t) v;
             else if (k == "WhitePointSource") c->DlssNrWhitePointSource = (uint32_t) v;
@@ -5643,6 +5645,12 @@ CacheStatus GetCacheStatus()
     s.costCached = c.costCached;
 
     static_assert(CacheStatus::kStages == DlssNrEditCache_Dx12::Status::kStages);
+    static_assert(CacheStatus::kPulsePhases == DlssNrEditCache_Dx12::Status::kPulsePhases);
+
+    s.pulsePhases = c.pulsePhases;
+
+    for (int i = 0; i < CacheStatus::kPulsePhases; ++i)
+        s.pulseStep[i] = c.pulseStep[i];
 
     for (int i = 0; i < CacheStatus::kStages; ++i)
     {

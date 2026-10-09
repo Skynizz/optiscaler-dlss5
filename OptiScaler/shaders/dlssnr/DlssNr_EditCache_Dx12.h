@@ -105,6 +105,13 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
         double costRefresh = 0.0;         // the pass on a frame the model runs, ms
         double costCached = 0.0;          // the pass on a cached frame, ms
 
+        // The pulse probe (ShowStats): the regional step of the edit on screen by frame since the model ran
+        // (stop, mean over the last measured stretch; negative where there was none), and its detail.
+        static constexpr int kPulsePhases = 16;
+        float pulseStep[kPulsePhases] = {};
+        float pulseDetail[kPulsePhases] = {};
+        unsigned int pulsePhases = 0; // how many of the above were measured
+
         // GPU time of the cache's own passes, ms, smoothed; negative when not measured.
         static constexpr int kStages = 7;
         double stageMs[kStages] = { -1.0, -1.0, -1.0, -1.0, -1.0, -1.0, -1.0 };
@@ -222,6 +229,7 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
     bool _finalValid = false;
     float _temporal = 0.5f;
     float _lowTemporal = 0.95f;
+    bool _softRefresh = false;
 
     // Anti light pop-in: this frame's bound on the regional edit's step, from the rate and the real frame
     // time (0 is off).
@@ -317,6 +325,30 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
     double _stageMs[Status::kStages] = {};
     bool _stageSeen[Status::kStages] = {};
 
+    // The pulse probe: a quarter-size regional light of the edit on screen (this frame's and last frame's), its
+    // per-frame sums, and their readback, sorted by frame since the model ran when they come home.
+    static constexpr unsigned int kPulseSlots = 8;
+    ID3D12Resource* _pulse[2] = {};
+    unsigned int _pulseCur = 0;
+    bool _pulsePrevValid = false;
+    unsigned long long _pulsePrevFrame = 0;
+    ID3D12Resource* _pulseStats = nullptr;
+    ID3D12Resource* _pulseReadback[kPulseSlots] = {};
+    unsigned long long _pulseFrame[kPulseSlots] = {};
+    unsigned int _pulsePhase[kPulseSlots] = {};
+    unsigned int _pulseSlot = 0;
+    double _pulseSum[Status::kPulsePhases] = {};
+    double _pulseWeight[Status::kPulsePhases] = {};
+    double _pulseDetailSum[Status::kPulsePhases] = {};
+    unsigned int _pulseDetailCount[Status::kPulsePhases] = {};
+    unsigned int _pulseMeasured = 0;
+    float _pulseShownStep[Status::kPulsePhases] = {};
+    float _pulseShownDetail[Status::kPulsePhases] = {};
+    unsigned int _pulseShownPhases = 0;
+    void PulseProbe(ID3D12GraphicsCommandList* cmd, ID3D12Resource* target, ID3D12Resource* original,
+                    const DlssNrCacheInputs& in);
+    void ConsumePulse();
+
     void StampBegin(ID3D12GraphicsCommandList* cmd);
     void Stamp(ID3D12GraphicsCommandList* cmd, int stage);
     void StampEnd(ID3D12GraphicsCommandList* cmd);
@@ -382,6 +414,7 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
         ID3D12Resource* readback[3] = {}; // frame, model's frame, geometry
         D3D12_PLACED_SUBRESOURCE_FOOTPRINT layout[3] = {};
         float whitePoint = 1.0f;
+        unsigned int sinceRun = 0; // frames since the model ran (0: it ran on this one)
     };
 
     unsigned int _dumpWanted = 0;

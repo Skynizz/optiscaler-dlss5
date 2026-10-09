@@ -7,6 +7,7 @@ required, scipy is optional.
 |---|---|
 | `measure_reprojection.py <dump>` | How well a carried edit matches the real one 1/2/4/8 frames on, globally and in unstable zones (rejected history, foliage-like texture), for: no edit, naive reprojection, low band only, and the shader's own algorithm. |
 | `measure_ghosting.py <dump> [<dump>...] [--interval 8] [--half]` | Runs the cache through a dump at a fixed cadence (crossfade included) with the anti-ghosting switches off and on, and compares every shown frame with the model's real answer: mean error, strongest trails, where the carried edit hurts, effect kept. |
+| `measure_pulse.py <observation dump> <out>` | Where the light on screen jumps on the frames the model ran: the regional step by frame since the model ran, and a map of the excess. Needs an observation dump (`dlssnr-cacheobserve.trigger`), not a measurement one. |
 | `calibrate_multipass.py --orig --one --two` | Fits `CacheLowGain` / `CacheHighGain` from one-pass and two-pass captures of a held frame. |
 | `make_synthetic_dump.py <out>` | A synthetic dump (panning background, occluding foreground, wind-blown "grass") to test the tools without a game. |
 | `nrcache_common.py` | The numpy mirror of `dlssnr_cache.hlsl`. Keep it in step with the shader. |

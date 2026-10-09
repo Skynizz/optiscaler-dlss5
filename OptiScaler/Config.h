@@ -541,7 +541,7 @@ class Config
     CustomOptional<float> DlssNrCacheDepthTolerance { 0.10f };
     CustomOptional<float> DlssNrCacheColourTolerance { 0.50f };
     // How much of the high band's confidence survives each cached frame.
-    CustomOptional<float> DlssNrCacheHighDecay { 0.97f };
+    CustomOptional<float> DlssNrCacheHighDecay { 1.0f };
     // On a refresh, the share of the model's new edit taken (1 = all; lower smooths the refresh).
     CustomOptional<float> DlssNrCacheRefreshBlend { 1.0f };
     // Multi-pass approximation: gains on the low and high bands of the edit, in log space.
@@ -558,6 +558,10 @@ class Config
     // Keyframe crossfade: between model runs, walk the shown edit toward the model's latest answer so it
     // arrives exactly at the next run -- no step when the model runs, nothing averaged away.
     CustomOptional<bool> DlssNrCacheCrossfade { true };
+    // Soft refresh (with the crossfade): a pixel without a carried edit (rejected by the fingerprint, or moved
+    // in without motion vectors) walks to the model's answer from what was on screen, instead of taking it at
+    // once on the frame the model runs and losing it the next. false is as before.
+    CustomOptional<bool> DlssNrCacheSoftRefresh { true };
     // Temporal stabiliser: the weight of last frame's edit, reprojected and clamped to this frame's local
     // range (TAA-style variance clipping). Averages out flicker and specks without trails. 0 is off.
     CustomOptional<float> DlssNrCacheTemporal { 0.5f };

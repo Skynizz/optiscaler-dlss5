@@ -107,6 +107,11 @@ F6 in game to see the real number.
   GPU queue of its own, in parallel with the game's next frame, and its answer is laid down two frames later.
   At 8 frames between runs (Control, 4070): frame pacing halved, 1% lows +14%, slightly faster. No gain at
   3 frames between runs.
+- **Steady light at long intervals**: at 8 frames between runs the light seemed to pulse with the model.
+  Measured frame by frame, the frame the model ran on moved twice as much as the others, almost all of it on
+  things that move without motion vectors (paper, debris, hands) that got the model's answer for one frame.
+  They now fade to it like everything else (soft refresh), and the fine detail no longer fades between runs:
+  the model's frame moves no more than the others, with 6% more detail.
 - **Light pop-in smoothing**: when a light enters the frame, the model re-grades the whole picture at once.
   Where the game's own image did not change, that change now fades in (1.5 stops/s by default) instead of
   landing in one frame; real light changes still pass at once.
