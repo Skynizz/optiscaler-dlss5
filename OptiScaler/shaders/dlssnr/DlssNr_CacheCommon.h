@@ -194,4 +194,8 @@ struct alignas(256) DlssNrCacheConstants
     // Soft refresh: with the keyframe crossfade, a pixel without a carried edit starts the walk to the model's
     // answer from what was on screen (0 is as before: the answer at once). Last frame's edit is at t6.
     uint32_t SoftRefresh;
+
+    // Soft reveal: with the soft refresh, the background reappearing behind something that moved, and anything
+    // moving with nothing carried, walk from last frame's regional light instead of taking the answer at once.
+    uint32_t SoftReveal;
 };

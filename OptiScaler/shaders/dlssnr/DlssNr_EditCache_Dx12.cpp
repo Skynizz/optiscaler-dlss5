@@ -579,6 +579,7 @@ bool DlssNrEditCache_Dx12::BeginFrame(const Config& cfg, ID3D12Device* device, u
     _noiseAware = cfg.DlssNrCacheNoiseAware.value_or_default();
     _lowTemporal = std::clamp(cfg.DlssNrCacheLowTemporal.value_or_default(), 0.0f, 0.95f);
     _softRefresh = cfg.DlssNrCacheSoftRefresh.value_or_default();
+    _softReveal = cfg.DlssNrCacheSoftReveal.value_or_default();
 
     // Anti light pop-in: a rate in stops per second, turned into this frame's step with the real time
     // between frames (smoothed), so the fade takes the same time at 40 fps as at 120.
@@ -931,6 +932,7 @@ DlssNrCacheConstants DlssNrEditCache_Dx12::BaseConstants(const DlssNrCacheInputs
     c.Temporal = _debugView == 0 ? _temporal : 0.0f;
     c.LowTemporal = _lowTemporal;
     c.SoftRefresh = _softRefresh ? 1u : 0u;
+    c.SoftReveal = 0u;
     c.TemporalValid = _finalValid ? 1u : 0u;
     c.JitterDeltaX = in.jitterDeltaX;
     c.JitterDeltaY = in.jitterDeltaY;
@@ -1557,6 +1559,7 @@ bool DlssNrEditCache_Dx12::CaptureRefresh(ID3D12GraphicsCommandList* cmd, ID3D12
     // carried to walk from.
     ID3D12Resource* shown = (_softRefresh && _crossfadeOn && _finalValid) ? _finalHist[_finalCur] : nullptr;
     c.SoftRefresh = shown != nullptr ? 1u : 0u;
+    c.SoftReveal = shown != nullptr && _softReveal ? 1u : 0u;
     Barrier(cmd, shown, kUav, kSrv);
     {
         ID3D12Resource* srv[kSrvCount] = { _histEdit[prev], _histGuide[prev], original, in.depth,

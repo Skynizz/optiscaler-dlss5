@@ -205,6 +205,17 @@ captures show no trail.
 With that, the high band no longer needs to fade between runs (`CacheHighDecay` 0.97 to 1): the detail went
 from 0.0493 falling to 0.0480 over the interval to 0.0522-0.0516, flat, 6% more, with no cost to the pulse.
 
+`CacheSoftReveal` (on by default, with the soft refresh). The soft refresh still let two cases take the answer
+at once: the background reappearing behind something that moved, and anything moving with nothing carried.
+Foliage in the wind does both all the time, so in The Last of Us (forest, x8, still camera) the observation
+dumps put almost all of what jumped on the model's frame on the leaves. Those pixels now walk from last frame's
+regional light (a 12 px tent of what was on screen around the spot, too broad to drag along the light of the
+leaf that moved away). Two observation dumps on and off in turns, plus four earlier ones off: the 99th
+percentile of the excess step on the model's frame 0.0038-0.0071 stop off, 0.0012-0.0015 on, and the model's
+frame no longer brightens on average (+0.0003 to +0.0007 stop off, -0.0001 on). Holding the regional light for
+the whole interval instead of walking was tried and was not reliably better (0.0015 and 0.0050). The periodic
+swing over moving foliage is dominated by the wind itself: the model on every frame gives the largest.
+
 ## Model in the background (`CacheAsync`)
 
 Off by default. On, the model runs on a COMPUTE queue of ours instead of inside the game's frame:
