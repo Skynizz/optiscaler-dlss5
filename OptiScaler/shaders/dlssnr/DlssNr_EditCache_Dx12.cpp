@@ -1219,9 +1219,12 @@ void DlssNrEditCache_Dx12::ApplyPass(ID3D12GraphicsCommandList* cmd, ID3D12Resou
     if (!surface)
         c.GhostFlags &= ~DlssNrCacheGhost_SurfaceFill;
 
-    // Mode 10 runs for the temporal stabiliser and for the anti pop-in, which live in the same pass (the
-    // latter also before the upscaler, where the former stands aside).
-    const bool stabilise = c.Temporal > 0.0f || c.AntiPopStep > 0.0f;
+    // Mode 10 runs for the temporal stabiliser, the anti pop-in and the luminance stability, which live in the
+    // same pass. Before the upscaler the stabiliser stands aside, but the luminance stability was meant to stay
+    // (it is too broad to care about the jitter) -- and it only ran when the anti pop-in did. With that off (the
+    // x8 preset) the whole picture's light jumped on every model run: 0.018 stop against 0.004 on the other
+    // frames (The Last of Us, pre-SR, 8 frames between runs). CacheLowTemporal 0 is the pass as before.
+    const bool stabilise = c.Temporal > 0.0f || c.AntiPopStep > 0.0f || c.LowTemporal > 0.0f;
     const bool guided = _guidedNow && c.DebugView == 0 && _guideSum[0] != nullptr && meta != nullptr;
 
     if (!guided)
