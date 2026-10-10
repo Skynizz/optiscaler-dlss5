@@ -653,6 +653,7 @@ bool DlssNrEditCache_Dx12::BeginFrame(const Config& cfg, ID3D12Device* device, u
     _motionPriority = std::clamp(cfg.DlssNrCacheMotionPriority.value_or_default(), 0.0f, 1.0f);
     _budgetMs = std::clamp(cfg.DlssNrCacheBudgetMs.value_or_default(), 0.0f, 100.0f);
     _stillMax = std::clamp(cfg.DlssNrCacheStillMax.value_or_default(), 4u, 16u);
+    _stillHold = cfg.DlssNrCacheStillHold.value_or_default();
 
     const unsigned int interval = std::max(std::clamp(cfg.DlssNrCacheInterval.value_or_default(), 1u, 16u), intervalFloor);
     const bool adaptive = cfg.DlssNrCacheAdaptive.value_or_default();
@@ -741,9 +742,18 @@ unsigned int DlssNrEditCache_Dx12::SpeedInterval(unsigned int interval)
 
     _floorNow = minimum;
     unsigned int wanted = interval;
+    const unsigned int still = std::max(interval, std::min(interval * 2u, _stillMax));
 
-    if (_speed >= 0.0f && _speed < 0.25f * ref)
-        wanted = std::max(interval, std::min(interval * 2u, _stillMax));
+    // StillHold. A still view is not motionless: a character breathes, papers and debris drift, and their
+    // motion lifts the frame's mean above the threshold now and then (Control, camera at rest: 0.0 to 0.4 px/f
+    // against 0.21). With one threshold each of those readings restarted the 20 frames the longer interval
+    // waits for, so Balanced never got there, and three of them were enough to leave it. Held, the view
+    // enters below a quarter of the reference pace, leaves only above three quarters, and a reading that
+    // disagrees takes a frame off the count instead of starting it again.
+    const bool holding = _stillHold && still > interval && _speedInterval == still;
+
+    if (_speed >= 0.0f && _speed < (holding ? 0.75f : 0.25f) * ref)
+        wanted = still;
     else if (_speed >= 0.0f)
         wanted = std::clamp((unsigned int) std::lround((float) interval * ref / std::max(_speed, ref)), minimum, interval);
 
@@ -752,8 +762,15 @@ unsigned int DlssNrEditCache_Dx12::SpeedInterval(unsigned int interval)
 
     if (wanted == _speedInterval)
     {
-        _speedCandidate = wanted;
-        _speedFrames = 0;
+        if (_stillHold && _speedCandidate == still && still > _speedInterval && _speedFrames > 0)
+        {
+            --_speedFrames;
+        }
+        else
+        {
+            _speedCandidate = wanted;
+            _speedFrames = 0;
+        }
     }
     else
     {

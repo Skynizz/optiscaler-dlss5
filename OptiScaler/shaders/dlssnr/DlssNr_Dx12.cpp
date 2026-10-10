@@ -734,6 +734,7 @@ void CheckCaptureTrigger()
             else if (k == "CacheMotionPriority") c->DlssNrCacheMotionPriority = v;
             else if (k == "CacheBudgetMs") c->DlssNrCacheBudgetMs = v;
             else if (k == "CacheStillMax") c->DlssNrCacheStillMax = (uint32_t) v;
+            else if (k == "CacheStillHold") c->DlssNrCacheStillHold = b;
             else if (k == "CacheAntiPop") c->DlssNrCacheAntiPop = b;
             else if (k == "CacheAntiPopRate") c->DlssNrCacheAntiPopRate = v;
             else

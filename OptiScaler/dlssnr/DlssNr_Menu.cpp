@@ -395,6 +395,7 @@ void RenderMenu(Config* config, float menuResScale)
                 config->DlssNrCacheMotionPriority = 0.5f;
                 config->DlssNrCacheBudgetMs = 0.0f;
                 config->DlssNrCacheStillMax = 8u;
+                config->DlssNrCacheStillHold = true;
                 config->DlssNrPasses = 1u;
                 config->DlssNrPreSr = preSr;
                 config->DlssNrWorkingScale = scale;
@@ -1039,6 +1040,17 @@ void RenderMenu(Config* config, float menuResScale)
 
                         HelpMarker("When the camera stands still nothing ghosts: dialogue, aiming, standing about can"
                                    "\nrun the model this rarely. 8 is as before.");
+
+                        bool stillHold = config->DlssNrCacheStillHold.value_or_default();
+
+                        if (ImGui::Checkbox("Hold the still interval", &stillHold))
+                            config->DlssNrCacheStillHold = stillHold;
+
+                        HelpMarker("A still view is never quite motionless: a character breathes, papers and debris"
+                                   "\ndrift, and their motion crosses the standing-still threshold now and then. On,"
+                                   "\nthe still interval holds until the view clearly moves (three times the speed it"
+                                   "\nentered at). Off is one threshold, as before: in Control, Balanced standing still"
+                                   "\nran the model on 44% of frames instead of 25%.");
                     }
 
                     if (!adaptive)

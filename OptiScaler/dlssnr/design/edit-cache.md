@@ -137,6 +137,16 @@ reach 90-95% at x8 for about the cost of the pre-SR Quality preset, so the caden
   floor at once, motion priority then spends it. Measured in Control: 8.8 ms with the model, 1.85 ms
   without, budget 3 ms: every 7 frames, 2.8-3.0 ms.
 * `CacheStillMax` (4-16, default 8): the longest interval standing still.
+* `CacheStillHold` (default on): a still view is not motionless -- a character breathes, papers and debris
+  drift -- and their motion lifts the frame's mean speed above the standing-still threshold now and then
+  (Control, camera at rest: 0.0 to 0.4 px/f against 0.21 at 1440p). With one threshold each such reading
+  restarted the 20 frames the still interval waits for, so in Control Balanced never reached it: the model ran
+  on 44-46% of frames instead of 25% (v1.1.0's rejection-based regime got there). Held, the view enters the
+  still regime below a quarter of the reference pace and leaves it only above three quarters, and a reading
+  that disagrees takes a frame off the count instead of restarting it. Off is the single threshold. Measured
+  on and off in turns, same session: Control Balanced 3.64 ms against 5.08 (model on 25% against 46%, 24.9
+  against 23.9 FPS), Performance the same (pre-SR falls back there); The Last of Us, already still with one
+  threshold, unchanged (3.79 / 3.78 ms); x8 unchanged (already at `CacheStillMax`).
 
 ## Anti light pop-in (`CacheAntiPop`, `CacheAntiPopRate`)
 

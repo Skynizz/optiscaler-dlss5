@@ -300,6 +300,7 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
     float _motionPriority = 0.0f;
     bool _noiseAware = true;
     unsigned int _stillMax = 8;
+    bool _stillHold = true;
     float _budgetMs = 0.0f;
     double _costRefresh = 0.0;
     double _costCached = 0.0;

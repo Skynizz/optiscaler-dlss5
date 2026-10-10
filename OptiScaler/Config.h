@@ -628,6 +628,10 @@ class Config
     // With CacheAdaptiveSpeed: the longest interval while the camera stands still (4-16). Nothing moves, so
     // nothing ghosts -- dialogue, aiming, standing about cost the model this rarely. 8 is as before.
     CustomOptional<uint32_t> DlssNrCacheStillMax { 8 };
+    // With CacheAdaptiveSpeed: the still interval holds through the small motion a still view keeps -- a
+    // character breathing, papers and debris drifting. Off is the single threshold as before, which those
+    // readings kept crossing (Control: Balanced never reached its still interval).
+    CustomOptional<bool> DlssNrCacheStillHold { true };
     // Noise-aware checks: the colour test compares last frame with this frame's 3x3 range instead of the
     // pixel alone, and the anti-flicker (CacheStabilize) fades in with trust and soft-limits instead of
     // switching on and clamping. Path-traced and Ray Reconstruction shadows are noisy enough that the old
