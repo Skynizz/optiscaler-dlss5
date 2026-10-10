@@ -401,6 +401,11 @@ void RenderMenu(Config* config, float menuResScale)
                 config->DlssNrWorkingScale = scale;
                 config->DlssNrJbuUpsample = scale < 0.999f;
                 config->DlssNrTransfer = 1u;
+                // The x8 preset turns these off; every other preset puts them back.
+                config->DlssNrPreSrReduced = false;
+                config->DlssNrCacheFingerprint = true;
+                config->DlssNrCacheSurfaceFill = true;
+                config->DlssNrCacheAntiPop = true;
                 DlssNr::SetCompareMode(DlssNr::CompareMode::Yours);
             };
 
@@ -444,6 +449,22 @@ void RenderMenu(Config* config, float menuResScale)
             if (ImGui::SmallButton("Performance"))
                 preset(2, 0.67f, 0.5f, true);
 
+            ImGui::SameLine();
+
+            // Frame rate first: the model every 8th frame, before the upscaler and reduced to half the render
+            // resolution, so the frame it runs on is cheap and the frame times stay even; the anti-ghosting
+            // fingerprint, the same-surface fill and the light pop-in smoothing off. The Last of Us (RTX 4070,
+            // 1440p): 77.3 fps against 66.7 for x8 after the upscaler, frame-time swing 1.8 ms against 2.3 (p99
+            // 6.1 against 8.9). Where pre-SR cannot run it falls back after the upscaler, model at 50%.
+            if (ImGui::SmallButton("x8"))
+            {
+                preset(8, 0.5f, 0.5f, true);
+                config->DlssNrPreSrReduced = true;
+                config->DlssNrCacheFingerprint = false;
+                config->DlssNrCacheSurfaceFill = false;
+                config->DlssNrCacheAntiPop = false;
+            }
+
             HelpMarker("Starting points -- each sets the controls below, which stay editable. Measured in"
                        "\nControl (RTX 4070, 1440p, DLSS Balanced, frames the game renders). Vanilla: 34 fps,"
                        "\nflicker 0.6%, detail added x1.11:"
@@ -457,6 +478,9 @@ void RenderMenu(Config* config, float menuResScale)
                        "\n  Balanced     after the upscaler, 67%, every other frame: 48 fps -- for games"
                        "\n               where pre-SR cannot run"
                        "\n  Performance  pre-SR, every other frame: 55 fps, most of the detail (x1.09)"
+                       "\n  x8           frame rate first: pre-SR at half the render resolution, every 8th frame,"
+                       "\n               no anti-ghosting -- The Last of Us: 77 fps against 67 for x8 after the"
+                       "\n               upscaler, and steadier frame times"
                        "\n\nWith frame generation, pick the one that keeps the game's own frame rate above ~45"
                        "\nfps and keep the generation factor modest (x2-x3): generated frames are only as"
                        "\nclean as the real frames they are built from.");
@@ -480,6 +504,20 @@ void RenderMenu(Config* config, float menuResScale)
                        "\ntemporal accumulation steadies what the model adds. Model resolution and edge-aware"
                        "\nenlargement do not apply: the render resolution is already reduced."
                        "\n\nD3D12 games that go through DLSS Super Resolution. Switching rebuilds the model once.");
+
+            if (placement == 1)
+            {
+                ScopedIndent reducedIndent {};
+                bool reduced = config->DlssNrPreSrReduced.value_or_default();
+
+                if (ImGui::Checkbox("Reduced model before the upscaler", &reduced))
+                    config->DlssNrPreSrReduced = reduced;
+
+                HelpMarker("Runs the model at the model resolution below (with the edge-aware enlargement) on the"
+                           "\nrender-resolution colour too, instead of at the whole of it. The frame the model"
+                           "\nruns on costs less: with long intervals the game is faster and its frame times"
+                           "\nsteadier. Off is the model at the whole render resolution, as before.");
+            }
 
             // The model's look. Moved up from the Model section: it changes the picture more than any
             // other single setting, and it is the first thing to match when comparing with RenoDX.

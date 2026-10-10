@@ -292,6 +292,10 @@ class Config
     // upscales the result -- the model works on far fewer pixels. Off runs it after the upscaler, as
     // it always has.
     CustomOptional<bool> DlssNrPreSr { false };
+    // Before the upscaler, the model at WorkingScale of the render resolution too (with the edge-aware
+    // enlargement) instead of the whole of it: the frame the model runs on costs less, so long intervals are
+    // both faster and steadier. Off is the model at the whole render resolution, as before.
+    CustomOptional<bool> DlssNrPreSrReduced { false };
     CustomOptional<uint32_t> DlssNrPreset { 0 };
     CustomOptional<float> DlssNrIntensity { 1.0f };
     // 0 default (standard), 1 natural, 2 cinematic -- the model's own processing profiles.

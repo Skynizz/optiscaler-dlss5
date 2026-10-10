@@ -205,6 +205,28 @@ captures show no trail.
 With that, the high band no longer needs to fade between runs (`CacheHighDecay` 0.97 to 1): the detail went
 from 0.0493 falling to 0.0480 over the interval to 0.0522-0.0516, flat, 6% more, with no cost to the pulse.
 
+## x8 for frame rate (`PreSrReduced`, the x8 preset)
+
+At 8 frames between runs the cost is uneven: the frame the model runs on costs about 9 ms after the upscaler at
+1440p, the seven others 2.2 ms, and that swing is what shows as an uneven frame rate. Before the upscaler every
+cache pass works on the render resolution, and `PreSrReduced` (off by default; off = the model at the whole render
+resolution, as before) also runs the model at `WorkingScale` of it, enlarged edge-aware, so the heavy frame is
+much lighter. The menu's x8 preset: interval 8, adaptive, pre-SR, `PreSrReduced`, model at 50%, fingerprint,
+same-surface fill and light pop-in smoothing off (where pre-SR cannot run it falls back after the upscaler at 50%).
+
+The Last of Us (RTX 4070, 1440p, still view), built-in benchmark:
+
+| x8 | FPS | DLSS 5 cost | frame-time swing (p99) |
+|---|---:|---:|---:|
+| after the upscaler, 67%, all switches on | 66.7-67.6 | 2.95 ms | 2.3 ms (8.9) |
+| pre-SR, whole render resolution | 70.9 | 1.98 ms | 3.1 ms (8.9) |
+| pre-SR reduced to 67% | 73.0-73.6 | | 2.3-2.5 ms (6.7-7.2) |
+| after the upscaler, 50%, switches off | 70.4 | 2.13 ms | 1.7 ms (6.4) |
+| **x8 preset** (pre-SR reduced to 50%, switches off) | **77.3** | | **1.8 ms (6.1)** |
+
+The price: less micro-detail (x1.04 against x1.18 for x8 after the upscaler) and, without the fingerprint, more
+trailing when the camera moves fast. No artefact in the captures.
+
 ## Model in the background (`CacheAsync`)
 
 Off by default. On, the model runs on a COMPUTE queue of ours instead of inside the game's frame:

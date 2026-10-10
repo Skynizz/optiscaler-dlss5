@@ -712,6 +712,7 @@ void CheckCaptureTrigger()
             else if (k == "WhitePointScale") c->DlssNrWhitePointScale = v;
             else if (k == "WhitePointTrim") c->DlssNrWhitePointTrim = v;
             else if (k == "PreSr") c->DlssNrPreSr = b;
+            else if (k == "PreSrReduced") c->DlssNrPreSrReduced = b;
             else if (k == "Passes") c->DlssNrPasses = (uint32_t) v;
             else if (k == "Style") c->DlssNrStyle = (uint32_t) v;
             else if (k == "JitterSign") g_jitterSign = (int) v;
@@ -2848,8 +2849,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // Capped at 2x: cost grows with the area and NGX acceptance above native is what this probe tests.
     //
     // Pre-SR runs at the render resolution, which the upscaler already made small: the model takes it
-    // whole. The comparison key's vanilla mode is the model at full size.
-    float workScale = g_preSrDispatch ? 1.0f : EffWorkScale(cfg);
+    // whole -- unless PreSrReduced asks for the working scale there too, for the cheapest frame with the model
+    // (long intervals: faster, and steadier frame times). The comparison key's vanilla mode is the model at
+    // full size.
+    float workScale = g_preSrDispatch && !cfg.DlssNrPreSrReduced.value_or_default() ? 1.0f : EffWorkScale(cfg);
     workScale = workScale < 0.25f ? 0.25f : (workScale > 2.0f ? 2.0f : workScale);
     const auto workWidth = (unsigned int) (width * workScale + 0.5f);
     const auto workHeight = (unsigned int) (height * workScale + 0.5f);

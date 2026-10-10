@@ -297,6 +297,7 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrCompareKey.set_from_config(readInt("DlssNr", "CompareKey"));
             DlssNrShowStats.set_from_config(readBool("DlssNr", "ShowStats"));
             DlssNrPreSr.set_from_config(readBool("DlssNr", "PreSr"));
+            DlssNrPreSrReduced.set_from_config(readBool("DlssNr", "PreSrReduced"));
             DlssNrTransferStrength.set_from_config(readFloat("DlssNr", "TransferStrength"));
             DlssNrColourStrength.set_from_config(readFloat("DlssNr", "ColourStrength"));
             DlssNrMaxRatio.set_from_config(readFloat("DlssNr", "MaxRatio"));
@@ -1230,6 +1231,7 @@ bool Config::SaveIni()
     }
     ini.SetValue("DlssNr", "ShowStats", GetBoolValue(Instance()->DlssNrShowStats.value_for_config()).c_str());
     ini.SetValue("DlssNr", "PreSr", GetBoolValue(Instance()->DlssNrPreSr.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "PreSrReduced", GetBoolValue(Instance()->DlssNrPreSrReduced.value_for_config()).c_str());
     ini.SetValue("DlssNr", "TransferStrength",
                  GetFloatValue(Instance()->DlssNrTransferStrength.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ColourStrength",
