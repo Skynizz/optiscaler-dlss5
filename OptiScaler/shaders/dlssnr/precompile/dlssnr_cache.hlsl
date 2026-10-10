@@ -67,7 +67,6 @@ cbuffer Params : register(b0)
     uint  gAsyncWarp;       // CacheAsync: the capture reads the background answer carried here by mode 18
     uint  gProbeContext;    // mode 19: this frame's and last frame's surroundings are at t13 / t18
     uint  gSoftRefresh;     // crossfade: a pixel without a carried edit starts the walk from what was on screen
-    uint  gSoftReveal;      // soft refresh: a revealed or moving pixel walks from last frame's regional light
 };
 
 Texture2D<float4>   gHistEdit  : register(t0); // rgb: log2 edit, a: high-band confidence
@@ -1068,29 +1067,6 @@ void CSMain(uint3 id : SV_DispatchThreadID, uint3 gtid : SV_GroupThreadID, uint3
                         if (atTaps || (motionPx < 1.0 && linC <= lastDepth * (1.0 + gDepthTol)))
                         {
                             from = atTaps ? h.shown : gAux1.SampleLevel(gLinear, q, 0).rgb;
-                            a = saturate(gCrossfade);
-                        }
-                        else if (gSoftReveal != 0)
-                        {
-                            // Soft reveal. What is left took the answer at once: the background reappearing behind
-                            // something that moved, and anything moving with nothing carried. Foliage in the wind
-                            // does both all the time -- it keeps uncovering what is behind it, and on the frames in
-                            // between the fingerprint drops its carried edit -- so every run flashed across it
-                            // (The Last of Us: almost all of what jumped on the model's frame). It walks from last
-                            // frame's regional light there instead: the 12 px tent of what was on screen around the
-                            // spot, close to what the region's fill showed it, and too broad to drag the light of
-                            // the thing that moved away along.
-                            const float2 spread = 6.0 / float2(gWidth, gHeight);
-                            float3 regional = 0.0;
-
-                            [unroll] for (int r = 0; r < 9; ++r)
-                            {
-                                const float2 o = float2(r % 3 - 1, r / 3 - 1);
-                                const float wt = (o.x == 0 ? 2.0 : 1.0) * (o.y == 0 ? 2.0 : 1.0) / 16.0;
-                                regional += gAux1.SampleLevel(gLinear, q + o * spread, 0).rgb * wt;
-                            }
-
-                            from = regional;
                             a = saturate(gCrossfade);
                         }
                     }

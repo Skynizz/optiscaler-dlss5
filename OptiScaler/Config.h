@@ -562,10 +562,6 @@ class Config
     // in without motion vectors) walks to the model's answer from what was on screen, instead of taking it at
     // once on the frame the model runs and losing it the next. false is as before.
     CustomOptional<bool> DlssNrCacheSoftRefresh { true };
-    // With the soft refresh: the background reappearing behind something that moved (foliage in the wind), and
-    // anything moving with nothing carried, walk from last frame's regional light instead of taking the model's
-    // answer at once -- which flashed across moving foliage on every run. Off is the soft refresh as before.
-    CustomOptional<bool> DlssNrCacheSoftReveal { true };
     // Temporal stabiliser: the weight of last frame's edit, reprojected and clamped to this frame's local
     // range (TAA-style variance clipping). Averages out flicker and specks without trails. 0 is off.
     CustomOptional<float> DlssNrCacheTemporal { 0.5f };

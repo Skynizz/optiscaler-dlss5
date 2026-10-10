@@ -705,7 +705,6 @@ void CheckCaptureTrigger()
             else if (k == "CacheTemporal") c->DlssNrCacheTemporal = v;
             else if (k == "CacheLowTemporal") c->DlssNrCacheLowTemporal = v;
             else if (k == "CacheSoftRefresh") c->DlssNrCacheSoftRefresh = b;
-            else if (k == "CacheSoftReveal") c->DlssNrCacheSoftReveal = b;
             else if (k == "CacheDebugView") c->DlssNrCacheDebugView = (uint32_t) v;
             else if (k == "CacheModelHistory") c->DlssNrCacheModelHistory = (uint32_t) v;
             else if (k == "CacheDumpFrames") c->DlssNrCacheDumpFrames = (uint32_t) v;

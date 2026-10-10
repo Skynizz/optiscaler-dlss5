@@ -230,7 +230,6 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
     float _temporal = 0.5f;
     float _lowTemporal = 0.95f;
     bool _softRefresh = false;
-    bool _softReveal = true;
 
     // Anti light pop-in: this frame's bound on the regional edit's step, from the rate and the real frame
     // time (0 is off).

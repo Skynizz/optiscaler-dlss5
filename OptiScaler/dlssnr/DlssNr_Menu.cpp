@@ -377,7 +377,6 @@ void RenderMenu(Config* config, float menuResScale)
                 config->DlssNrCacheBilateral = true;
                 config->DlssNrCacheCrossfade = true;
                 config->DlssNrCacheSoftRefresh = true;
-                config->DlssNrCacheSoftReveal = true;
                 config->DlssNrCacheStabilize = 0.5f;
                 config->DlssNrCacheDespeckle = true;
                 config->DlssNrCacheTemporal = temporal;
@@ -772,22 +771,6 @@ void RenderMenu(Config* config, float menuResScale)
                                "\nthe model's answer at once on the frame it ran, and lost it the next. At long"
                                "\nintervals that is a flash on every run, and most of what moved on that frame."
                                "\n\nOn: they walk to the answer from what was on screen, like everything else.");
-
-                    if (!softRefresh)
-                        ImGui::BeginDisabled();
-
-                    bool softReveal = config->DlssNrCacheSoftReveal.value_or_default();
-
-                    if (ImGui::Checkbox("Soft reveal", &softReveal))
-                        config->DlssNrCacheSoftReveal = softReveal;
-
-                    HelpMarker("Foliage in the wind keeps uncovering what is behind it: those pixels have nothing"
-                               "\nto walk from either, and took the model's answer at once on every run -- a flash"
-                               "\nacross the leaves every few frames, standing still or walking."
-                               "\n\nOn: they walk from the region's light on screen just before. Off is as before.");
-
-                    if (!softRefresh)
-                        ImGui::EndDisabled();
                 }
 
                 float temporal = config->DlssNrCacheTemporal.value_or_default();
