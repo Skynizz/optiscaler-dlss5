@@ -1,7 +1,7 @@
 # OptiScaler DLSS 5
 
 <p align="center">
-  <a href="https://github.com/Skynizz/optiscaler-dlss5/releases/download/v1.1.0/OptiScaler-DLSS5-1.1.0-win-x64.zip"><img src="https://img.shields.io/badge/Download-v1.1.0-2ea44f?style=for-the-badge&logo=github" alt="Download"></a>
+  <a href="https://github.com/Skynizz/optiscaler-dlss5/releases/download/v1.2.0/OptiScaler-DLSS5-1.2.0-win-x64.zip"><img src="https://img.shields.io/badge/Download-v1.2.0-2ea44f?style=for-the-badge&logo=github" alt="Download"></a>
   <a href="https://github.com/Skynizz/optiscaler-dlss5/releases"><img src="https://img.shields.io/github/downloads/Skynizz/optiscaler-dlss5/total?style=for-the-badge&label=Downloads&color=blue" alt="Downloads"></a>
   <a href="https://github.com/Skynizz/optiscaler-dlss5/releases/latest"><img src="https://img.shields.io/github/v/release/Skynizz/optiscaler-dlss5?style=for-the-badge&label=Latest" alt="Latest release"></a>
 </p>
@@ -11,6 +11,28 @@ A fork of [OptiScaler](https://github.com/optiscaler/OptiScaler), built on Daghe
 for a fraction of its usual cost and with less flicker. OptiScaler base: `master` as of 6 October 2026.
 
 NVIDIA's model (`nvngx_dlssnr.dll`) is not included.
+
+## New in 1.2.0
+
+The Last of Us Part I, RTX 4070, 2560x1440, built-in benchmark (frames the game renders, frame
+generation excluded):
+
+| Mode | FPS | DLSS 5 cost per frame |
+|---|---:|---:|
+| DLSS 5 off | 83.9 | - |
+| DLSS 5 as OptiScaler ships it | 39.2 | 13.2 ms |
+| Performance | 68.6 (+75%) | 2.5 ms |
+| **x8** (new preset) | **77.3** (+97%) | ~0.9 ms |
+
+- **x8 preset**: frame rate first. The model every 8th frame, before the upscaler at half the render
+  resolution, so the frame it runs on stays cheap and frame times stay even; anti-ghosting off.
+- **Anti-ghosting at long intervals** (fingerprint, same-surface fill): up to 60% less trailing.
+- **No light pulsing** on the frame the model runs on (smoother crossfade, soft refresh).
+- **Smart cadence**: the model runs less often while the camera stands still, more often when it moves.
+- **Strong preset**, light pop-in smoothing, noise-aware checks for path tracing, a richer benchmark.
+
+Every new switch can be turned off in the menu and in `OptiScaler.ini`. Details:
+[edit-cache.md](OptiScaler/dlssnr/design/edit-cache.md).
 
 ## Results
 
@@ -124,7 +146,7 @@ it behaves exactly like the original.
 
 ## Install
 
-Download `OptiScaler-DLSS5-1.1.0-win-x64.zip` from the [Releases](https://github.com/Skynizz/optiscaler-dlss5/releases)
+Download `OptiScaler-DLSS5-1.2.0-win-x64.zip` from the [Releases](https://github.com/Skynizz/optiscaler-dlss5/releases)
 page, unzip it, run `INSTALLER.bat` and drop the game folder (the one with the exe) onto it.
 The installer picks a free file name (`winmm.dll`, or `OptiScaler.asi` if there is an ASI loader) and
 never overwrites anything. `DESINSTALLER.bat` puts everything back.
@@ -136,7 +158,7 @@ In game: turn DLSS on, open the OptiScaler menu with Insert, then the **DLSS 5**
 
 ## Build
 
-Full source with every submodule: `OptiScaler-DLSS5-1.1.0-source.zip` on the release page (GitHub's
+Full source with every submodule: `OptiScaler-DLSS5-1.2.0-source.zip` on the release page (GitHub's
 own "Source code" archives leave the submodules out, so they will not build). Or clone it:
 
 ```
