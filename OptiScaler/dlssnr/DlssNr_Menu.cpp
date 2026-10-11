@@ -722,6 +722,16 @@ void RenderMenu(Config* config, float menuResScale)
                            "\nit, and so on -- less the small cost of carrying the edit. 1 runs it every frame"
                            "\n(the filters below still steady it).");
 
+                bool fgSync = config->DlssNrFGSync.value_or_default();
+
+                if (ImGui::Checkbox("Pace frame generation over the model's cycle (experimental)", &fgSync))
+                    config->DlssNrFGSync = fgSync;
+
+                HelpMarker("With frame generation (FSR FG or XeFG through OptiScaler): the frame the model runs on is"
+                           "\nthe long one, one in N, and the generated frames around it were placed from its time."
+                           "\nOn, frame generation gets the time averaged over the model's cycle, so the generated"
+                           "\nframes land evenly. No cost. No effect without frame generation.");
+
                 bool async = config->DlssNrCacheAsync.value_or_default();
 
                 if (ImGui::Checkbox("Model in the background (async compute)", &async))

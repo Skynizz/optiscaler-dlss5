@@ -648,6 +648,10 @@ class Config
     // long ones. After the upscaler, one pass, a model at or below 100% (otherwise the model runs as usual).
     // false is as before.
     CustomOptional<bool> DlssNrCacheAsync { false };
+    // Frame generation sees the frame time averaged over the model's cycle (the last N frames, N the cache's
+    // interval now) instead of each frame's own: the frame the model runs on is longer, and generated frames
+    // placed from its time land unevenly around it. Off is each frame's own time, as before.
+    CustomOptional<bool> DlssNrFGSync { false };
 
     // Joint bilateral enlargement of a below-size model's answer, guided by the full-size frame.
     // Only acts when the model resolution is under 100%; off is the resolve exactly as it was.

@@ -723,6 +723,7 @@ void CheckCaptureTrigger()
             else if (k == "Enabled") c->DlssNrEnabled = b;
             else if (k == "CacheNoiseAware") c->DlssNrCacheNoiseAware = b;
             else if (k == "CacheAsync") c->DlssNrCacheAsync = b;
+            else if (k == "FGSync") c->DlssNrFGSync = b;
             else if (k == "CacheFingerprint") c->DlssNrCacheFingerprint = b;
             else if (k == "CacheContext") c->DlssNrCacheContext = b;
             else if (k == "CacheFingerprintTolerance") c->DlssNrCacheFingerprintTolerance = v;
@@ -5844,5 +5845,42 @@ void Shutdown()
     g_lastGpuTime.reset();
 
     g_compose.reset();
+}
+} // namespace DlssNr
+
+namespace DlssNr
+{
+// FGSync. Frame generation places its frames from the time of the frame it was handed. With the edit cache the
+// frame the model runs on is the long one, one in N, so the generated frames around it were placed from a time
+// that matched neither it nor its neighbours. Averaged over the last N frames -- N the cache's interval right
+// now -- the periodic spike cancels and the time is the cycle's own. Called once per frame-generation dispatch.
+float SyncFrameTime(float ms)
+{
+    static float ring[16] = {};
+    static unsigned int head = 0;
+    static unsigned int filled = 0;
+
+    if (!Config::Instance()->DlssNrFGSync.value_or_default() || ms <= 0.0f)
+    {
+        filled = 0;
+        return ms;
+    }
+
+    ring[head] = ms;
+    head = (head + 1) % 16;
+    filled = std::min(filled + 1, 16u);
+
+    const CacheStatus cs = GetCacheStatus();
+    const unsigned int n = cs.exists && cs.historyValid ? std::min(std::clamp(cs.intervalNow, 1u, 16u), filled) : 1u;
+
+    if (n <= 1)
+        return ms;
+
+    float sum = 0.0f;
+
+    for (unsigned int i = 0; i < n; ++i)
+        sum += ring[(head + 16 - 1 - i) % 16];
+
+    return sum / (float) n;
 }
 } // namespace DlssNr

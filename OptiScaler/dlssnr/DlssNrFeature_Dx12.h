@@ -221,6 +221,9 @@ struct CacheStatus
 
 CacheStatus GetCacheStatus();
 
+// FGSync: the frame time to hand frame generation, averaged over the edit cache's cycle when the option is on.
+float SyncFrameTime(float ms);
+
 // Writes CacheDumpFrames consecutive frames (frame, model's frame, motion, depth) for
 // tools/dlssnr_cache/measure_reprojection.py. The model runs on every one of them.
 void RequestCacheDump();

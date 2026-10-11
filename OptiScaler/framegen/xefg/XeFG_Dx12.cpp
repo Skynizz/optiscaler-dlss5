@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <dlssnr/DlssNr.h>
 #include "XeFG_Dx12.h"
 
 #include <hudfix/Hudfix_Dx11.h>
@@ -859,11 +860,11 @@ bool XeFG_Dx12::Dispatch()
     switch (Config::Instance()->FTInput.value_or_default())
     {
     case FrameTimeSource::Input:
-        constData.frameRenderTime = (float) _ftDelta[fIndex];
+        constData.frameRenderTime = DlssNr::SyncFrameTime((float) _ftDelta[fIndex]);
         break;
 
     case FrameTimeSource::Opti:
-        constData.frameRenderTime = static_cast<float>(state.lastFGFrameTime);
+        constData.frameRenderTime = DlssNr::SyncFrameTime(static_cast<float>(state.lastFGFrameTime));
         break;
 
     case FrameTimeSource::Zero:

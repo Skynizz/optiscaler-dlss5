@@ -3,6 +3,7 @@
 #include "FSRFG_Dx12.h"
 
 #include <State.h>
+#include <dlssnr/DlssNr.h>
 #include <Util.h>
 
 #include <hudfix/Hudfix_Dx11.h>
@@ -613,9 +614,9 @@ bool FSRFG_Dx12::Dispatch()
         dfgPrepare.cameraNear = _cameraNear[fIndex];
         dfgPrepare.cameraFovAngleVertical = _cameraVFov[fIndex];
 
-        dfgPrepare.frameTimeDelta = config->FTInput.value_or_default() == FrameTimeSource::Input
-                                        ? (float) _ftDelta[fIndex]
-                                        : static_cast<float>(state.lastFGFrameTime);
+        dfgPrepare.frameTimeDelta = DlssNr::SyncFrameTime(config->FTInput.value_or_default() == FrameTimeSource::Input
+                                                              ? (float) _ftDelta[fIndex]
+                                                              : static_cast<float>(state.lastFGFrameTime));
 
         dfgPrepare.viewSpaceToMetersFactor = _meterFactor[fIndex];
 
