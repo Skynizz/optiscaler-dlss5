@@ -403,6 +403,9 @@ void RenderMenu(Config* config, float menuResScale)
                 config->DlssNrTransfer = 1u;
                 // The x8 preset turns these off; every other preset puts them back.
                 config->DlssNrPreSrReduced = false;
+                // The model in the background needs the pass after the upscaler: left on, it silently moved the
+                // pre-SR presets (x8 above all) back after the upscaler and took their frame rate with it.
+                config->DlssNrCacheAsync = false;
                 config->DlssNrCacheFingerprint = true;
                 config->DlssNrCacheSurfaceFill = true;
                 config->DlssNrCacheAntiPop = true;
@@ -1214,6 +1217,15 @@ void RenderMenu(Config* config, float menuResScale)
 
                 if (ImGui::TreeNode("Developer tools"))
                 {
+                    bool privateCreate = config->DlssNrPrivateCreate.value_or_default();
+
+                    if (ImGui::Checkbox("Create the model on our own queue", &privateCreate))
+                        config->DlssNrPrivateCreate = privateCreate;
+
+                    HelpMarker("The model is built on a command list and a queue of OptiScaler's own, and finished"
+                               "\nbefore the game's frame uses it, instead of inside the game's frame. Built inside the"
+                               "\nframe it could hang the GPU, above all with frame generation running. Off is as before.");
+
                     static const char* cacheDebugNames[] = { "Off",           "Confidence",   "Lighting band", "Detail band",
                                                              "Rejection mask", "Age of the edit", "Staleness" };
                     int cacheDebug = (int) config->DlssNrCacheDebugView.value_or_default();

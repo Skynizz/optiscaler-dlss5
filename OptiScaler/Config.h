@@ -652,6 +652,10 @@ class Config
     // interval now) instead of each frame's own: the frame the model runs on is longer, and generated frames
     // placed from its time land unevenly around it. Off is each frame's own time, as before.
     CustomOptional<bool> DlssNrFGSync { false };
+    // The model is created on a command list of our own, submitted to a queue of ours and waited for, instead
+    // of on the game's: a creation recorded into the game's frame could hang the GPU, and with frame generation
+    // running it did (re-enabling DLSS 5 before the upscaler). Off is the game's list, as before.
+    CustomOptional<bool> DlssNrPrivateCreate { true };
 
     // Joint bilateral enlargement of a below-size model's answer, guided by the full-size frame.
     // Only acts when the model resolution is under 100%; off is the resolve exactly as it was.

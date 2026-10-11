@@ -724,6 +724,7 @@ void CheckCaptureTrigger()
             else if (k == "CacheNoiseAware") c->DlssNrCacheNoiseAware = b;
             else if (k == "CacheAsync") c->DlssNrCacheAsync = b;
             else if (k == "FGSync") c->DlssNrFGSync = b;
+            else if (k == "PrivateCreate") c->DlssNrPrivateCreate = b;
             else if (k == "CacheFingerprint") c->DlssNrCacheFingerprint = b;
             else if (k == "CacheContext") c->DlssNrCacheContext = b;
             else if (k == "CacheFingerprintTolerance") c->DlssNrCacheFingerprintTolerance = v;
@@ -2300,6 +2301,82 @@ void AsyncTrim()
 // evaluated on the game's list (it is rebuilt there when the background stands aside). The build is executed at
 // once on our queue; the first evaluate comes on a later frame, in a later list of the same queue.
 // busy: our queue is too far behind to take it now (try again next frame).
+// PrivateCreate. The model's creation is recorded into a command list of ours, run on a direct queue of ours and
+// waited for, so it is finished before the game's frame ever sees the feature and never sits inside that frame.
+// Recorded into the game's list it was a dice roll ("every crash died on a creation frame"), and frame
+// generation -- its own queue, more frames in flight -- loaded the dice: re-enabling DLSS 5 before the upscaler
+// hung the GPU in The Last of Us. Built once; the wait is a few milliseconds, on the frames the model is rebuilt.
+struct PrivateCreator
+{
+    ID3D12CommandQueue* queue = nullptr;
+    ID3D12CommandAllocator* alloc = nullptr;
+    ID3D12GraphicsCommandList* list = nullptr;
+    ID3D12Fence* fence = nullptr;
+    HANDLE done = nullptr;
+    UINT64 value = 0;
+    bool broken = false;
+} g_privCreate;
+
+ID3D12GraphicsCommandList* PrivateCreateBegin(ID3D12Device* device)
+{
+    auto& p = g_privCreate;
+
+    if (p.broken)
+        return nullptr;
+
+    if (p.queue == nullptr)
+    {
+        D3D12_COMMAND_QUEUE_DESC qd {};
+        qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+
+        if (FAILED(device->CreateCommandQueue(&qd, IID_PPV_ARGS(&p.queue))) ||
+            FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&p.alloc))) ||
+            FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, p.alloc, nullptr, IID_PPV_ARGS(&p.list))) ||
+            FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&p.fence))) ||
+            (p.done = CreateEventW(nullptr, FALSE, FALSE, nullptr)) == nullptr)
+        {
+            LOG_ERROR("DLSS-NR: no queue of our own to create the model on; it is created in the game's frame");
+            p.broken = true;
+            return nullptr;
+        }
+
+        p.queue->SetName(L"DLSS-NR model creation");
+        p.list->Close();
+    }
+
+    if (FAILED(p.alloc->Reset()) || FAILED(p.list->Reset(p.alloc, nullptr)))
+        return nullptr;
+
+    return p.list;
+}
+
+// Runs what PrivateCreateBegin's list recorded and waits for it.
+bool PrivateCreateEnd()
+{
+    auto& p = g_privCreate;
+
+    if (FAILED(p.list->Close()))
+        return false;
+
+    ID3D12CommandList* lists[] = { p.list };
+    p.queue->ExecuteCommandLists(1, lists);
+    ++p.value;
+    p.queue->Signal(p.fence, p.value);
+
+    if (p.fence->GetCompletedValue() < p.value)
+    {
+        p.fence->SetEventOnCompletion(p.value, p.done);
+
+        if (WaitForSingleObject(p.done, 5000) != WAIT_OBJECT_0)
+        {
+            LOG_ERROR("DLSS-NR: the model's creation did not finish on our queue within 5 s");
+            return false;
+        }
+    }
+
+    return true;
+}
+
 void* AsyncBuildMain(ID3D12Device* device, const Config& cfg, const wchar_t* snippet, unsigned int workW,
                      unsigned int workH, bool& busy)
 {
@@ -3016,9 +3093,15 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
         SetExtras(cfg, nullptr, nullptr, 0, 0, 0, 0);
         g_nr.featureOnCompute = false;
+
+        // PrivateCreate: recorded into a list of ours and finished before the game's frame goes on.
+        ID3D12GraphicsCommandList* createList =
+            cfg.DlssNrPrivateCreate.value_or_default() ? PrivateCreateBegin(device) : nullptr;
+        const bool privateCreate = createList != nullptr;
+
         g_nr.feature =
             g_nr.create(snippet->wstring().c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(),
-                        device, cmdList, g_nr.capabilityParams, workWidth, workHeight,
+                        device, privateCreate ? createList : cmdList, g_nr.capabilityParams, workWidth, workHeight,
                         (int) cfg.DlssNrPreset.value_or_default(),
                         cfg.DlssNrIntensity.value_or_default(), (int) EffStyle(cfg),
                         cfg.DlssNrLocalStructure.value_or_default(), cfg.DlssNrLocalTone.value_or_default(),
@@ -3027,6 +3110,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                         // UI correction at the model's own default: with no UI layer fed to it there
                         // is nothing for it to correct.
                         1);
+
+        if (privateCreate && !PrivateCreateEnd())
+            LOG_WARN("DLSS-NR: the model's creation on our queue could not be confirmed");
 
         if (g_nr.feature == nullptr)
         {
