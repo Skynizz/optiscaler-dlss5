@@ -1350,6 +1350,77 @@ void RenderMenu(Config* config, float menuResScale)
                        "\nstable. If you love the Replace look but the flicker bothers you, use this."
                        "\n\nOff is byte-identical to before.");
 
+        ImGui::SeparatorText("Where it lands");
+
+        static const char* regionNames[] = { "Whole frame", "Scenery only (keep characters)",
+                                             "Foreground only" };
+        int region = (int) config->DlssNrRegionMask.value_or_default();
+        if (region < 0 || region > 2)
+            region = 0;
+        if (ImGui::Combo("Region", &region, regionNames, IM_ARRAYSIZE(regionNames)))
+            config->DlssNrRegionMask = (uint32_t) region;
+
+        HelpMarker("Keeps DLSS 5 off part of the picture, chosen by depth."
+                       "\n\nScenery only: what stands near the camera -- usually your character -- stays"
+                       "\nexactly as the game drew it, faces included, and everything behind gets DLSS 5."
+                       "\nForeground only is the other way round."
+                       "\n\nThe model still sees the whole frame, so its lighting stays coherent; only what"
+                       "\nreaches the screen is masked. Costs a fraction of a millisecond, no FPS lost."
+                       "\n\nWhole frame is the pass exactly as before.");
+
+        if (region != 0)
+        {
+            float distance = config->DlssNrRegionMaskDistance.value_or_default();
+            if (ImGui::SliderFloat("Near distance", &distance, 2.0f, 2000.0f, "%.0f", ImGuiSliderFlags_Logarithmic))
+                config->DlssNrRegionMaskDistance = std::max(distance, 0.01f);
+
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Reset##maskdistance"))
+                config->DlssNrRegionMaskDistance = 40.0f;
+
+            HelpMarker("Where near ends, in the depth buffer's own units (distance over the camera's"
+                           "\nnear plane, so it differs from game to game). About 40 frames a third-person"
+                           "\ncharacter. Turn on Show mask and move it until the tint covers what you want.");
+
+            float softness = config->DlssNrRegionMaskSoftness.value_or_default();
+            if (ImGui::SliderFloat("Edge softness", &softness, 0.05f, 2.0f, "%.2f stops"))
+                config->DlssNrRegionMaskSoftness = std::max(softness, 0.01f);
+
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Reset##masksoftness"))
+                config->DlssNrRegionMaskSoftness = 0.5f;
+
+            HelpMarker("How gradually near turns into far, in stops of distance either side of the"
+                           "\nnear distance. Wider hides the edge, narrower follows the silhouette.");
+
+            float strength = config->DlssNrRegionMaskStrength.value_or_default();
+            if (ImGui::SliderFloat("Mask strength", &strength, 0.0f, 1.0f, "%.2f"))
+                config->DlssNrRegionMaskStrength = std::clamp(strength, 0.0f, 1.0f);
+
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Reset##maskstrength"))
+                config->DlssNrRegionMaskStrength = 1.0f;
+
+            HelpMarker("How much of the game's own picture the masked part gets back. 1 is all of it"
+                           "\n(no DLSS 5 there at all), 0.5 keeps half of DLSS 5's change, 0 is no mask.");
+
+            bool ignoreFloor = config->DlssNrRegionMaskIgnoreFloor.value_or_default();
+            if (ImGui::Checkbox("Ignore the ground", &ignoreFloor))
+                config->DlssNrRegionMaskIgnoreFloor = ignoreFloor;
+
+            HelpMarker("Near counts only on upright surfaces -- characters, props, pillars -- and not on"
+                           "\nthe ground under the camera, which is just as near but is scenery. Off masks"
+                           "\neverything nearer than the distance.");
+
+            bool show = config->DlssNrRegionMaskShow.value_or_default();
+            if (ImGui::Checkbox("Show mask", &show))
+                config->DlssNrRegionMaskShow = show;
+
+            HelpMarker("Tints magenta the part left as the game drew it, to set the distance. Turn it"
+                           "\noff when done. Not shown in side-by-side compare or a debug view, where the"
+                           "\nmask stands aside.");
+        }
+
         ImGui::SeparatorText("Model");
 
         ImGui::TextUnformatted("Read when the model is built, so a change rebuilds it after a moment.");

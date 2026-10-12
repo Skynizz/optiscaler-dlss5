@@ -390,6 +390,12 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrCacheAsync.set_from_config(readBool("DlssNr", "CacheAsync"));
             DlssNrFGSync.set_from_config(readBool("DlssNr", "FGSync"));
             DlssNrPrivateCreate.set_from_config(readBool("DlssNr", "PrivateCreate"));
+            DlssNrRegionMask.set_from_config(readUInt("DlssNr", "RegionMask"));
+            DlssNrRegionMaskDistance.set_from_config(readFloat("DlssNr", "RegionMaskDistance"));
+            DlssNrRegionMaskSoftness.set_from_config(readFloat("DlssNr", "RegionMaskSoftness"));
+            DlssNrRegionMaskStrength.set_from_config(readFloat("DlssNr", "RegionMaskStrength"));
+            DlssNrRegionMaskIgnoreFloor.set_from_config(readBool("DlssNr", "RegionMaskIgnoreFloor"));
+            DlssNrRegionMaskShow.set_from_config(readBool("DlssNr", "RegionMaskShow"));
             DlssNrJbuUpsample.set_from_config(readBool("DlssNr", "JbuUpsample"));
             DlssNrJbuSigma.set_from_config(readFloat("DlssNr", "JbuSigma"));
             UseGenericAppIdWithDlss.set_from_config(readBool("DLSS", "UseGenericAppIdWithDlss"));
@@ -1352,6 +1358,16 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "CacheAsync", GetBoolValue(Instance()->DlssNrCacheAsync.value_for_config()).c_str());
     ini.SetValue("DlssNr", "FGSync", GetBoolValue(Instance()->DlssNrFGSync.value_for_config()).c_str());
     ini.SetValue("DlssNr", "PrivateCreate", GetBoolValue(Instance()->DlssNrPrivateCreate.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "RegionMask", GetIntValue(Instance()->DlssNrRegionMask.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "RegionMaskDistance",
+                 GetFloatValue(Instance()->DlssNrRegionMaskDistance.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "RegionMaskSoftness",
+                 GetFloatValue(Instance()->DlssNrRegionMaskSoftness.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "RegionMaskStrength",
+                 GetFloatValue(Instance()->DlssNrRegionMaskStrength.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "RegionMaskIgnoreFloor",
+                 GetBoolValue(Instance()->DlssNrRegionMaskIgnoreFloor.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "RegionMaskShow", GetBoolValue(Instance()->DlssNrRegionMaskShow.value_for_config()).c_str());
     ini.SetValue("DlssNr", "JbuUpsample", GetBoolValue(Instance()->DlssNrJbuUpsample.value_for_config()).c_str());
     ini.SetValue("DlssNr", "JbuSigma", GetFloatValue(Instance()->DlssNrJbuSigma.value_for_config()).c_str());
         ini.SetValue("DLSS", "RenderPresetOverride",

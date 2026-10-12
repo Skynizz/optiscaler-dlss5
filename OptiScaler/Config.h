@@ -657,6 +657,21 @@ class Config
     // running it did (re-enabling DLSS 5 before the upscaler). Off is the game's list, as before.
     CustomOptional<bool> DlssNrPrivateCreate { true };
 
+    // Region mask: DLSS 5 kept off part of the picture, chosen by depth. 0 off (the frame as before), 1 the
+    // scenery only (what stands near the camera -- the character -- stays as the game drew it), 2 the
+    // foreground only. The model still sees the whole frame; only what reaches the screen is masked.
+    CustomOptional<uint32_t> DlssNrRegionMask { 0 };
+    // Where near ends, in the depth buffer's own units (view depth over the near plane, ~40 = a third-person
+    // character in the games measured), and the width of the edge, in stops either side.
+    CustomOptional<float> DlssNrRegionMaskDistance { 40.0f };
+    CustomOptional<float> DlssNrRegionMaskSoftness { 0.5f };
+    // How much of the game's own frame the masked part gets back: 1 all of it, 0.5 half the edit.
+    CustomOptional<float> DlssNrRegionMaskStrength { 1.0f };
+    // Near counts only on upright surfaces (characters, props), not the ground under the camera.
+    CustomOptional<bool> DlssNrRegionMaskIgnoreFloor { true };
+    // Tint the part left as the game drew it, to set the distance.
+    CustomOptional<bool> DlssNrRegionMaskShow { false };
+
     // Joint bilateral enlargement of a below-size model's answer, guided by the full-size frame.
     // Only acts when the model resolution is under 100%; off is the resolve exactly as it was.
     CustomOptional<bool> DlssNrJbuUpsample { false };

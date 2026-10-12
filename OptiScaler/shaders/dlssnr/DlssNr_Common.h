@@ -20,7 +20,8 @@ enum DlssNrMode : uint32_t
     DlssNrMode_Resolve = 1,    // proxy + the model's answer + the untouched copy -> the edited frame
     DlssNrMode_Downsample = 2, // the proxy -> a smaller proxy, when the model works below full size
     DlssNrMode_Meter = 3,      // the exposure texture -> tile (0,0), for the white point
-    DlssNrMode_Calibrate = 4   // the untouched frame -> a grid of tile peak luminances
+    DlssNrMode_Calibrate = 4,  // the untouched frame -> a grid of tile peak luminances
+    DlssNrMode_RegionMask = 5  // the edited frame + the untouched copy + depth -> part of the frame given back
 };
 
 // The meter's grid. 64 x 64 tiles over the whole frame, whatever its size.
@@ -198,6 +199,19 @@ struct alignas(256) DlssNrConstants
 
     // Local adaptation in regions darker than the average, as a share of LocalStrength (0 = leave them).
     float LocalShadows;
+
+    // The region mask (mode 5): which part gets the game's own frame back (1 near, 2 far), where near ends
+    // (view depth over the near plane), the edge in stops either side, how much of the game's frame it gets
+    // back, the ground left out of near, the tint, and the depth texture's convention and valid region.
+    uint32_t MaskMode;
+    float MaskDistance;
+    float MaskSoftness;
+    float MaskStrength;
+    uint32_t MaskIgnoreFloor;
+    uint32_t MaskShow;
+    uint32_t MaskDepthInverted;
+    uint32_t MaskDepthWidth;
+    uint32_t MaskDepthHeight;
 };
 
 class DlssNr_Common

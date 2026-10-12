@@ -221,6 +221,10 @@ struct NrState
     // a string of coloured cells.
     ID3D12Resource* hdrCopy = nullptr;
 
+    // RegionMask: the edited frame, copied so the mask can read it while it writes the output. Only made
+    // while the mask is on.
+    ID3D12Resource* maskEdited = nullptr;
+
     // The frame shrunk for the model, when it is working below full resolution.
     ID3D12Resource* colorSmall = nullptr;
 
@@ -725,6 +729,12 @@ void CheckCaptureTrigger()
             else if (k == "CacheAsync") c->DlssNrCacheAsync = b;
             else if (k == "FGSync") c->DlssNrFGSync = b;
             else if (k == "PrivateCreate") c->DlssNrPrivateCreate = b;
+            else if (k == "RegionMask") c->DlssNrRegionMask = (uint32_t) v;
+            else if (k == "RegionMaskDistance") c->DlssNrRegionMaskDistance = v;
+            else if (k == "RegionMaskSoftness") c->DlssNrRegionMaskSoftness = v;
+            else if (k == "RegionMaskStrength") c->DlssNrRegionMaskStrength = v;
+            else if (k == "RegionMaskIgnoreFloor") c->DlssNrRegionMaskIgnoreFloor = b;
+            else if (k == "RegionMaskShow") c->DlssNrRegionMaskShow = b;
             else if (k == "CacheFingerprint") c->DlssNrCacheFingerprint = b;
             else if (k == "CacheContext") c->DlssNrCacheContext = b;
             else if (k == "CacheFingerprintTolerance") c->DlssNrCacheFingerprintTolerance = v;
@@ -3541,6 +3551,72 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         return p;
     };
 
+    // RegionMask: part of the frame given back as the game drew it, chosen by depth -- the scenery edited and the
+    // character left alone, or the other way round. The model has already seen and edited the whole frame; this
+    // only decides what of its edit reaches the screen, so nothing upstream changes, the cache included (it keeps
+    // the whole edit, and a character walking out of the near band gets it back at once). Off -- the default --
+    // reaches none of this. It stands aside for the instruments, as the cache does: side by side (whose layout is
+    // not the frame's), a debug view, a capture.
+    auto regionMask = [&](ID3D12Resource* original, D3D12_RESOURCE_STATES originalState, ID3D12Resource* depthReadable)
+    {
+        const uint32_t mode = cfg.DlssNrRegionMask.value_or_default();
+
+        if (mode == 0 || mode > 2 || original == nullptr || depthReadable == nullptr ||
+            cfg.DlssNrCompare.value_or_default() == 1 || cfg.DlssNrDebugView.value_or_default() != 0 ||
+            g_capture.isActive())
+            return;
+
+        const D3D12_RESOURCE_DESC td = target->GetDesc();
+
+        if (g_nr.maskEdited != nullptr)
+        {
+            const D3D12_RESOURCE_DESC have = g_nr.maskEdited->GetDesc();
+
+            // Retired, not released: last frame's mask may still be reading it.
+            if (have.Width != td.Width || have.Height != td.Height || have.Format != td.Format)
+                ParkNrResource(g_nr.maskEdited);
+        }
+
+        if (g_nr.maskEdited == nullptr)
+        {
+            g_nr.maskEdited = CreateScratch(device, td.Format, (unsigned int) td.Width, td.Height);
+
+            if (g_nr.maskEdited == nullptr)
+            {
+                ReportSkipOnce("the region mask could not get a texture, so the whole frame is edited");
+                return;
+            }
+        }
+
+        constexpr auto read = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        constexpr auto rest = D3D12_RESOURCE_STATE_UNORDERED_ACCESS;
+
+        Barrier(cmdList, g_nr.maskEdited, rest, D3D12_RESOURCE_STATE_COPY_DEST);
+        Barrier(cmdList, target, rest, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        cmdList->CopyResource(g_nr.maskEdited, target);
+        Barrier(cmdList, target, D3D12_RESOURCE_STATE_COPY_SOURCE, rest);
+        Barrier(cmdList, g_nr.maskEdited, D3D12_RESOURCE_STATE_COPY_DEST, read);
+        Barrier(cmdList, original, originalState, read);
+
+        DlssNrConstants p {};
+        p.Mode = DlssNrMode_RegionMask;
+        p.Width = width;
+        p.Height = height;
+        p.MaskMode = mode;
+        p.MaskDistance = std::max(cfg.DlssNrRegionMaskDistance.value_or_default(), 0.01f);
+        p.MaskSoftness = std::max(cfg.DlssNrRegionMaskSoftness.value_or_default(), 0.01f);
+        p.MaskStrength = std::clamp(cfg.DlssNrRegionMaskStrength.value_or_default(), 0.0f, 1.0f);
+        p.MaskIgnoreFloor = cfg.DlssNrRegionMaskIgnoreFloor.value_or_default() ? 1u : 0u;
+        p.MaskShow = cfg.DlssNrRegionMaskShow.value_or_default() ? 1u : 0u;
+        p.MaskDepthInverted = g_nr.guideDepthInverted ? 1u : 0u;
+        p.MaskDepthWidth = guideWidth;
+        p.MaskDepthHeight = guideHeight;
+        DispatchPass(cmdList, p, g_nr.maskEdited, depthReadable, original, nullptr, nullptr, target, nullptr);
+
+        Barrier(cmdList, original, read, originalState);
+        Barrier(cmdList, g_nr.maskEdited, read, rest);
+    };
+
     if (cacheActive && !cacheRefresh)
     {
         // A cached frame: no encode, no model, no resolve. The carried edit is laid on the frame the
@@ -3594,6 +3670,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 landed = g_cache->ConsumeAsync(cmdList, device, target, g_async.keep, g_async.composed, g_nr.hdrCopy,
                                                g_async.depth, cacheInputs(depthIn, motionIn));
                 Barrier(cmdList, g_async.composed, read, rest);
+
+                if (landed)
+                    regionMask(g_async.keep, rest, depthIn);
             }
 
             AsyncRelease(cmdList);
@@ -3604,8 +3683,10 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         else if (depthIn != nullptr && motionIn != nullptr)
         {
             // CacheAsync holds the launch frame in hdrCopy until its answer lands; the cache keeps its own copy.
-            g_cache->RunCached(cmdList, device, target, asyncOn ? g_async.keep : g_nr.hdrCopy,
-                               cacheInputs(depthIn, motionIn));
+            ID3D12Resource* keep = asyncOn ? g_async.keep : g_nr.hdrCopy;
+
+            if (g_cache->RunCached(cmdList, device, target, keep, cacheInputs(depthIn, motionIn)))
+                regionMask(keep, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, depthIn);
         }
 
         g_cache->EndFrame(cmdList);
@@ -3799,8 +3880,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         }
 
         // The motion since the model's last run was just taken for it; this frame's is not chained again.
-        if (cacheActive && g_async.keep != nullptr)
-            g_cache->RunCached(cmdList, device, target, g_async.keep, cacheIn, false);
+        if (cacheActive && g_async.keep != nullptr &&
+            g_cache->RunCached(cmdList, device, target, g_async.keep, cacheIn, false))
+            regionMask(g_async.keep, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, depthIn);
 
         if (cacheActive)
             g_cache->EndFrame(cmdList);
@@ -4140,6 +4222,8 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // A refresh: store what the model just did, so the frames until the next one can carry it.
         if (cacheActive)
             g_cache->CaptureRefresh(cmdList, device, target, g_nr.hdrCopy, cacheIn);
+
+        regionMask(g_nr.hdrCopy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, depthIn);
 
         // On-demand capture works in this path too: the staging copy still holds the frame as the
         // upscaler produced it, and the edited frame is the output itself. The write happens a few
@@ -5827,6 +5911,12 @@ void Shutdown()
     {
         g_nr.hdrCopy->Release();
         g_nr.hdrCopy = nullptr;
+    }
+
+    if (g_nr.maskEdited != nullptr)
+    {
+        g_nr.maskEdited->Release();
+        g_nr.maskEdited = nullptr;
     }
 
     if (g_nr.colorSmall != nullptr)

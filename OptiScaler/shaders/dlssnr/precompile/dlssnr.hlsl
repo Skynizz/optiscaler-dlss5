@@ -35,6 +35,15 @@ cbuffer Params : register(b0)
     float gUvOffsetY;      // a band dispatch: frame v = offset + v * scale (scale 0 means a whole frame)
     float gUvScaleY;
     float gLocalShadows;   // 0..1: share of the local adaptation applied to regions darker than the average
+    uint  gMaskMode;       // region mask: 1 near gets the game's frame back, 2 far does
+    float gMaskDistance;   // where near ends, view depth over the near plane
+    float gMaskSoftness;   // the edge, stops either side
+    float gMaskStrength;   // how much of the game's frame the masked part gets back
+    uint  gMaskIgnoreFloor;// near only on upright surfaces
+    uint  gMaskShow;       // tint the masked part
+    uint  gMaskDepthInverted;
+    uint  gMaskDepthWidth; // the depth texture's valid region
+    uint  gMaskDepthHeight;
 };
 
 // Bringing an impossible colour back into a possible one.
@@ -247,6 +256,42 @@ RWTexture2D<float4> gKeep     : register(u1);  // encode: the untouched copy. un
 [[vk::binding(7, 0)]]
 #endif
 SamplerState        gLinear   : register(s0);  // so the edit can be read at a different size
+
+// The region mask (mode 5). The model has seen and edited the whole frame; this gives part of it back as the
+// game drew it, chosen by depth -- most often the character, whose face the model otherwise redraws. The depth
+// arrives in gModel.
+float MaskLogDepth(int2 t)
+{
+    const int2 hi = int2((int) gMaskDepthWidth, (int) gMaskDepthHeight) - 1;
+    const float d = gModel.Load(int3(clamp(t, int2(0, 0), hi), 0)).r;
+    // Proportional to view depth either way round, as the edit cache reads it: reversed-Z stores near/z.
+    return log2(gMaskDepthInverted != 0 ? 1.0 / max(d, 1e-7) : 1.0 / max(1.0 - d, 1e-7));
+}
+
+// How near one depth texel is: 1 nearer than the distance, 0 beyond it. With the ground left out, near does not
+// count on the ground. Up the screen a standing character's depth hardly moves (measured: 0.0009 stop per percent
+// of the frame's height), while the ground's moves by 0.025 even right under the camera, where it is least steep
+// -- and it moves the same way on both sides of the pixel, a plane. Both one-sided steps must agree in sign and
+// both be steep: the silhouette's own jump is one-sided, and foliage, whose depth jumps between leaves and the
+// background behind them, goes up and down at random, so near trees and bushes stay near. A ceiling, the same
+// plane upside down, counts as ground too.
+float MaskNear(int2 t)
+{
+    const float l = MaskLogDepth(t);
+    float nearW = 1.0 - smoothstep(-gMaskSoftness, gMaskSoftness, l - log2(max(gMaskDistance, 1e-3)));
+
+    if (gMaskIgnoreFloor != 0 && nearW > 0.0)
+    {
+        const int k = max(1, (int) gMaskDepthHeight / 360);
+        const float up = MaskLogDepth(t - int2(0, k)) - l;
+        const float down = l - MaskLogDepth(t + int2(0, k));
+        const float plane = up * down > 0.0 ? min(abs(up), abs(down)) : 0.0;
+        const float slope = plane / (float) k * ((float) gMaskDepthHeight / 100.0);
+        nearW *= 1.0 - smoothstep(0.006, 0.012, slope);
+    }
+
+    return nearW;
+}
 
 // The picture white point. Sources 0 (paper white) and 2 (scan) resolve it on the CPU and pass it in
 // gWhitePoint; source 1 (the game's own exposure) also passes a CPU value in gWhitePoint as a fallback,
@@ -530,6 +575,29 @@ void CSMain(uint3 id : SV_DispatchThreadID)
 
     // Normalised, so the source may be any size relative to this dispatch.
     float2 uv = (float2(id.xy) + 0.5) / float2(gWidth, gHeight);
+
+    // The region mask: gSource the edited frame (a copy), gOriginal the untouched one, gModel the depth. The
+    // weight is taken at the four depth texels around the pixel and blended, so the edge is not the depth
+    // buffer's staircase when depth is at render resolution and the frame at display resolution.
+    if (gMode == 5)
+    {
+        const float2 p = uv * float2(gMaskDepthWidth, gMaskDepthHeight) - 0.5;
+        const int2 t0 = int2(floor(p));
+        const float2 f = p - floor(p);
+        const float n = lerp(lerp(MaskNear(t0), MaskNear(t0 + int2(1, 0)), f.x),
+                             lerp(MaskNear(t0 + int2(0, 1)), MaskNear(t0 + int2(1, 1)), f.x), f.y);
+        const float region = gMaskMode == 1 ? n : 1.0 - n;
+        const float4 edited = gSource.Load(int3(id.xy, 0));
+        const float4 original = gOriginal.Load(int3(id.xy, 0));
+        float3 rgb = lerp(edited.rgb, original.rgb, saturate(region * gMaskStrength));
+
+        // A multiply, so the tint reads the same on a linear or an encoded frame.
+        if (gMaskShow != 0)
+            rgb *= lerp(float3(1.0, 1.0, 1.0), float3(1.0, 0.35, 1.0), region);
+
+        gTarget[id.xy] = float4(rgb, edited.a);
+        return;
+    }
 
     // The meter. One thread per tile of a 64x64 grid over the frame, writing that tile's mean
     // luminance. The frame is raw linear here -- this runs before the encode, on purpose, because the
