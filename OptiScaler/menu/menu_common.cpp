@@ -4383,6 +4383,18 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
             config->FGSyncedDebug = syncedDebug;
 
         ShowTooltip("Shows the generated frames slightly green, to check they arrive evenly between real ones.");
+
+        bool hudless = config->FGHUDFix.value_or_default();
+        if (ImGui::Checkbox("HUD-less frames (HUDFix)", &hudless))
+        {
+            config->FGHUDFix = hudless;
+            state.clearCapturedHudlesses = true;
+            state.fgChanged = true;
+        }
+
+        ShowTooltip("Interpolates the frame captured before the game draws its HUD, then lays this frame's HUD back\n"
+                    "on top: crosshair and weapon panels never ghost, transparent ones included. On by default with\n"
+                    "Synced FG. Off: the HUD is guessed from what stands still, which misses transparent HUDs.");
     }
 
     if (ScopedCard::Shows("fg_dlssg") && state.activeFgOutput == FGOutput::DLSSG &&
@@ -4602,7 +4614,7 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
             ((state.activeFgOutput == FGOutput::FSRFG && FfxApiProxy::IsFGReady()) ||
              (state.activeFgOutput == FGOutput::XeFG && XeFGProxy::Module() != nullptr) ||
              (state.activeFgOutput == FGOutput::DLSSG && StreamlineProxy::Module() != nullptr) ||
-             state.activeFgOutput == FGOutput::Reprojection))
+             state.activeFgOutput == FGOutput::Reprojection || state.activeFgOutput == FGOutput::Synced))
         {
             const bool dx11HudfixTracking = state.swapchainInteropApi == SwapchainInteropApi::Dx11wDx12;
             const bool hudfixTrackingSupported =

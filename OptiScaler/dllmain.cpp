@@ -1571,6 +1571,11 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         if (State::Instance().activeFgInput == FGInput::NvngxFG)
             State::Instance().activeFgOutput = FGOutput::NoFG;
 
+        // Synced FG keeps the HUD out of its generated frames with the HUD-less frames HUDFix captures: on by
+        // default with it, unless HUDFix was set either way. Not saved, so another output is left as it was.
+        if (State::Instance().activeFgOutput == FGOutput::Synced && !Config::Instance()->FGHUDFix.has_value())
+            Config::Instance()->FGHUDFix.set_volatile_value(true);
+
         // Init Kernel proxies
         NtdllProxy::Init();
         KernelBaseProxy::Init();
