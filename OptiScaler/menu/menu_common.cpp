@@ -4349,6 +4349,42 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
     }
 
     // DLSSG controls
+    // Synced FG: OptiScaler's own frame generation (DLSS 5 Optimised)
+    if (ScopedCard::Shows("fg_synced") && state.activeFgOutput == FGOutput::Synced &&
+        state.activeFgInput != FGInput::NoFG && state.currentFGSwapchain != nullptr && fgOutput)
+    {
+        ScopedCard card { "Synced FG Settings" };
+
+        bool fgActive = config->FGEnabled.value_or_default();
+        if (ImGui::Checkbox("Active##6", &fgActive))
+        {
+            config->FGEnabled = fgActive;
+            LOG_DEBUG("Enabled set FGEnabled: {}", fgActive);
+
+            if (config->FGEnabled.value_or_default())
+                state.fgChanged = true;
+        }
+
+        ShowTooltip("Enable Frame Generation");
+
+        ImGui::SameLine(0.0f, 16.0f);
+
+        int synced = (int) std::clamp(config->FGSyncedFrames.value_or_default(), 1u, 3u) - 1;
+        static const char* syncedNames[] = { "2x", "3x", "4x" };
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 5.0f);
+
+        if (ImGui::Combo("Multiplier##synced", &synced, syncedNames, IM_ARRAYSIZE(syncedNames)))
+            config->FGSyncedFrames = (uint32_t) synced + 1;
+
+        ShowTooltip("Frames shown per frame the game renders. Changes live.");
+
+        bool syncedDebug = config->FGSyncedDebug.value_or_default();
+        if (ImGui::Checkbox("Tint generated frames", &syncedDebug))
+            config->FGSyncedDebug = syncedDebug;
+
+        ShowTooltip("Shows the generated frames slightly green, to check they arrive evenly between real ones.");
+    }
+
     if (ScopedCard::Shows("fg_dlssg") && state.activeFgOutput == FGOutput::DLSSG &&
         state.activeFgInput != FGInput::NoFG && state.currentFGSwapchain != nullptr &&
         StreamlineProxy::LoadStreamline() && fgOutput)
@@ -7916,6 +7952,7 @@ const MenuCommon::MenuBox* MenuCommon::GetMenuBoxes(size_t& count)
         { "fg_fsrfg", "Frame Gen", "FSR FG Settings", nullptr, RenderFrameGenerationRuntimeSettings },
         { "fg_xefg", "Frame Gen", "XeFG Settings", nullptr, RenderFrameGenerationRuntimeSettings },
         { "fg_dlssg", "Frame Gen", "DLSSG Settings", nullptr, RenderFrameGenerationRuntimeSettings },
+        { "fg_synced", "Frame Gen", "Synced FG Settings", nullptr, RenderFrameGenerationRuntimeSettings },
         { "fg_reprojection", "Frame Gen", "Reprojection Settings", nullptr, RenderFrameGenerationRuntimeSettings },
         { "fg_optifg", "Frame Gen", "OptiFG Settings", nullptr, RenderFrameGenerationRuntimeSettings },
         { "fg_nvngx", "Frame Gen", "Nvngx FG replacement", nullptr, RenderFrameGenerationRuntimeSettings },

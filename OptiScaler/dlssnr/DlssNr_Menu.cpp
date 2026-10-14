@@ -799,6 +799,25 @@ static void GroupPerformance(Config* config)
     ImGui::Spacing();
     ImGui::TextUnformatted("Synced FG (Frame Gen output \"Synced FG\", input \"Upscaler\"):");
 
+    if (State::Instance().activeFgOutput == FGOutput::Synced)
+    {
+        bool fgActive = config->FGEnabled.value_or_default();
+
+        if (ImGui::Checkbox("Synced FG active", &fgActive))
+        {
+            config->FGEnabled = fgActive;
+
+            if (fgActive)
+                State::Instance().fgChanged = true;
+        }
+
+        HelpMarker("Turns frame generation on and off, live (the same switch as \"Active\" under Frame Gen).");
+    }
+    else
+    {
+        ImGui::TextDisabled("Not selected: pick output \"Synced FG\" under Frame Gen and restart the game.");
+    }
+
     int synced = (int) std::clamp(config->FGSyncedFrames.value_or_default(), 1u, 3u) - 1;
     static const char* syncedNames[] = { "2x (1 generated)", "3x (2 generated)", "4x (3 generated)" };
 
