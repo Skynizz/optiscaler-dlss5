@@ -6,6 +6,7 @@
 #include <framegen/xefg/XeFG_Dx12.h>
 #include <framegen/dlssg/DLSSG_Dx12.h>
 #include <framegen/reprojection/Reprojection_Dx12.h>
+#include <framegen/synced/SyncedFG_Dx12.h>
 
 #include <inputs/FG/FSR3_Dx12_FG.h>
 #include <inputs/FG/FfxApi_Dx12_FG.h>
@@ -161,6 +162,10 @@ HRESULT FGHooks::CreateSwapChain(IDXGIFactory* pFactory, IUnknown* pDevice, DXGI
         {
             State::Instance().currentFG = new Reprojection_Dx12();
         }
+        else if (State::Instance().activeFgOutput == FGOutput::Synced)
+        {
+            State::Instance().currentFG = new SyncedFG_Dx12();
+        }
     }
 
     // Create FG swapchain
@@ -270,6 +275,10 @@ HRESULT FGHooks::CreateSwapChainForHwnd(IDXGIFactory* pFactory, IUnknown* pDevic
         else if (State::Instance().activeFgOutput == FGOutput::Reprojection)
         {
             State::Instance().currentFG = new Reprojection_Dx12();
+        }
+        else if (State::Instance().activeFgOutput == FGOutput::Synced)
+        {
+            State::Instance().currentFG = new SyncedFG_Dx12();
         }
     }
 

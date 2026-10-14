@@ -58,7 +58,8 @@ enum class FGOutput : uint32_t
     FSRFG,
     DLSSG,
     XeFG,
-    Reprojection
+    Reprojection,
+    Synced
 };
 
 template <> struct EnumConfig<FGOutput>
@@ -71,6 +72,7 @@ template <> struct EnumConfig<FGOutput>
         { FGOutput::DLSSG, "DLSSG" },
         { FGOutput::XeFG, "XeFG" },
         { FGOutput::Reprojection, "Reprojection" },
+        { FGOutput::Synced, "Synced" },
     };
 };
 

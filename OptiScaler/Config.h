@@ -1034,6 +1034,11 @@ class Config
 
     // DLSSG
     CustomOptional<int> FGDLSSGInterpolationCount { 1 }; // For Opti's own SL instance
+
+    // Synced FG (FGOutput=synced): frames generated between two real frames (1 = 2x, 2 = 3x, 3 = 4x), and a
+    // tint on the generated frames so their pacing can be seen.
+    CustomOptional<uint32_t> FGSyncedFrames { 1 };
+    CustomOptional<bool> FGSyncedDebug { false };
     CustomOptional<bool> FGDLSSGUseGamesReflexMarkers { true };
     CustomOptional<int, NoDefault>
         FGDLSSGOverrideInterpolationCount; // For overriding game's value sent to SL, could be Nvngx FG, could be noFG

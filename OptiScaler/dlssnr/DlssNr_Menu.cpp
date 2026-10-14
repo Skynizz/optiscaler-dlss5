@@ -794,6 +794,29 @@ static void GroupPerformance(Config* config)
                "\nframes land evenly. No cost. No effect without frame generation.");
 
     ImGui::EndDisabled();
+
+    // Synced FG is picked under OptiScaler's Frame Gen output list; its own settings sit here, beside the model's.
+    ImGui::Spacing();
+    ImGui::TextUnformatted("Synced FG (Frame Gen output \"Synced FG\", input \"Upscaler\"):");
+
+    int synced = (int) std::clamp(config->FGSyncedFrames.value_or_default(), 1u, 3u) - 1;
+    static const char* syncedNames[] = { "2x (1 generated)", "3x (2 generated)", "4x (3 generated)" };
+
+    if (ImGui::Combo("Synced FG multiplier", &synced, syncedNames, IM_ARRAYSIZE(syncedNames)))
+        config->FGSyncedFrames = (uint32_t) synced + 1;
+
+    HelpMarker("OptiScaler's own frame generation: frames generated between two real frames from the"
+               "\ngame's motion vectors and depth, presented at even intervals by a swapchain of its own."
+               "\nNo vendor runtime and no unlock: 3x and 4x work on any D3D12 GPU."
+               "\n\nPicked under Frame Gen (output \"Synced FG\", input \"Upscaler\"), which needs a restart."
+               "\nThe multiplier changes live. Experimental.");
+
+    bool syncedDebug = config->FGSyncedDebug.value_or_default();
+
+    if (ImGui::Checkbox("Tint generated frames", &syncedDebug))
+        config->FGSyncedDebug = syncedDebug;
+
+    HelpMarker("Shows the generated frames slightly green, to check they arrive evenly between real ones.");
 }
 
 // Image stability: what keeps the carried edit from flickering, pulsing or popping.

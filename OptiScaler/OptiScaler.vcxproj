@@ -346,6 +346,11 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClInclude Include="low_latency\input\input_xell.h" />
     <ClInclude Include="low_latency\input\input_antilag2.h" />
     <ClInclude Include="framegen\reprojection\Reprojection_Dx12.h" />
+    <ClInclude Include="framegen\synced\SyncedFG_Dx12.h" />
+    <ClInclude Include="framegen\synced\SyncedSwapchain.h" />
+    <ClInclude Include="shaders\synced_fg\SFG_Common.h" />
+    <ClInclude Include="shaders\synced_fg\SFG_Dx12.h" />
+    <ClInclude Include="shaders\synced_fg\precompiled\SFG_Shader.h" />
     <ClInclude Include="shaders\reproject\mouseInputs\RawInputHook.h" />
     <ClInclude Include="shaders\hud_copy\precompile\HudCopy_Shader_Vk.h" />
     <ClInclude Include="shaders\magnifier\Magnifier_Dx11.h" />
@@ -652,6 +657,9 @@ copy NUL "$(SolutionDir)x64\Release\a\!! EXTRACT ALL FILES TO GAME FOLDER !!" /Y
     <ClCompile Include="low_latency\input\input_xell.cpp" />
     <ClCompile Include="low_latency\input\input_antilag2.cpp" />
     <ClCompile Include="framegen\reprojection\Reprojection_Dx12.cpp" />
+    <ClCompile Include="framegen\synced\SyncedFG_Dx12.cpp" />
+    <ClCompile Include="framegen\synced\SyncedSwapchain.cpp" />
+    <ClCompile Include="shaders\synced_fg\SFG_Dx12.cpp" />
     <ClCompile Include="shaders\reproject\mouseInputs\RawInputHook.cpp" />
     <ClCompile Include="shaders\magnifier\Magnifier_Dx11.cpp" />
     <ClCompile Include="menu\input\input_system.cpp" />

@@ -735,6 +735,8 @@ void CheckCaptureTrigger()
             else if (k == "RegionMaskStrength") c->DlssNrRegionMaskStrength = v;
             else if (k == "RegionMaskIgnoreFloor") c->DlssNrRegionMaskIgnoreFloor = b;
             else if (k == "RegionMaskShow") c->DlssNrRegionMaskShow = b;
+            else if (k == "SyncedFrames") c->FGSyncedFrames = (uint32_t) v;
+            else if (k == "SyncedDebug") c->FGSyncedDebug = b;
             else if (k == "CacheFingerprint") c->DlssNrCacheFingerprint = b;
             else if (k == "CacheContext") c->DlssNrCacheContext = b;
             else if (k == "CacheFingerprintTolerance") c->DlssNrCacheFingerprintTolerance = v;

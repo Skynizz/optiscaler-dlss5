@@ -3389,6 +3389,7 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
         { FGOutput::DLSSG, "DLSSG", "DLSSG output\nCan be used in conjuction with Nukem's for example" },
         { FGOutput::XeFG, "XeFG", "XeFG - heaviest, but best universal FG\n\nXeFG 3 overall deals best with HUD\n\nEnable UI Composition if HUD ghosting" },
         { FGOutput::Reprojection, "Reprojection (WIP)", "Reprojects the game image using new mouse data\nKinda like Reflex 2, perceived latency improvement\n\n- REQUIRES DLSSG VIA STREAMLINE AS INPUT\n- Only works with first person perspective games\n- Only mouse, no controller\n- If possible, disable any mouse/camera smoothing in the game\n" },
+        { FGOutput::Synced, "Synced FG (DLSS 5 Optimised)", "OptiScaler's own frame generation and multi frame generation:\n1 to 3 frames generated between real frames from the motion vectors and depth,\npresented by a swapchain of its own. No vendor runtime, any D3D12 GPU.\n\nExperimental. Use with FG input: Upscaler. Frame count under DLSS 5 > Performance." },
     };
 
     // clang-format on
@@ -3423,6 +3424,11 @@ void MenuCommon::RenderFrameGenerationSelection(RenderMenuContext& ctx)
     // XeFG output requirements
     auto constexpr xefgOutputIndex = (uint32_t) FGOutput::XeFG;
     outputOptions[xefgOutputIndex].set_disabled(state.swapchainApi == API::Vulkan, "Unsupported API");
+
+    // Synced FG output requirements: its swapchain and frame generation are D3D12 only
+    auto constexpr syncedOutputIndex = (uint32_t) FGOutput::Synced;
+    outputOptions[syncedOutputIndex].set_disabled(state.swapchainApi == API::Vulkan || state.swapchainApi == API::DX11,
+                                                  "Unsupported API");
     // Unsupported FG input selected
     const auto currentInputIndex = (uint32_t) state.activeFgInput;
     if (config->FGInput != FGInput::NoFG && inputOptions.size() > currentInputIndex &&

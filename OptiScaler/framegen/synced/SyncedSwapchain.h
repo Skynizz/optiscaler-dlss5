@@ -1,0 +1,171 @@
+#pragma once
+
+#include "SysUtils.h"
+
+#include <dxgi1_6.h>
+#include <d3d12.h>
+
+#include <condition_variable>
+#include <deque>
+#include <mutex>
+#include <thread>
+#include <vector>
+
+// The swapchain of Synced frame generation.
+//
+// The game renders into back buffers of ours (same size, format and flags as the real ones) and never touches
+// the real swapchain. Its Present hands the frame over; a thread of ours presents, at their own times, the
+// frames generated between the last real frame and this one and then this one, each copied into the real
+// back buffer just before it is presented. Generated frames that would arrive late are dropped -- the real
+// frame never is -- and the game is held back when two of its frames are still waiting, as a real swapchain
+// would hold it.
+//
+// With nothing queued by frame generation (off, paused, no inputs yet) a Present presents the game's own frame
+// as it was, through the same thread.
+class DECLSPEC_UUID("6b3c7c0e-5c1e-4b0b-9a8e-2f1d5a7e93c4") SyncedDXGISwapChain final : public IDXGISwapChain4
+{
+  public:
+    struct QueuedFrame
+    {
+        ID3D12Resource* texture = nullptr;
+        D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
+        bool generated = false;
+    };
+
+    SyncedDXGISwapChain(IDXGISwapChain* real, ID3D12CommandQueue* queue, HWND hwnd);
+    virtual ~SyncedDXGISwapChain();
+
+    // For frame generation, on the game's thread, between the game finishing a frame and its Present.
+    ID3D12Resource* CurrentProxy();
+    // Bumped whenever the back buffers are rebuilt: anything kept from before is stale.
+    UINT64 Generation() const { return _generation; }
+    // The frames to present for this Present, in order (generated ones first, the real one last).
+    void QueueFrames(const QueuedFrame* frames, UINT count);
+
+    // IUnknown
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvObject) override;
+    ULONG STDMETHODCALLTYPE AddRef() override;
+    ULONG STDMETHODCALLTYPE Release() override;
+
+    // IDXGIObject
+    HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID Name, UINT DataSize, const void* pData) override;
+    HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(REFGUID Name, const IUnknown* pUnknown) override;
+    HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID Name, UINT* pDataSize, void* pData) override;
+    HRESULT STDMETHODCALLTYPE GetParent(REFIID riid, void** ppParent) override;
+
+    // IDXGIDeviceSubObject
+    HRESULT STDMETHODCALLTYPE GetDevice(REFIID riid, void** ppDevice) override;
+
+    // IDXGISwapChain
+    HRESULT STDMETHODCALLTYPE Present(UINT SyncInterval, UINT Flags) override;
+    HRESULT STDMETHODCALLTYPE GetBuffer(UINT Buffer, REFIID riid, void** ppSurface) override;
+    HRESULT STDMETHODCALLTYPE SetFullscreenState(BOOL Fullscreen, IDXGIOutput* pTarget) override;
+    HRESULT STDMETHODCALLTYPE GetFullscreenState(BOOL* pFullscreen, IDXGIOutput** ppTarget) override;
+    HRESULT STDMETHODCALLTYPE GetDesc(DXGI_SWAP_CHAIN_DESC* pDesc) override;
+    HRESULT STDMETHODCALLTYPE ResizeBuffers(UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT NewFormat,
+                                            UINT SwapChainFlags) override;
+    HRESULT STDMETHODCALLTYPE ResizeTarget(const DXGI_MODE_DESC* pNewTargetParameters) override;
+    HRESULT STDMETHODCALLTYPE GetContainingOutput(IDXGIOutput** ppOutput) override;
+    HRESULT STDMETHODCALLTYPE GetFrameStatistics(DXGI_FRAME_STATISTICS* pStats) override;
+    HRESULT STDMETHODCALLTYPE GetLastPresentCount(UINT* pLastPresentCount) override;
+
+    // IDXGISwapChain1
+    HRESULT STDMETHODCALLTYPE GetDesc1(DXGI_SWAP_CHAIN_DESC1* pDesc) override;
+    HRESULT STDMETHODCALLTYPE GetFullscreenDesc(DXGI_SWAP_CHAIN_FULLSCREEN_DESC* pDesc) override;
+    HRESULT STDMETHODCALLTYPE GetHwnd(HWND* pHwnd) override;
+    HRESULT STDMETHODCALLTYPE GetCoreWindow(REFIID refiid, void** ppUnk) override;
+    HRESULT STDMETHODCALLTYPE Present1(UINT SyncInterval, UINT PresentFlags,
+                                       const DXGI_PRESENT_PARAMETERS* pPresentParameters) override;
+    BOOL STDMETHODCALLTYPE IsTemporaryMonoSupported(void) override;
+    HRESULT STDMETHODCALLTYPE GetRestrictToOutput(IDXGIOutput** ppRestrictToOutput) override;
+    HRESULT STDMETHODCALLTYPE SetBackgroundColor(const DXGI_RGBA* pColor) override;
+    HRESULT STDMETHODCALLTYPE GetBackgroundColor(DXGI_RGBA* pColor) override;
+    HRESULT STDMETHODCALLTYPE SetRotation(DXGI_MODE_ROTATION Rotation) override;
+    HRESULT STDMETHODCALLTYPE GetRotation(DXGI_MODE_ROTATION* pRotation) override;
+
+    // IDXGISwapChain2
+    HRESULT STDMETHODCALLTYPE SetSourceSize(UINT Width, UINT Height) override;
+    HRESULT STDMETHODCALLTYPE GetSourceSize(UINT* pWidth, UINT* pHeight) override;
+    HRESULT STDMETHODCALLTYPE SetMaximumFrameLatency(UINT MaxLatency) override;
+    HRESULT STDMETHODCALLTYPE GetMaximumFrameLatency(UINT* pMaxLatency) override;
+    HANDLE STDMETHODCALLTYPE GetFrameLatencyWaitableObject(void) override;
+    HRESULT STDMETHODCALLTYPE SetMatrixTransform(const DXGI_MATRIX_3X2_F* pMatrix) override;
+    HRESULT STDMETHODCALLTYPE GetMatrixTransform(DXGI_MATRIX_3X2_F* pMatrix) override;
+
+    // IDXGISwapChain3
+    UINT STDMETHODCALLTYPE GetCurrentBackBufferIndex(void) override;
+    HRESULT STDMETHODCALLTYPE CheckColorSpaceSupport(DXGI_COLOR_SPACE_TYPE ColorSpace,
+                                                     UINT* pColorSpaceSupport) override;
+    HRESULT STDMETHODCALLTYPE SetColorSpace1(DXGI_COLOR_SPACE_TYPE ColorSpace) override;
+    HRESULT STDMETHODCALLTYPE ResizeBuffers1(UINT BufferCount, UINT Width, UINT Height, DXGI_FORMAT Format,
+                                             UINT SwapChainFlags, const UINT* pCreationNodeMask,
+                                             IUnknown* const* ppPresentQueue) override;
+
+    // IDXGISwapChain4
+    HRESULT STDMETHODCALLTYPE SetHDRMetaData(DXGI_HDR_METADATA_TYPE Type, UINT Size, void* pMetaData) override;
+
+  private:
+    struct Job
+    {
+        QueuedFrame frame;
+        LONGLONG due = 0; // QPC ticks
+        UINT syncInterval = 0;
+        UINT flags = 0;
+    };
+
+    struct PresentSlot
+    {
+        ID3D12CommandAllocator* allocator = nullptr;
+        ID3D12GraphicsCommandList* list = nullptr;
+        UINT64 fenceValue = 0;
+    };
+
+    static constexpr UINT kSlots = 8;
+
+    IDXGISwapChain* _real = nullptr;
+    IDXGISwapChain1* _real1 = nullptr;
+    IDXGISwapChain2* _real2 = nullptr;
+    IDXGISwapChain3* _real3 = nullptr;
+    IDXGISwapChain4* _real4 = nullptr;
+    ID3D12CommandQueue* _queue = nullptr;
+    ID3D12Device* _device = nullptr;
+    HWND _hwnd = nullptr;
+    LONG _refcount = 1;
+
+    // The game's back buffers, and the real ones the presenter copies into.
+    std::vector<ID3D12Resource*> _proxies;
+    std::vector<ID3D12Resource*> _realBuffers;
+    UINT _proxyIndex = 0;
+    UINT64 _generation = 0;
+
+    // The presenter.
+    std::thread _thread;
+    std::mutex _mutex;              // the job queue and everything below
+    std::condition_variable _wake;  // jobs arrived, or stop
+    std::condition_variable _drain; // a real frame left the queue, or the queue emptied
+    std::deque<Job> _jobs;
+    std::vector<QueuedFrame> _pending; // queued by frame generation for the next Present
+    UINT _realFramesQueued = 0;
+    bool _busy = false;
+    bool _stop = false;
+
+    std::mutex _swapchainMutex; // the real swapchain: a present never overlaps a resize
+    PresentSlot _slots[kSlots] {};
+    UINT _slot = 0;
+    ID3D12Fence* _fence = nullptr;
+    HANDLE _fenceEvent = nullptr;
+    UINT64 _fenceValue = 0;
+
+    // Pacing: the game's frame interval, smoothed, in QPC ticks.
+    LONGLONG _qpcFrequency = 1;
+    LONGLONG _lastArrival = 0;
+    double _interval = 0.0;
+
+    bool CreateProxies();
+    void ReleaseBuffers();
+    void WaitIdle(std::unique_lock<std::mutex>& lock);
+    void WaitGpu();
+    HRESULT HandOver(UINT SyncInterval, UINT Flags);
+    void PresenterLoop();
+    bool PresentJob(const Job& job);
+};
