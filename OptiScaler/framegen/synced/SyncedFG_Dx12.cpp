@@ -344,6 +344,26 @@ bool SyncedFG_Dx12::Present()
                 ResourceBarrier(cmd, mv, velocity->state, read);
                 ResourceBarrier(cmd, dp, depth->state, read);
 
+                // The frames without their HUD, this one's and the last one's, when OptiScaler hands them over
+                // (HUDFix): each frame index keeps its own buffer, so the last one is still there.
+                const int prevIndex = (fIndex + BUFFER_COUNT - 1) % BUFFER_COUNT;
+                auto hudCur = GetResource(FG_ResourceType::HudlessColor, fIndex);
+                auto hudPrev = GetResource(FG_ResourceType::HudlessColor, prevIndex);
+                ID3D12Resource* hudCurRes = nullptr;
+                ID3D12Resource* hudPrevRes = nullptr;
+
+                if (hudCur && hudPrev && hudCur->validity != FG_ResourceValidity::ValidNow &&
+                    hudPrev->validity != FG_ResourceValidity::ValidNow && hudCur->GetResource() != nullptr &&
+                    hudPrev->GetResource() != nullptr && hudCur->GetResource() != hudPrev->GetResource() &&
+                    hudCur->width == _historyDesc.Width && hudCur->height == _historyDesc.Height &&
+                    hudPrev->width == _historyDesc.Width && hudPrev->height == _historyDesc.Height)
+                {
+                    hudCurRes = hudCur->GetResource();
+                    hudPrevRes = hudPrev->GetResource();
+                    ResourceBarrier(cmd, hudCurRes, hudCur->state, read);
+                    ResourceBarrier(cmd, hudPrevRes, hudPrev->state, read);
+                }
+
                 SFGConstants c {};
                 c.outWidth = (UINT) _historyDesc.Width;
                 c.outHeight = _historyDesc.Height;
@@ -356,6 +376,8 @@ bool SyncedFG_Dx12::Present()
                 c.depthHeight = (float) std::max<UINT>(depth->height, 1);
                 c.staticThreshold = 0.004f;
                 c.debugView = Config::Instance()->FGSyncedDebug.value_or_default() ? 1u : 0u;
+                c.hasHudless = hudCurRes != nullptr ? 1u : 0u;
+                c.uiThreshold = 0.03f;
 
                 for (UINT k = 0; k < wanted; k++)
                 {
@@ -363,7 +385,8 @@ bool SyncedFG_Dx12::Present()
                     c.t = (float) (k + 1) / (float) (wanted + 1);
 
                     ResourceBarrier(cmd, out, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-                    const bool ok = _generator->Dispatch(cmd, _history[prev], _history[cur], mv, dp, out, c);
+                    const bool ok =
+                        _generator->Dispatch(cmd, _history[prev], _history[cur], mv, dp, out, c, hudPrevRes, hudCurRes);
                     ResourceBarrier(cmd, out, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
 
                     if (!ok)
@@ -376,6 +399,12 @@ bool SyncedFG_Dx12::Present()
                 ResourceBarrier(cmd, _history[cur], read, D3D12_RESOURCE_STATE_COMMON);
                 ResourceBarrier(cmd, mv, read, velocity->state);
                 ResourceBarrier(cmd, dp, read, depth->state);
+
+                if (hudCurRes != nullptr)
+                {
+                    ResourceBarrier(cmd, hudCurRes, read, hudCur->state);
+                    ResourceBarrier(cmd, hudPrevRes, read, hudPrev->state);
+                }
             }
         }
     }
@@ -400,6 +429,9 @@ bool SyncedFG_Dx12::Present()
 
     _presented++;
     _previousValid = true;
+
+    // Dispatched, as far as the frame bookkeeping is concerned (resource indices, the "frame jumped" check).
+    _lastDispatchedFrame = _frameCount;
 
     // The swapchain's own Present hands these to its presenter.
     return false;

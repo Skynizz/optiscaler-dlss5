@@ -25,7 +25,8 @@ class SFG_Dx12 : public Shader_Dx12
     // Every input in NON_PIXEL_SHADER_RESOURCE, the output in UNORDERED_ACCESS.
     bool Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* prevColor, ID3D12Resource* curColor,
                   ID3D12Resource* velocity, ID3D12Resource* depth, ID3D12Resource* output,
-                  const SFGConstants& constants);
+                  const SFGConstants& constants, ID3D12Resource* hudlessPrev = nullptr,
+                  ID3D12Resource* hudlessCur = nullptr);
 
     SFG_Dx12(std::string name, ID3D12Device* device);
     ~SFG_Dx12();

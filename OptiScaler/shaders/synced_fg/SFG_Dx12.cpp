@@ -7,7 +7,7 @@
 
 bool SFG_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* prevColor, ID3D12Resource* curColor,
                         ID3D12Resource* velocity, ID3D12Resource* depth, ID3D12Resource* output,
-                        const SFGConstants& constants)
+                        const SFGConstants& constants, ID3D12Resource* hudlessPrev, ID3D12Resource* hudlessCur)
 {
     if (!_init || _device == nullptr || cmdList == nullptr || prevColor == nullptr || curColor == nullptr ||
         velocity == nullptr || depth == nullptr || output == nullptr)
@@ -20,6 +20,9 @@ bool SFG_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* prev
     CreateShaderResourceView(_device, curColor, heap.GetSrvCPU(1));
     CreateShaderResourceView(_device, velocity, heap.GetSrvCPU(2));
     CreateShaderResourceView(_device, depth, heap.GetSrvCPU(3));
+    // Every slot gets a view: without HUD-less frames the frames themselves stand in (and are not read).
+    CreateShaderResourceView(_device, hudlessPrev != nullptr ? hudlessPrev : prevColor, heap.GetSrvCPU(4));
+    CreateShaderResourceView(_device, hudlessCur != nullptr ? hudlessCur : curColor, heap.GetSrvCPU(5));
     CreateUnorderedAccessView(_device, output, heap.GetUavCPU(0), 0);
 
     if (!CreateConstantsBuffer(_device, _constantBuffers[_counter], constants, heap.GetCbvCPU(0)))
@@ -58,7 +61,7 @@ SFG_Dx12::SFG_Dx12(std::string name, ID3D12Device* device) : Shader_Dx12(name, d
     sampler.ShaderRegister = 0;
     sampler.ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
-    if (!SetupRootSignature(device, 4, 1, 1, 0, 0, 1, &sampler))
+    if (!SetupRootSignature(device, 6, 1, 1, 0, 0, 1, &sampler))
     {
         LOG_ERROR("[{0}] Failed to setup root signature", _name);
         return;

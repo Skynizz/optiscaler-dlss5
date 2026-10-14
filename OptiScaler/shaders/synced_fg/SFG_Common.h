@@ -13,6 +13,12 @@
 // motion past its edge, not the background's). Where the two frames disagree -- one of them sees something
 // the other does not -- this frame's colour wins: its position was found from its own vectors. A pixel the
 // same in both frames (the HUD, anything standing still) is this frame's, untouched.
+//
+// The HUD. The motion vectors are the scene's, so a pixel next to the crosshair or the weapon panel fetched them
+// from where the scene came from -- and copied them there: a trail of ghost HUD at every camera move. A sample
+// whose colour stands still while the scene under it moves is HUD, and the other frame's sample (which sees the
+// scene there) is taken instead. When OptiScaler hands over the frame without its HUD (HUDFix), the scene is
+// interpolated from that alone and this frame's HUD laid back on top, untouched.
 struct alignas(256) SFGConstants
 {
     UINT outWidth;
@@ -29,6 +35,11 @@ struct alignas(256) SFGConstants
     float depthHeight;
     float staticThreshold; // the largest difference, relative, at which a pixel counts as unchanged
     UINT debugView;        // 1 tints generated frames, so their pacing shows
+
+    UINT hasHudless;   // t4 / t5 hold the frames without their HUD
+    float uiThreshold; // the difference, relative, between the frame and its HUD-less copy that marks HUD
+    UINT pad0;
+    UINT pad1;
 };
 
 inline static std::string sfgCode = R"(
@@ -46,12 +57,18 @@ cbuffer Params : register(b0)
     float depthHeight;
     float staticThreshold;
     uint debugView;
+    uint hasHudless;
+    float uiThreshold;
+    uint pad0;
+    uint pad1;
 };
 
 Texture2D<float4> PrevColor : register(t0);
 Texture2D<float4> CurColor : register(t1);
 Texture2D<float4> Velocity : register(t2);
 Texture2D<float4> Depth : register(t3);
+Texture2D<float4> HudlessPrev : register(t4);
+Texture2D<float4> HudlessCur : register(t5);
 RWTexture2D<float4> Output : register(u0);
 SamplerState Linear : register(s0);
 
@@ -88,6 +105,23 @@ float MaxOf(float3 v) { return max(v.r, max(v.g, v.b)); }
 
 bool Inside(float2 uv) { return all(uv >= 0.0) && all(uv <= 1.0); }
 
+// Unchanged between the two frames, relative to its brightness.
+bool StaticAt(int2 c)
+{
+    const float4 a = PrevColor.Load(int3(c, 0));
+    const float4 b = CurColor.Load(int3(c, 0));
+    const float scale = max(MaxOf(a.rgb), MaxOf(b.rgb)) + 0.02;
+    return MaxOf(abs(b.rgb - a.rgb)) / scale <= staticThreshold * 2.0;
+}
+
+// HUD: a colour that stands still where the scene under it moves (more than a pixel between the frames).
+bool HudAt(float2 uv)
+{
+    const int2 c = clamp(int2(uv * float2(outWidth, outHeight)), int2(0, 0), int2(outWidth, outHeight) - 1);
+    const float2 sceneMotion = MotionAt(uv) * float2(outWidth, outHeight);
+    return dot(sceneMotion, sceneMotion) > 1.0 && StaticAt(c);
+}
+
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID)
 {
@@ -97,6 +131,19 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     const float2 uv = (float2(id.xy) + 0.5) / float2(outWidth, outHeight);
     const float4 prevHere = PrevColor.Load(int3(id.xy, 0));
     const float4 curHere = CurColor.Load(int3(id.xy, 0));
+
+    // HUD-less frames: where this frame differs from its HUD-less copy is HUD, shown as it is now.
+    if (hasHudless != 0)
+    {
+        const float4 sceneHere = HudlessCur.Load(int3(id.xy, 0));
+        const float uiScale = max(MaxOf(curHere.rgb), MaxOf(sceneHere.rgb)) + 0.02;
+
+        if (MaxOf(abs(curHere.rgb - sceneHere.rgb)) / uiScale > uiThreshold)
+        {
+            Output[id.xy] = curHere;
+            return;
+        }
+    }
 
     const float3 delta = abs(curHere.rgb - prevHere.rgb);
     const float scale = max(MaxOf(curHere.rgb), MaxOf(prevHere.rgb)) + 0.02;
@@ -115,8 +162,24 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     const float2 q = uv - m * (1.0 - t);
     const float2 p = uv + m * t;
 
-    const float4 fromCur = CurColor.SampleLevel(Linear, q, 0);
-    const float4 fromPrev = PrevColor.SampleLevel(Linear, p, 0);
+    float4 fromCur;
+    float4 fromPrev;
+    bool curIsHud = false;
+    bool prevIsHud = false;
+
+    if (hasHudless != 0)
+    {
+        // The scene alone: nothing of the HUD can be dragged along.
+        fromCur = HudlessCur.SampleLevel(Linear, q, 0);
+        fromPrev = HudlessPrev.SampleLevel(Linear, p, 0);
+    }
+    else
+    {
+        fromCur = CurColor.SampleLevel(Linear, q, 0);
+        fromPrev = PrevColor.SampleLevel(Linear, p, 0);
+        curIsHud = HudAt(q);
+        prevIsHud = HudAt(p);
+    }
 
     float w = t;
 
@@ -124,6 +187,16 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         w = 1.0;
     else if (!Inside(q))
         w = 0.0;
+    else if (curIsHud && !prevIsHud)
+        w = 0.0;
+    else if (prevIsHud && !curIsHud)
+        w = 1.0;
+    else if (curIsHud && prevIsHud)
+    {
+        // HUD on both sides: the pixel itself, as this frame shows it.
+        Output[id.xy] = curHere;
+        return;
+    }
     else
     {
         const float disagree = MaxOf(abs(fromCur.rgb - fromPrev.rgb)) /
