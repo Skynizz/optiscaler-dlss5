@@ -737,6 +737,14 @@ void CheckCaptureTrigger()
             else if (k == "RegionMaskShow") c->DlssNrRegionMaskShow = b;
             else if (k == "SyncedFrames") c->FGSyncedFrames = (uint32_t) v;
             else if (k == "SyncedDebug") c->FGSyncedDebug = b;
+            else if (k == "FGActive")
+            {
+                // As the menu's Active switch does it: switching on also marks frame generation as changed.
+                c->FGEnabled = b;
+
+                if (b)
+                    State::Instance().fgChanged = true;
+            }
             else if (k == "CacheFingerprint") c->DlssNrCacheFingerprint = b;
             else if (k == "CacheContext") c->DlssNrCacheContext = b;
             else if (k == "CacheFingerprintTolerance") c->DlssNrCacheFingerprintTolerance = v;

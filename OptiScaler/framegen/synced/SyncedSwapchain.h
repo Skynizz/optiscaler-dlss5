@@ -42,6 +42,12 @@ class DECLSPEC_UUID("6b3c7c0e-5c1e-4b0b-9a8e-2f1d5a7e93c4") SyncedDXGISwapChain 
     // The frames to present for this Present, in order (generated ones first, the real one last).
     void QueueFrames(const QueuedFrame* frames, UINT count);
 
+    // Waits until the GPU has finished presenting the real frame handed over `framesAgo` Presents ago (and so all
+    // the work submitted before it). Frame generation calls it before reusing anything of its own: a game on a
+    // waitable swapchain never blocks in Present, and nothing else would stop it running ahead of the GPU until
+    // command lists and textures still in use were rewritten -- a hung GPU.
+    void ThrottleGpu(UINT framesAgo);
+
     // IUnknown
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppvObject) override;
     ULONG STDMETHODCALLTYPE AddRef() override;
@@ -108,6 +114,7 @@ class DECLSPEC_UUID("6b3c7c0e-5c1e-4b0b-9a8e-2f1d5a7e93c4") SyncedDXGISwapChain 
     struct Job
     {
         QueuedFrame frame;
+        UINT64 realIndex = 0; // for a real frame: its hand-over number
         LONGLONG due = 0; // QPC ticks
         UINT syncInterval = 0;
         UINT flags = 0;
@@ -148,6 +155,12 @@ class DECLSPEC_UUID("6b3c7c0e-5c1e-4b0b-9a8e-2f1d5a7e93c4") SyncedDXGISwapChain 
     UINT _realFramesQueued = 0;
     bool _busy = false;
     bool _stop = false;
+
+    // The fence value signalled after each real frame's copy, by hand-over order (written by the presenter).
+    static constexpr UINT kRealFenceRing = 16;
+    UINT64 _realFenceValues[kRealFenceRing] {};
+    UINT64 _handedOver = 0; // real frames handed over (game thread)
+    UINT64 _realQueued = 0; // real frames whose job was queued, numbering the jobs
 
     std::mutex _swapchainMutex; // the real swapchain: a present never overlaps a resize
     PresentSlot _slots[kSlots] {};

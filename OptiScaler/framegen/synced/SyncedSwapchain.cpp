@@ -137,6 +137,43 @@ ID3D12Resource* SyncedDXGISwapChain::CurrentProxy()
     return _proxyIndex < _proxies.size() ? _proxies[_proxyIndex] : nullptr;
 }
 
+void SyncedDXGISwapChain::ThrottleGpu(UINT framesAgo)
+{
+    if (_fence == nullptr || _fenceEvent == nullptr || framesAgo == 0 || framesAgo >= kRealFenceRing)
+        return;
+
+    UINT64 value = 0;
+
+    {
+        std::unique_lock<std::mutex> lock(_mutex);
+
+        if (_handedOver <= framesAgo)
+            return;
+
+        const UINT64 index = _handedOver - framesAgo + 1;
+
+        // Its job may still be waiting for its time: wait for the presenter to submit it first.
+        _drain.wait_for(lock, std::chrono::milliseconds(500),
+                        [&] { return _realFenceValues[index % kRealFenceRing] != 0 || _stop; });
+        value = _realFenceValues[index % kRealFenceRing];
+    }
+
+    if (value == 0 || _fence->GetCompletedValue() >= value)
+        return;
+
+    HANDLE event = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+
+    if (event == nullptr)
+        return;
+
+    _fence->SetEventOnCompletion(value, event);
+
+    if (WaitForSingleObject(event, 2000) != WAIT_OBJECT_0)
+        LOG_WARN("Synced FG: the GPU is more than two frames behind and did not catch up within 2 s");
+
+    CloseHandle(event);
+}
+
 void SyncedDXGISwapChain::QueueFrames(const QueuedFrame* frames, UINT count)
 {
     std::lock_guard<std::mutex> lock(_mutex);
@@ -180,13 +217,19 @@ HRESULT SyncedDXGISwapChain::HandOver(UINT SyncInterval, UINT Flags)
         job.due = now.QuadPart + (LONGLONG) (step * (double) i);
         job.syncInterval = SyncInterval;
         job.flags = Flags;
-        _jobs.push_back(job);
 
         if (!job.frame.generated)
+        {
+            job.realIndex = ++_realQueued;
+            _realFenceValues[job.realIndex % kRealFenceRing] = 0;
             _realFramesQueued++;
+        }
+
+        _jobs.push_back(job);
     }
 
     _pending.clear();
+    _handedOver = _realQueued;
 
     if (!_proxies.empty())
         _proxyIndex = (_proxyIndex + 1) % (UINT) _proxies.size();
@@ -250,6 +293,11 @@ void SyncedDXGISwapChain::PresenterLoop()
         {
             std::lock_guard<std::mutex> lock(_mutex);
             _busy = false;
+
+            // The last value signalled covers this frame's copy (or nothing of it, if it failed): either way all
+            // the work submitted before it.
+            if (!job.frame.generated)
+                _realFenceValues[job.realIndex % kRealFenceRing] = std::max<UINT64>(_fenceValue, 1);
 
             if (!job.frame.generated && _realFramesQueued > 0)
                 _realFramesQueued--;

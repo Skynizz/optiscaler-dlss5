@@ -300,6 +300,9 @@ bool SyncedFG_Dx12::Present()
     _swapchainGeneration = _synced->Generation();
     lastFrameCount = _frameCount;
 
+    // Nothing of ours is reused before the GPU is done with it: at most two real frames in flight.
+    _synced->ThrottleGpu(2);
+
     auto cmd = GetSCCommandList(fIndex);
 
     if (cmd == nullptr)
