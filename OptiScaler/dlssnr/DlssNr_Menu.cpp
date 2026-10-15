@@ -799,23 +799,36 @@ static void GroupPerformance(Config* config)
     ImGui::Spacing();
     ImGui::TextUnformatted("Synced FG (Frame Gen output \"Synced FG\", input \"Upscaler\"):");
 
-    if (State::Instance().activeFgOutput == FGOutput::Synced)
     {
-        bool fgActive = config->FGEnabled.value_or_default();
+        // One switch for all of it: picks Synced FG under Frame Gen (input Upscaler, output Synced FG) and turns
+        // frame generation on. The output is chosen when the game starts, so the first time it needs a restart.
+        const bool selected = config->FGOutput.value_or_default() == FGOutput::Synced;
+        const bool running = State::Instance().activeFgOutput == FGOutput::Synced;
+        bool use = selected && config->FGEnabled.value_or_default();
 
-        if (ImGui::Checkbox("Synced FG active", &fgActive))
+        if (ImGui::Checkbox("Synced FG", &use))
         {
-            config->FGEnabled = fgActive;
+            if (use)
+            {
+                config->FGInput = FGInput::Upscaler;
+                config->FGOutput = FGOutput::Synced;
+                config->FGEnabled = true;
 
-            if (fgActive)
-                State::Instance().fgChanged = true;
+                if (running)
+                    State::Instance().fgChanged = true;
+            }
+            else
+            {
+                config->FGEnabled = false;
+            }
         }
 
-        HelpMarker("Turns frame generation on and off, live (the same switch as \"Active\" under Frame Gen).");
-    }
-    else
-    {
-        ImGui::TextDisabled("Not selected: pick output \"Synced FG\" under Frame Gen and restart the game.");
+        HelpMarker("Turns Synced FG on and off. On also selects it under Frame Gen (input Upscaler, output Synced"
+                   "\nFG); the first time, save the settings and restart the game. After that it switches live.");
+
+        if (use && !running)
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
+                               "Save the settings and restart the game to start Synced FG.");
     }
 
     int synced = (int) std::clamp(config->FGSyncedFrames.value_or_default(), 1u, 3u) - 1;

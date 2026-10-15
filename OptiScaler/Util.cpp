@@ -777,6 +777,68 @@ void Util::GetDeviceRemovedReason(ID3D12Device* pDevice)
     default:
         LOG_ERROR("Device removed reason: Unknown ({:X})", (UINT) reason);
     }
+
+    // With DRED on (FGSyncedDred): which command lists the GPU had not finished and on which operation, and the
+    // page fault if there was one. Once: every later call sees the same removed device.
+    static bool dredLogged = false;
+
+    if (dredLogged || reason == S_OK)
+        return;
+
+    ID3D12DeviceRemovedExtendedData* dred = nullptr;
+
+    if (pDevice->QueryInterface(IID_PPV_ARGS(&dred)) != S_OK || dred == nullptr)
+        return;
+
+    dredLogged = true;
+
+    D3D12_DRED_AUTO_BREADCRUMBS_OUTPUT crumbs {};
+
+    if (dred->GetAutoBreadcrumbsOutput(&crumbs) == S_OK)
+    {
+        int listed = 0;
+
+        for (auto node = crumbs.pHeadAutoBreadcrumbNode; node != nullptr && listed < 24; node = node->pNext)
+        {
+            const UINT done = node->pLastBreadcrumbValue != nullptr ? *node->pLastBreadcrumbValue : 0;
+
+            if (done >= node->BreadcrumbCount)
+                continue; // finished
+
+            const auto list = node->pCommandListDebugNameW != nullptr ? wstring_to_string(node->pCommandListDebugNameW)
+                                                                       : std::string("(unnamed)");
+            const auto queue = node->pCommandQueueDebugNameW != nullptr
+                                   ? wstring_to_string(node->pCommandQueueDebugNameW)
+                                   : std::string("(unnamed)");
+            const int op = (node->pCommandHistory != nullptr && done < node->BreadcrumbCount)
+                               ? (int) node->pCommandHistory[done]
+                               : -1;
+
+            LOG_ERROR("DRED: list {} on queue {} stopped at {}/{}, next op {}", list, queue, done,
+                      node->BreadcrumbCount, op);
+            listed++;
+        }
+
+        if (listed == 0)
+            LOG_ERROR("DRED: every recorded command list had finished");
+    }
+
+    D3D12_DRED_PAGE_FAULT_OUTPUT fault {};
+
+    if (dred->GetPageFaultAllocationOutput(&fault) == S_OK && fault.PageFaultVA != 0)
+    {
+        LOG_ERROR("DRED: page fault at {:X}", (UINT64) fault.PageFaultVA);
+
+        for (auto a = fault.pHeadExistingAllocationNode; a != nullptr; a = a->pNext)
+            LOG_ERROR("DRED:   existing allocation {}",
+                      a->ObjectNameW != nullptr ? wstring_to_string(a->ObjectNameW) : std::string("(unnamed)"));
+
+        for (auto a = fault.pHeadRecentFreedAllocationNode; a != nullptr; a = a->pNext)
+            LOG_ERROR("DRED:   recently freed {}",
+                      a->ObjectNameW != nullptr ? wstring_to_string(a->ObjectNameW) : std::string("(unnamed)"));
+    }
+
+    dred->Release();
 }
 
 void Util::LoadProxyLibrary(const std::wstring& name, const std::wstring& optiPath, const std::wstring& overridePath,

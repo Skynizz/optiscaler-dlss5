@@ -197,6 +197,8 @@ bool Config::Reload(std::filesystem::path iniPath)
             FGDLSSGInterpolationCount.set_from_config(readInt("DLSSG", "InterpolationCount"));
             FGSyncedFrames.set_from_config(readUInt("FrameGen", "SyncedFrames"));
             FGSyncedDebug.set_from_config(readBool("FrameGen", "SyncedDebug"));
+            FGSyncedDred.set_from_config(readBool("FrameGen", "SyncedDred"));
+            FGSyncedCapToRefresh.set_from_config(readBool("FrameGen", "SyncedCapToRefresh"));
             if (FGDLSSGInterpolationCount.has_value() &&
                 (FGDLSSGInterpolationCount.value() < 1 || FGDLSSGInterpolationCount.value() > 6))
                 FGDLSSGInterpolationCount.reset();
@@ -1080,6 +1082,9 @@ bool Config::SaveIni()
     {
         ini.SetValue("FrameGen", "SyncedFrames", GetIntValue(Instance()->FGSyncedFrames.value_for_config()).c_str());
         ini.SetValue("FrameGen", "SyncedDebug", GetBoolValue(Instance()->FGSyncedDebug.value_for_config()).c_str());
+        ini.SetValue("FrameGen", "SyncedDred", GetBoolValue(Instance()->FGSyncedDred.value_for_config()).c_str());
+        ini.SetValue("FrameGen", "SyncedCapToRefresh",
+                     GetBoolValue(Instance()->FGSyncedCapToRefresh.value_for_config()).c_str());
         ini.SetValue("DLSSG", "InterpolationCount",
                      GetIntValue(Instance()->FGDLSSGInterpolationCount.value_for_config()).c_str());
         ini.SetValue("DLSSG", "UseGamesReflexMarkers",

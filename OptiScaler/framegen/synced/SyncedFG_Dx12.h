@@ -69,7 +69,11 @@ class SyncedFG_Dx12 : public virtual IFGFeature_Dx12
 
     // The game's frames as it presented them, and the generated frames, all at rest in COMMON.
     ID3D12Resource* _history[kHistory] {};
-    ID3D12Resource* _outputs[kOutputSets][kMaxGenerated] {};
+    // Per set, the generated frames and, last, the copy of the real frame the present queue reads. The history is
+    // never handed over: the game's queue reads it again for the next frame while the present queue would still
+    // be copying it, and a texture used by two queues at once (without simultaneous access) is undefined -- on
+    // NVIDIA its compression can be torn and the GPU hang.
+    ID3D12Resource* _outputs[kOutputSets][kMaxGenerated + 1] {};
     D3D12_RESOURCE_DESC _historyDesc {};
     UINT64 _swapchainGeneration = 0;
     UINT64 _presented = 0;     // real frames handed over since the history was (re)built

@@ -3,8 +3,9 @@
 
 #include <Util.h>
 
-SyncedDXGISwapChain::SyncedDXGISwapChain(IDXGISwapChain* real, ID3D12CommandQueue* queue, HWND hwnd)
-    : _real(real), _queue(queue), _hwnd(hwnd)
+SyncedDXGISwapChain::SyncedDXGISwapChain(IDXGISwapChain* real, ID3D12CommandQueue* gameQueue,
+                                         ID3D12CommandQueue* presentQueue, HWND hwnd)
+    : _real(real), _queue(presentQueue), _gameQueue(gameQueue), _hwnd(hwnd)
 {
     // The real swapchain's own reference is the one we hold; the wider interfaces are borrowed from it.
     if (_real->QueryInterface(IID_PPV_ARGS(&_real1)) == S_OK)
@@ -20,6 +21,7 @@ SyncedDXGISwapChain::SyncedDXGISwapChain(IDXGISwapChain* real, ID3D12CommandQueu
         _real4->Release();
 
     _queue->AddRef();
+    _gameQueue->AddRef();
     _queue->GetDevice(IID_PPV_ARGS(&_device));
 
     LARGE_INTEGER frequency {};
@@ -29,6 +31,7 @@ SyncedDXGISwapChain::SyncedDXGISwapChain(IDXGISwapChain* real, ID3D12CommandQueu
     if (_device != nullptr)
     {
         _device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&_fence));
+        _device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&_readyFence));
         _fenceEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
 
         for (auto& slot : _slots)
@@ -46,6 +49,7 @@ SyncedDXGISwapChain::SyncedDXGISwapChain(IDXGISwapChain* real, ID3D12CommandQueu
     }
 
     CreateProxies();
+    ReadRefreshRate();
     _thread = std::thread(&SyncedDXGISwapChain::PresenterLoop, this);
 
     LOG_INFO("Synced FG swapchain created, {} back buffers", _proxies.size());
@@ -119,8 +123,18 @@ void SyncedDXGISwapChain::WaitIdle(std::unique_lock<std::mutex>& lock)
 
 void SyncedDXGISwapChain::WaitGpu()
 {
-    if (_fence == nullptr || _fenceEvent == nullptr)
+    if (_fence == nullptr || _fenceEvent == nullptr || _readyFence == nullptr)
         return;
+
+    // Both queues: the game's (the frames being recorded) and ours (the copies and presents).
+    const UINT64 ready = ++_readyValue;
+    _gameQueue->Signal(_readyFence, ready);
+
+    if (_readyFence->GetCompletedValue() < ready)
+    {
+        _readyFence->SetEventOnCompletion(ready, _fenceEvent);
+        WaitForSingleObject(_fenceEvent, 5000);
+    }
 
     const UINT64 value = ++_fenceValue;
     _queue->Signal(_fence, value);
@@ -130,6 +144,31 @@ void SyncedDXGISwapChain::WaitGpu()
         _fence->SetEventOnCompletion(value, _fenceEvent);
         WaitForSingleObject(_fenceEvent, 5000);
     }
+}
+
+// The refresh rate of the monitor the window is on.
+void SyncedDXGISwapChain::ReadRefreshRate()
+{
+    HMONITOR monitor = MonitorFromWindow(_hwnd, MONITOR_DEFAULTTONEAREST);
+    MONITORINFOEXW info {};
+    info.cbSize = sizeof(info);
+
+    if (monitor == nullptr || !GetMonitorInfoW(monitor, &info))
+        return;
+
+    DEVMODEW mode {};
+    mode.dmSize = sizeof(mode);
+
+    if (EnumDisplaySettingsW(info.szDevice, ENUM_CURRENT_SETTINGS, &mode) && mode.dmDisplayFrequency > 1)
+    {
+        _refreshHz = (double) mode.dmDisplayFrequency;
+        LOG_INFO("Synced FG: display refreshes at {} Hz", mode.dmDisplayFrequency);
+    }
+}
+
+double SyncedDXGISwapChain::GameFps() const
+{
+    return _interval > 0.0 ? (double) _qpcFrequency / _interval : 0.0;
 }
 
 ID3D12Resource* SyncedDXGISwapChain::CurrentProxy()
@@ -206,6 +245,16 @@ HRESULT SyncedDXGISwapChain::HandOver(UINT SyncInterval, UINT Flags)
             _pending.push_back({ proxy, D3D12_RESOURCE_STATE_COMMON, false });
     }
 
+    // Everything for this frame is on the game's queue now (its rendering, frame generation's copies and
+    // generated frames): the present queue starts on it once this value is reached.
+    UINT64 ready = 0;
+
+    if (_readyFence != nullptr)
+    {
+        ready = ++_readyValue;
+        _gameQueue->Signal(_readyFence, ready);
+    }
+
     // Spread over one game frame: the first now, each next one an equal step later. The real frame lands one
     // step before the next game frame's first generated one.
     const double step = _pending.empty() ? 0.0 : _interval / (double) _pending.size();
@@ -217,6 +266,7 @@ HRESULT SyncedDXGISwapChain::HandOver(UINT SyncInterval, UINT Flags)
         job.due = now.QuadPart + (LONGLONG) (step * (double) i);
         job.syncInterval = SyncInterval;
         job.flags = Flags;
+        job.readyValue = ready;
 
         if (!job.frame.generated)
         {
@@ -238,6 +288,11 @@ HRESULT SyncedDXGISwapChain::HandOver(UINT SyncInterval, UINT Flags)
 
     // Held back like a real swapchain: never more than one real frame waiting besides the one being shown.
     _drain.wait(lock, [this] { return _realFramesQueued < 2 || _stop; });
+    lock.unlock();
+
+    // The game renders its next frames into the back buffers the present queue copies from. Before it gets back
+    // to the one this frame used -- three frames on with three buffers -- the present queue must be done with it.
+    ThrottleGpu(3);
     return S_OK;
 }
 
@@ -366,6 +421,10 @@ bool SyncedDXGISwapChain::PresentJob(const Job& job)
     if (slot.list->Close() != S_OK)
         return false;
 
+    // The frame is finished on the game's queue before ours reads it.
+    if (_readyFence != nullptr && job.readyValue != 0)
+        _queue->Wait(_readyFence, job.readyValue);
+
     ID3D12CommandList* lists[] = { slot.list };
     _queue->ExecuteCommandLists(1, lists);
 
@@ -446,14 +505,19 @@ ULONG STDMETHODCALLTYPE SyncedDXGISwapChain::Release()
         if (_fence != nullptr)
             _fence->Release();
 
+        if (_readyFence != nullptr)
+            _readyFence->Release();
+
         if (_fenceEvent != nullptr)
             CloseHandle(_fenceEvent);
 
         if (_device != nullptr)
             _device->Release();
 
-        _queue->Release();
+        // The real swapchain first: it was created on our queue.
         _real->Release();
+        _queue->Release();
+        _gameQueue->Release();
 
         delete this;
     }
@@ -544,6 +608,7 @@ HRESULT STDMETHODCALLTYPE SyncedDXGISwapChain::ResizeBuffers(UINT BufferCount, U
 
     const HRESULT result = _real->ResizeBuffers(BufferCount, Width, Height, NewFormat, SwapChainFlags);
     CreateProxies();
+    ReadRefreshRate();
 
     LOG_DEBUG("Synced FG ResizeBuffers: {:X}", (UINT) result);
     return result;
@@ -567,6 +632,7 @@ HRESULT STDMETHODCALLTYPE SyncedDXGISwapChain::ResizeBuffers1(UINT BufferCount, 
     // Our presenter uses the queue the swapchain was created on, so the per-buffer queues are left alone.
     const HRESULT result = _real3->ResizeBuffers(BufferCount, Width, Height, Format, SwapChainFlags);
     CreateProxies();
+    ReadRefreshRate();
 
     LOG_DEBUG("Synced FG ResizeBuffers1: {:X}", (UINT) result);
     return result;

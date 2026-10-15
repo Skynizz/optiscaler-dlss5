@@ -1453,6 +1453,24 @@ static HRESULT hkD3D12CreateDevice(IUnknown* pAdapter, D3D_FEATURE_LEVEL Minimum
         debugController->Release();
     }
 #endif
+    // Diagnostics (FGSyncedDred): breadcrumbs and page faults, read back by Util::GetDeviceRemovedReason.
+    if (Config::Instance()->FGSyncedDred.value_or_default())
+    {
+        ID3D12DeviceRemovedExtendedDataSettings* dred = nullptr;
+
+        if (D3D12GetDebugInterface(IID_PPV_ARGS(&dred)) == S_OK && dred != nullptr)
+        {
+            dred->SetAutoBreadcrumbsEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            dred->SetPageFaultEnablement(D3D12_DRED_ENABLEMENT_FORCED_ON);
+            dred->Release();
+            LOG_INFO("DRED breadcrumbs and page faults on");
+        }
+        else
+        {
+            LOG_WARN("DRED is not available");
+        }
+    }
+
     IdentifyGpu::updateD3d12Capabilities(o_D3D12CreateDevice);
 
     DXGI_ADAPTER_DESC desc {};

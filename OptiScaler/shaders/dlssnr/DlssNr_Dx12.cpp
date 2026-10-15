@@ -20,6 +20,7 @@
 #include <proxies/NVNGX_Proxy.h>
 #include <hooks/D3D12_Hooks.h>
 #include <gpu_time/GpuTime_Dx12.h>
+#include <hudfix/Hudfix_Dx12.h>
 
 #include <mutex>
 #include <algorithm>
@@ -5360,9 +5361,21 @@ static void ReadFrameInfo(NVSDK_NGX_Parameter* params, DlssNrFrameInfo& frame)
 // This is the call site's job, not the pass's. A caller that has the resources in hand -- a
 // reprojection stage, a frame generation path, anything that is not the upscaler seam -- calls
 // RunPass directly and never touches an NGX parameter block.
+// The pass runs outside the upscaler's window, where HUDFix tracks every dispatch for a HUD-less frame: its own
+// dispatches write a frame-sized target, HUDFix took them for one and inserted its copies in the middle of the
+// pass, in states the pass never had. Hidden from it, as the upscaler hides its own work.
+struct ScopedHudfixSkip
+{
+    bool previous = Hudfix_Dx12::GetSkipStatus();
+    ScopedHudfixSkip() { Hudfix_Dx12::SetSkipStatus(true); }
+    ~ScopedHudfixSkip() { Hudfix_Dx12::SetSkipStatus(previous); }
+};
+
 void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
                           ID3D12CommandQueue* timingQueue)
 {
+    ScopedHudfixSkip skipHudfix {};
+
     // Every rendered frame reaches here, Neural Rendering on or off, which is what lets the benchmark
     // time the off phase the same way as the others -- and what the line on screen counts.
     BenchTick();
@@ -5474,6 +5487,8 @@ void EvaluateAfterUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Paramete
 bool EvaluateBeforeUpscale(ID3D12GraphicsCommandList* cmdList, NVSDK_NGX_Parameter* params,
                            ID3D12CommandQueue* timingQueue)
 {
+    ScopedHudfixSkip skipHudfix {};
+
     const Config& cfg = *Config::Instance();
     g_preSr.swapped = false;
     g_preSr.ranThisFrame = false;

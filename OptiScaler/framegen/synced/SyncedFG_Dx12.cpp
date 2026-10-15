@@ -67,16 +67,49 @@ void SyncedFG_Dx12::CreateObjects(ID3D12Device* InDevice)
     }
 }
 
+// The queue the real swapchain is created on: ours, so DXGI's present waits never sit in the game's queue.
+static ID3D12CommandQueue* CreatePresentQueue(ID3D12CommandQueue* gameQueue)
+{
+    ID3D12Device* device = nullptr;
+
+    if (gameQueue == nullptr || gameQueue->GetDevice(IID_PPV_ARGS(&device)) != S_OK || device == nullptr)
+        return nullptr;
+
+    D3D12_COMMAND_QUEUE_DESC desc {};
+    desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    desc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_HIGH;
+
+    ID3D12CommandQueue* queue = nullptr;
+
+    if (device->CreateCommandQueue(&desc, IID_PPV_ARGS(&queue)) != S_OK)
+    {
+        desc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
+        device->CreateCommandQueue(&desc, IID_PPV_ARGS(&queue));
+    }
+
+    device->Release();
+
+    if (queue != nullptr)
+        queue->SetName(L"Synced FG present queue");
+
+    return queue;
+}
+
 bool SyncedFG_Dx12::CreateSwapchainInternal(IDXGIFactory* factory, ID3D12CommandQueue* cmdQueue,
                                             DXGI_SWAP_CHAIN_DESC* desc, IDXGISwapChain** swapChain)
 {
+    ID3D12CommandQueue* presentQueue = CreatePresentQueue(cmdQueue);
     IDXGISwapChain* realSwapchain = nullptr;
 
-    if (factory->CreateSwapChain(cmdQueue, desc, &realSwapchain) != S_OK || realSwapchain == nullptr ||
-        swapChain == nullptr)
+    if (presentQueue == nullptr || factory->CreateSwapChain(presentQueue, desc, &realSwapchain) != S_OK ||
+        realSwapchain == nullptr || swapChain == nullptr)
+    {
+        SAFE_RELEASE(presentQueue);
         return false;
+    }
 
-    _synced = new SyncedDXGISwapChain(realSwapchain, cmdQueue, desc->OutputWindow);
+    _synced = new SyncedDXGISwapChain(realSwapchain, cmdQueue, presentQueue, desc->OutputWindow);
+    presentQueue->Release(); // the swapchain holds it
     *swapChain = _synced;
 
     _gameCommandQueue = cmdQueue;
@@ -95,14 +128,27 @@ bool SyncedFG_Dx12::CreateSwapchain1Internal(IDXGIFactory* factory, ID3D12Comman
     if (factory->QueryInterface(IID_PPV_ARGS(&factory2)) != S_OK)
         return false;
 
+    ID3D12CommandQueue* presentQueue = CreatePresentQueue(cmdQueue);
+
+    if (presentQueue == nullptr)
+    {
+        factory2->Release();
+        return false;
+    }
+
     IDXGISwapChain1* realSwapchain1 = nullptr;
-    auto result = factory2->CreateSwapChainForHwnd(cmdQueue, hwnd, desc, pFullscreenDesc, nullptr, &realSwapchain1);
+    auto result =
+        factory2->CreateSwapChainForHwnd(presentQueue, hwnd, desc, pFullscreenDesc, nullptr, &realSwapchain1);
     factory2->Release();
 
     if (result != S_OK || realSwapchain1 == nullptr || swapChain == nullptr)
+    {
+        presentQueue->Release();
         return false;
+    }
 
-    _synced = new SyncedDXGISwapChain(realSwapchain1, cmdQueue, hwnd);
+    _synced = new SyncedDXGISwapChain(realSwapchain1, cmdQueue, presentQueue, hwnd);
+    presentQueue->Release(); // the swapchain holds it
     *swapChain = _synced;
 
     _gameCommandQueue = cmdQueue;
@@ -262,7 +308,7 @@ bool SyncedFG_Dx12::EnsureTextures(ID3D12Resource* proxy)
 
     for (UINT s = 0; s < kOutputSets; s++)
     {
-        for (UINT k = 0; k < kMaxGenerated; k++)
+        for (UINT k = 0; k <= kMaxGenerated; k++)
         {
             if (_device->CreateCommittedResource(&heap, D3D12_HEAP_FLAG_NONE, &texDesc, D3D12_RESOURCE_STATE_COMMON,
                                                  nullptr, IID_PPV_ARGS(&_outputs[s][k])) != S_OK)
@@ -312,101 +358,158 @@ bool SyncedFG_Dx12::Present()
     const UINT prev = (UINT) ((_presented + kHistory - 1) % kHistory);
     const UINT set = (UINT) (_presented % kOutputSets);
 
-    // The game's frame, kept: it is this frame's real frame and the next one's "last frame".
+    // The game's frame, kept twice: in the history (the next frame's "last frame", the game's queue only) and as
+    // this frame's real frame for the present queue.
+    ID3D12Resource* realOut = _outputs[set][kMaxGenerated];
+
     ResourceBarrier(cmd, proxy, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_SOURCE);
     ResourceBarrier(cmd, _history[cur], D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
+    ResourceBarrier(cmd, realOut, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST);
     cmd->CopyResource(_history[cur], proxy);
+    cmd->CopyResource(realOut, proxy);
     ResourceBarrier(cmd, proxy, D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_COMMON);
     ResourceBarrier(cmd, _history[cur], D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
+    ResourceBarrier(cmd, realOut, D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON);
 
-    const UINT wanted = std::clamp(Config::Instance()->FGSyncedFrames.value_or_default(), 1u, kMaxGenerated);
+    UINT wanted = std::clamp(Config::Instance()->FGSyncedFrames.value_or_default(), 1u, kMaxGenerated);
+
+    // Never more frames per second than the display shows: those past it are discarded unseen, and presenting
+    // them anyway hung the GPU (4x at 58 fps on a 144 Hz display, 232 presents a second). With a small margin
+    // for the frame rate moving between estimates. 0 here means only the real frame.
+    if (Config::Instance()->FGSyncedCapToRefresh.value_or_default())
+    {
+        const double refresh = _synced->RefreshHz();
+        const double fps = _synced->GameFps();
+
+        if (refresh > 0.0 && fps > 0.0)
+        {
+            const int fits = (int) std::floor(refresh * 0.97 / fps) - 1;
+            wanted = (UINT) std::clamp(fits, 0, (int) wanted);
+        }
+    }
     UINT generated = 0;
 
-    if (_previousValid && IsActive() && !IsPaused())
+    // The inputs, read and let go: no lock on the frame's resources is held while recording. A hook on the
+    // recording (HUDFix's tracking of dispatches) may hand over a resource for this very frame, and that takes
+    // the same lock to write -- on this thread, a deadlock: a black screen at the first generated frame.
+    struct Input
     {
-        auto velocity = GetResource(FG_ResourceType::Velocity, fIndex);
-        auto depth = GetResource(FG_ResourceType::Depth, fIndex);
+        ID3D12Resource* resource = nullptr;
+        D3D12_RESOURCE_STATES state = D3D12_RESOURCE_STATE_COMMON;
+        UINT64 width = 0;
+        UINT height = 0;
+    };
 
-        if (velocity && depth && velocity->validity != FG_ResourceValidity::ValidNow &&
-            depth->validity != FG_ResourceValidity::ValidNow)
+    auto readInput = [this](FG_ResourceType type, int index)
+    {
+        Input in {};
+        auto r = GetResource(type, index);
+
+        if (r && r->validity != FG_ResourceValidity::ValidNow && r->GetResource() != nullptr)
+            in = { r->GetResource(), r->state, r->width, r->height };
+
+        return in;
+    };
+
+    const Input mv = readInput(FG_ResourceType::Velocity, fIndex);
+    const Input dp = readInput(FG_ResourceType::Depth, fIndex);
+
+    // The frames without their HUD, this one's and the last one's, when OptiScaler hands them over (HUDFix):
+    // each frame index keeps its own buffer, so the last one is still there.
+    const int prevIndex = (fIndex + BUFFER_COUNT - 1) % BUFFER_COUNT;
+    Input hudCur = readInput(FG_ResourceType::HudlessColor, fIndex);
+    Input hudPrev = readInput(FG_ResourceType::HudlessColor, prevIndex);
+
+    if (hudCur.resource == nullptr || hudPrev.resource == nullptr || hudCur.resource == hudPrev.resource ||
+        hudCur.width != _historyDesc.Width || hudCur.height != _historyDesc.Height ||
+        hudPrev.width != _historyDesc.Width || hudPrev.height != _historyDesc.Height)
+    {
+        hudCur = {};
+        hudPrev = {};
+    }
+
+    if (_previousValid && IsActive() && !IsPaused() && mv.resource != nullptr && dp.resource != nullptr)
+    {
+        if (_generator == nullptr)
+            _generator = std::make_unique<SFG_Dx12>("Synced FG", _device);
+
+        if (_generator->IsInit())
         {
-            if (_generator == nullptr)
-                _generator = std::make_unique<SFG_Dx12>("Synced FG", _device);
+            // Our dispatches are not the game's: HUDFix's tracking must not take our generated frames for a
+            // HUD-less candidate. The upscaler hides its own work the same way.
+            const bool skipWas = Hudfix_Dx12::GetSkipStatus();
+            Hudfix_Dx12::SetSkipStatus(true);
 
-            if (_generator->IsInit())
+            constexpr auto read = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+            const bool hudless = hudCur.resource != nullptr;
+
+            ResourceBarrier(cmd, _history[prev], D3D12_RESOURCE_STATE_COMMON, read);
+            ResourceBarrier(cmd, _history[cur], D3D12_RESOURCE_STATE_COMMON, read);
+            ResourceBarrier(cmd, mv.resource, mv.state, read);
+            ResourceBarrier(cmd, dp.resource, dp.state, read);
+
+            if (hudless)
             {
-                constexpr auto read = D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
-                ID3D12Resource* mv = velocity->GetResource();
-                ID3D12Resource* dp = depth->GetResource();
-
-                ResourceBarrier(cmd, _history[prev], D3D12_RESOURCE_STATE_COMMON, read);
-                ResourceBarrier(cmd, _history[cur], D3D12_RESOURCE_STATE_COMMON, read);
-                ResourceBarrier(cmd, mv, velocity->state, read);
-                ResourceBarrier(cmd, dp, depth->state, read);
-
-                // The frames without their HUD, this one's and the last one's, when OptiScaler hands them over
-                // (HUDFix): each frame index keeps its own buffer, so the last one is still there.
-                const int prevIndex = (fIndex + BUFFER_COUNT - 1) % BUFFER_COUNT;
-                auto hudCur = GetResource(FG_ResourceType::HudlessColor, fIndex);
-                auto hudPrev = GetResource(FG_ResourceType::HudlessColor, prevIndex);
-                ID3D12Resource* hudCurRes = nullptr;
-                ID3D12Resource* hudPrevRes = nullptr;
-
-                if (hudCur && hudPrev && hudCur->validity != FG_ResourceValidity::ValidNow &&
-                    hudPrev->validity != FG_ResourceValidity::ValidNow && hudCur->GetResource() != nullptr &&
-                    hudPrev->GetResource() != nullptr && hudCur->GetResource() != hudPrev->GetResource() &&
-                    hudCur->width == _historyDesc.Width && hudCur->height == _historyDesc.Height &&
-                    hudPrev->width == _historyDesc.Width && hudPrev->height == _historyDesc.Height)
-                {
-                    hudCurRes = hudCur->GetResource();
-                    hudPrevRes = hudPrev->GetResource();
-                    ResourceBarrier(cmd, hudCurRes, hudCur->state, read);
-                    ResourceBarrier(cmd, hudPrevRes, hudPrev->state, read);
-                }
-
-                SFGConstants c {};
-                c.outWidth = (UINT) _historyDesc.Width;
-                c.outHeight = _historyDesc.Height;
-                c.invertedDepth = _constants.flags[FG_Flags::InvertedDepth] ? 1u : 0u;
-                c.mvScaleX = _mvScaleX[fIndex];
-                c.mvScaleY = _mvScaleY[fIndex];
-                c.mvWidth = (float) std::max<UINT64>(velocity->width, 1);
-                c.mvHeight = (float) std::max<UINT>(velocity->height, 1);
-                c.depthWidth = (float) std::max<UINT64>(depth->width, 1);
-                c.depthHeight = (float) std::max<UINT>(depth->height, 1);
-                c.staticThreshold = 0.004f;
-                c.debugView = Config::Instance()->FGSyncedDebug.value_or_default() ? 1u : 0u;
-                c.hasHudless = hudCurRes != nullptr ? 1u : 0u;
-                c.uiThreshold = 0.03f;
-
-                for (UINT k = 0; k < wanted; k++)
-                {
-                    ID3D12Resource* out = _outputs[set][k];
-                    c.t = (float) (k + 1) / (float) (wanted + 1);
-
-                    ResourceBarrier(cmd, out, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-                    const bool ok =
-                        _generator->Dispatch(cmd, _history[prev], _history[cur], mv, dp, out, c, hudPrevRes, hudCurRes);
-                    ResourceBarrier(cmd, out, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
-
-                    if (!ok)
-                        break;
-
-                    generated++;
-                }
-
-                ResourceBarrier(cmd, _history[prev], read, D3D12_RESOURCE_STATE_COMMON);
-                ResourceBarrier(cmd, _history[cur], read, D3D12_RESOURCE_STATE_COMMON);
-                ResourceBarrier(cmd, mv, read, velocity->state);
-                ResourceBarrier(cmd, dp, read, depth->state);
-
-                if (hudCurRes != nullptr)
-                {
-                    ResourceBarrier(cmd, hudCurRes, read, hudCur->state);
-                    ResourceBarrier(cmd, hudPrevRes, read, hudPrev->state);
-                }
+                ResourceBarrier(cmd, hudCur.resource, hudCur.state, read);
+                ResourceBarrier(cmd, hudPrev.resource, hudPrev.state, read);
             }
+
+            SFGConstants c {};
+            c.outWidth = (UINT) _historyDesc.Width;
+            c.outHeight = _historyDesc.Height;
+            c.invertedDepth = _constants.flags[FG_Flags::InvertedDepth] ? 1u : 0u;
+            c.mvScaleX = _mvScaleX[fIndex];
+            c.mvScaleY = _mvScaleY[fIndex];
+            c.mvWidth = (float) std::max<UINT64>(mv.width, 1);
+            c.mvHeight = (float) std::max<UINT>(mv.height, 1);
+            c.depthWidth = (float) std::max<UINT64>(dp.width, 1);
+            c.depthHeight = (float) std::max<UINT>(dp.height, 1);
+            c.staticThreshold = 0.004f;
+            c.debugView = Config::Instance()->FGSyncedDebug.value_or_default() ? 1u : 0u;
+            c.hasHudless = hudless ? 1u : 0u;
+            c.uiThreshold = 0.03f;
+
+            for (UINT k = 0; k < wanted; k++)
+            {
+                ID3D12Resource* out = _outputs[set][k];
+                // t spreads over the frames actually generated, so a capped 4x is an even 2x, not 4x cut short.
+                c.t = (float) (k + 1) / (float) (wanted + 1);
+
+                ResourceBarrier(cmd, out, D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+                const bool ok = _generator->Dispatch(cmd, _history[prev], _history[cur], mv.resource, dp.resource, out,
+                                                     c, hudPrev.resource, hudCur.resource);
+                ResourceBarrier(cmd, out, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+
+                if (!ok)
+                    break;
+
+                generated++;
+            }
+
+            ResourceBarrier(cmd, _history[prev], read, D3D12_RESOURCE_STATE_COMMON);
+            ResourceBarrier(cmd, _history[cur], read, D3D12_RESOURCE_STATE_COMMON);
+            ResourceBarrier(cmd, mv.resource, read, mv.state);
+            ResourceBarrier(cmd, dp.resource, read, dp.state);
+
+            if (hudless)
+            {
+                ResourceBarrier(cmd, hudCur.resource, read, hudCur.state);
+                ResourceBarrier(cmd, hudPrev.resource, read, hudPrev.state);
+            }
+
+            Hudfix_Dx12::SetSkipStatus(skipWas);
         }
+    }
+
+    // What others recorded for this frame on frame generation's UI list goes first -- HUDFix converts the HUD-less
+    // frame there, and the generation above reads it. Left for later, it ran after the generation that needed it.
+    if (_uiCommandListResetted[fIndex])
+    {
+        if (_uiCommandList[fIndex]->Close() == S_OK)
+            _gameCommandQueue->ExecuteCommandLists(1, (ID3D12CommandList**) &_uiCommandList[fIndex]);
+
+        _gameCommandQueue->Signal(_uiFence, _uiAllocatorFenceValues[fIndex]);
+        _uiCommandListResetted[fIndex] = false;
     }
 
     // Recorded work first, on the game's queue, so the presenter's copies come after it.
@@ -424,7 +527,7 @@ bool SyncedFG_Dx12::Present()
     for (UINT k = 0; k < generated; k++)
         frames[count++] = { _outputs[set][k], D3D12_RESOURCE_STATE_COMMON, true };
 
-    frames[count++] = { _history[cur], D3D12_RESOURCE_STATE_COMMON, false };
+    frames[count++] = { realOut, D3D12_RESOURCE_STATE_COMMON, false };
     _synced->QueueFrames(frames, count);
 
     _presented++;

@@ -4382,6 +4382,16 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
         if (ImGui::Checkbox("Tint generated frames", &syncedDebug))
             config->FGSyncedDebug = syncedDebug;
 
+        ImGui::SameLine(0.0f, 16.0f);
+
+        bool capToRefresh = config->FGSyncedCapToRefresh.value_or_default();
+        if (ImGui::Checkbox("Cap to refresh rate", &capToRefresh))
+            config->FGSyncedCapToRefresh = capToRefresh;
+
+        ShowTooltip("Never presents more frames per second than the display refreshes: fewer frames are generated\n"
+                    "when the game runs fast enough that the multiplier would go past it. Frames past the refresh\n"
+                    "rate are never seen, and presenting them hung the GPU. Leave it on.");
+
         ShowTooltip("Shows the generated frames slightly green, to check they arrive evenly between real ones.");
 
         bool hudless = config->FGHUDFix.value_or_default();
@@ -4392,9 +4402,9 @@ void MenuCommon::RenderFrameGenerationRuntimeSettings(RenderMenuContext& ctx)
             state.fgChanged = true;
         }
 
-        ShowTooltip("Interpolates the frame captured before the game draws its HUD, then lays this frame's HUD back\n"
-                    "on top: crosshair and weapon panels never ghost, transparent ones included. On by default with\n"
-                    "Synced FG. Off: the HUD is guessed from what stands still, which misses transparent HUDs.");
+        ShowTooltip("Experimental, may crash (OptiScaler's HUDFix hung the GPU in The Last of Us).\n"
+                    "Interpolates the frame captured before the game draws its HUD, then lays this frame's HUD back\n"
+                    "on top. Off (the default), Synced FG tells the HUD from the scene by itself.");
     }
 
     if (ScopedCard::Shows("fg_dlssg") && state.activeFgOutput == FGOutput::DLSSG &&

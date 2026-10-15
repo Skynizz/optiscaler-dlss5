@@ -199,9 +199,27 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     }
     else
     {
-        const float disagree = MaxOf(abs(fromCur.rgb - fromPrev.rgb)) /
-                               (max(MaxOf(fromCur.rgb), MaxOf(fromPrev.rgb)) + 0.02);
-        w = lerp(t, 1.0, saturate((disagree - 0.1) / 0.2));
+        const float norm = max(MaxOf(fromCur.rgb), MaxOf(fromPrev.rgb)) + 0.02;
+        const float disagree = MaxOf(abs(fromCur.rgb - fromPrev.rgb)) / norm;
+
+        // Screen-anchored: the pixel matches itself in the last frame far better than the scene moved along its
+        // motion does -- a HUD, transparent ones included (their colour moves with the scene behind them, so
+        // they never look still). Shown as this frame shows it.
+        const float anchored = MaxOf(abs(curHere.rgb - prevHere.rgb)) /
+                               (max(MaxOf(curHere.rgb), MaxOf(prevHere.rgb)) + 0.02);
+
+        if (hasHudless == 0 && disagree > 0.15 && anchored < disagree * 0.35)
+        {
+            Output[id.xy] = curHere;
+            return;
+        }
+
+        // The two frames disagree (one sees what the other does not, or one sample is a piece of HUD fetched
+        // from beside the pixel): trust the sample closer to what is really at this pixel now.
+        const float toCur = MaxOf(abs(fromCur.rgb - curHere.rgb));
+        const float toPrev = MaxOf(abs(fromPrev.rgb - curHere.rgb));
+        const float side = toCur <= toPrev ? 1.0 : 0.0;
+        w = lerp(t, side, saturate((disagree - 0.1) / 0.2));
     }
 
     float4 result = lerp(fromPrev, fromCur, w);

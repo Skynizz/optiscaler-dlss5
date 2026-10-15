@@ -1039,6 +1039,12 @@ class Config
     // tint on the generated frames so their pacing can be seen.
     CustomOptional<uint32_t> FGSyncedFrames { 1 };
     CustomOptional<bool> FGSyncedDebug { false };
+    // Diagnostics: D3D12's Device Removed Extended Data (breadcrumbs and page faults), so a hung or removed device
+    // logs which command list and which operation the GPU was on. Read when the device is created. Off: nothing.
+    CustomOptional<bool> FGSyncedDred { false };
+    // Synced FG never presents more frames per second than the display refreshes: fewer frames are generated when
+    // the game runs fast enough that the multiplier would go past it. Off: the multiplier as set, always.
+    CustomOptional<bool> FGSyncedCapToRefresh { true };
     CustomOptional<bool> FGDLSSGUseGamesReflexMarkers { true };
     CustomOptional<int, NoDefault>
         FGDLSSGOverrideInterpolationCount; // For overriding game's value sent to SL, could be Nvngx FG, could be noFG

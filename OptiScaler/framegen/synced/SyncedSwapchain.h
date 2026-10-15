@@ -32,7 +32,10 @@ class DECLSPEC_UUID("6b3c7c0e-5c1e-4b0b-9a8e-2f1d5a7e93c4") SyncedDXGISwapChain 
         bool generated = false;
     };
 
-    SyncedDXGISwapChain(IDXGISwapChain* real, ID3D12CommandQueue* queue, HWND hwnd);
+    // `real` was created on `presentQueue`, a queue of frame generation's own; `gameQueue` is the one the game
+    // created its swapchain with, and renders and generates on.
+    SyncedDXGISwapChain(IDXGISwapChain* real, ID3D12CommandQueue* gameQueue, ID3D12CommandQueue* presentQueue,
+                        HWND hwnd);
     virtual ~SyncedDXGISwapChain();
 
     // For frame generation, on the game's thread, between the game finishing a frame and its Present.
@@ -41,6 +44,10 @@ class DECLSPEC_UUID("6b3c7c0e-5c1e-4b0b-9a8e-2f1d5a7e93c4") SyncedDXGISwapChain 
     UINT64 Generation() const { return _generation; }
     // The frames to present for this Present, in order (generated ones first, the real one last).
     void QueueFrames(const QueuedFrame* frames, UINT count);
+
+    // The display's refresh rate (Hz, 0 if unknown) and the game's frame rate (smoothed, 0 until known).
+    double RefreshHz() const { return _refreshHz; }
+    double GameFps() const;
 
     // Waits until the GPU has finished presenting the real frame handed over `framesAgo` Presents ago (and so all
     // the work submitted before it). Frame generation calls it before reusing anything of its own: a game on a
@@ -115,6 +122,7 @@ class DECLSPEC_UUID("6b3c7c0e-5c1e-4b0b-9a8e-2f1d5a7e93c4") SyncedDXGISwapChain 
     {
         QueuedFrame frame;
         UINT64 realIndex = 0; // for a real frame: its hand-over number
+        UINT64 readyValue = 0; // the game's queue has finished this frame at this value of _readyFence
         LONGLONG due = 0; // QPC ticks
         UINT syncInterval = 0;
         UINT flags = 0;
@@ -134,7 +142,16 @@ class DECLSPEC_UUID("6b3c7c0e-5c1e-4b0b-9a8e-2f1d5a7e93c4") SyncedDXGISwapChain 
     IDXGISwapChain2* _real2 = nullptr;
     IDXGISwapChain3* _real3 = nullptr;
     IDXGISwapChain4* _real4 = nullptr;
+    // The present queue: every copy into the real back buffers and every present happens there, so the waits DXGI
+    // puts on a present queue (for a back buffer the display still shows) never land in the game's queue, between
+    // its own work and its own cross-queue fences. Presenting on the game's queue hung the GPU at 4x: lists queued
+    // behind those waits, never started (DRED).
     ID3D12CommandQueue* _queue = nullptr;
+    ID3D12CommandQueue* _gameQueue = nullptr;
+    // Signalled on the game's queue at each hand-over, once the frame and its generated frames are recorded; the
+    // present queue waits for it before copying them.
+    ID3D12Fence* _readyFence = nullptr;
+    UINT64 _readyValue = 0;
     ID3D12Device* _device = nullptr;
     HWND _hwnd = nullptr;
     LONG _refcount = 1;
@@ -168,6 +185,9 @@ class DECLSPEC_UUID("6b3c7c0e-5c1e-4b0b-9a8e-2f1d5a7e93c4") SyncedDXGISwapChain 
     ID3D12Fence* _fence = nullptr;
     HANDLE _fenceEvent = nullptr;
     UINT64 _fenceValue = 0;
+
+    double _refreshHz = 0.0;
+    void ReadRefreshRate();
 
     // Pacing: the game's frame interval, smoothed, in QPC ticks.
     LONGLONG _qpcFrequency = 1;
