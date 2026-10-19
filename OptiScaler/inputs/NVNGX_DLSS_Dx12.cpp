@@ -7,6 +7,8 @@
 #include "proxies/NVNGX_Proxy.h"
 #include "dlssnr/DlssNr.h"
 #include "dlssnr/DlssNr_ExposureScan.h"
+#include <shaders/checker_guard/CheckerGuard.h>
+#include <framegen/synced/FGMeter.h>
 #include <upscalers/dlss/DLSSFeature_Dx12.h>
 #include <shaders/output_scaling/OS_Dx12.h>
 
@@ -1201,14 +1203,30 @@ NVSDK_NGX_API NVSDK_NGX_Result NVSDK_NGX_D3D12_EvaluateFeature(ID3D12GraphicsCom
 
     // Pre-SR (DlssNrPreSr, off by default): Neural Rendering first, on the render-resolution colour the
     // upscaler is about to read, which is swapped for the enhanced copy and put back right after.
+    // Speckle cleanup (FGSpeckleCleanup, off by default) first, so DLSS 5's pre-SR pass and the upscaler
+    // both read the cleaned colour; the game's colour is put back last.
+    // A new rendered frame, for the frame generation meter and the auto multiplier (both off by default).
+    if (feature == NVSDK_NGX_Feature_SuperSampling)
+        FGMeter::OnRealFrame();
+
+    const bool checkerCleaned =
+        feature == NVSDK_NGX_Feature_SuperSampling && CheckerGuard::BeginBeforeUpscale(InCmdList, InParameters);
+
     const bool nrPreSr =
         feature == NVSDK_NGX_Feature_SuperSampling && DlssNr::EvaluateBeforeUpscale(InCmdList, InParameters);
+
+    // After a DLSS 5 preset has settled: the upscaler starts its history again too (RequestSettleReset).
+    if (feature == NVSDK_NGX_Feature_SuperSampling && DlssNr::ConsumeUpscalerReset())
+        InParameters->Set(NVSDK_NGX_Parameter_Reset, 1);
 
     // OptiScaler internal handling
     const NVSDK_NGX_Result optiResult = TryEvaluateOptiFeature(InCmdList, InFeatureHandle, InParameters, InCallback);
 
     if (nrPreSr)
         DlssNr::EndBeforeUpscale(InParameters);
+
+    if (checkerCleaned)
+        CheckerGuard::EndBeforeUpscale(InParameters);
 
     // Same pass, for OptiScaler's own upscalers rather than native DLSS.
     if (optiResult == NVSDK_NGX_Result_Success && feature != NVSDK_NGX_Feature_FrameGeneration)
