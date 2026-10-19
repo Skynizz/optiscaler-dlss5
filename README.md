@@ -1,7 +1,7 @@
 # OptiScaler DLSS 5
 
 <p align="center">
-  <a href="https://github.com/Skynizz/optiscaler-dlss5/releases/download/v1.2.1/OptiScaler-DLSS5-1.2.1-win-x64.zip"><img src="https://img.shields.io/badge/Download-v1.2.1-2ea44f?style=for-the-badge&logo=github" alt="Download"></a>
+  <a href="https://github.com/Skynizz/optiscaler-dlss5/releases/download/v1.3.0/OptiScaler-DLSS5-1.3.0-win-x64.zip"><img src="https://img.shields.io/badge/Download-v1.3.0-2ea44f?style=for-the-badge&logo=github" alt="Download"></a>
   <a href="https://github.com/Skynizz/optiscaler-dlss5/releases"><img src="https://img.shields.io/github/downloads/Skynizz/optiscaler-dlss5/total?style=for-the-badge&label=Downloads&color=blue" alt="Downloads"></a>
   <a href="https://github.com/Skynizz/optiscaler-dlss5/releases/latest"><img src="https://img.shields.io/github/v/release/Skynizz/optiscaler-dlss5?style=for-the-badge&label=Latest" alt="Latest release"></a>
 </p>
@@ -11,6 +11,39 @@ A fork of [OptiScaler](https://github.com/optiscaler/OptiScaler), built on Daghe
 for a fraction of its usual cost and with less flicker. OptiScaler base: `master` as of 6 October 2026.
 
 NVIDIA's model (`nvngx_dlssnr.dll`) is not included.
+
+## New in 1.3.0
+
+Frame generation got its own section in the DLSS 5 tab, and most of this release is about making NVIDIA's
+frame generation behave. Measured on an RTX 4070, 2560x1440, 360 Hz G-SYNC.
+
+**Frame generation**
+- **Multiplier override**: NVIDIA's multiplier can replace the game's, 2x to 6x, live from the menu.
+  Multipliers your GPU does not allow are greyed out instead of failing silently.
+- **Auto multiplier**: picks 2x-6x by itself so the frames shown stay just under your display's refresh
+  rate. Whole steps, steady, and your saved setting comes back when you turn it off.
+- **No more frames in bursts on RTX 40**: the NVIDIA flip metering switch. With it on, Streamline handed
+  frames over in batches of 4-6 (Witcher 3: 83% stacked, 6 queued); off, 96-98% reach the display on
+  time with 1 queued. It also fixed stutter in Cyberpunk 2077.
+- **Injected frame generation in games without it** now works in games that ship no Streamline at all
+  (Red Dead Redemption 2: 2x at ~123 fps). The menu says when the files it needs are missing.
+- **Frame generation meter**: frames shown and rendered, how evenly they reach the display, duplicate
+  generated frames, frames waiting in the queue, tear risk.
+- **G-SYNC status** in the menu, and **use the game's DLSS-G version** instead of NVIDIA's newer download.
+
+**Image**
+- **Speckle cleanup**: removes the mesh of dots ray-traced ambient occlusion leaves on fast camera turns
+  (Witcher 3: about 10x less), before the upscaler, so frame generation does not copy it. Foliage and
+  silhouettes are protected by a depth test.
+- **Up to 30 model passes, with a style per pass**: stack Natural + Default + Cinematic over 3 passes.
+- **Region**: DLSS 5 on the scenery only, or on the foreground only.
+- **HDR brightness**: no more pumping in games that hand their own exposure to the upscaler (RDR2).
+
+**Fixes**
+- A faint frozen picture could stay over the game after clicking a preset (x8 above all).
+- Updating keeps your `OptiScaler.ini`.
+
+Steady in motion and Synced FG (OptiScaler's own frame generation) are in, off by default and experimental.
 
 ## New in 1.2.1
 
@@ -152,7 +185,7 @@ it behaves exactly like the original.
 
 ## Install
 
-Download `OptiScaler-DLSS5-1.2.1-win-x64.zip` from the [Releases](https://github.com/Skynizz/optiscaler-dlss5/releases)
+Download `OptiScaler-DLSS5-1.3.0-win-x64.zip` from the [Releases](https://github.com/Skynizz/optiscaler-dlss5/releases)
 page, unzip it, run `INSTALL.bat` and drop the game folder (the one with the exe) onto it.
 The installer picks a free file name (`winmm.dll`, or `OptiScaler.asi` if there is an ASI loader) and
 never overwrites anything. `UNINSTALL.bat` puts everything back.
@@ -164,7 +197,7 @@ In game: turn DLSS on, open the OptiScaler menu with Insert, then the **DLSS 5**
 
 ## Build
 
-Full source with every submodule: `OptiScaler-DLSS5-1.2.1-source.zip` on the release page (GitHub's
+Full source with every submodule: `OptiScaler-DLSS5-1.3.0-source.zip` on the release page (GitHub's
 own "Source code" archives leave the submodules out, so they will not build). Or clone it:
 
 ```
