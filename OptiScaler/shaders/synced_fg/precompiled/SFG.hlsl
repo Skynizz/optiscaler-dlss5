@@ -60,23 +60,75 @@ float MaxOf(float3 v) { return max(v.r, max(v.g, v.b)); }
 
 bool Inside(float2 uv) { return all(uv >= 0.0) && all(uv <= 1.0); }
 
-// Unchanged between the two frames, relative to its brightness.
-bool StaticAt(int2 c)
+// The motion at the pixel itself, undilated: the surface it shows, not the nearest one around it.
+float2 MotionHere(float2 uv)
+{
+    const int2 mc = clamp(int2(uv * float2(mvWidth, mvHeight)), int2(0, 0), int2(mvWidth, mvHeight) - 1);
+    return Velocity.Load(int3(mc, 0)).xy * float2(mvScaleX, mvScaleY) / float2(mvWidth, mvHeight);
+}
+
+// The difference between the two frames at a pixel, relative to its brightness.
+float ChangeAt(int2 c)
 {
     const float4 a = PrevColor.Load(int3(c, 0));
     const float4 b = CurColor.Load(int3(c, 0));
-    const float scale = max(MaxOf(a.rgb), MaxOf(b.rgb)) + 0.02;
-    return MaxOf(abs(b.rgb - a.rgb)) / scale <= staticThreshold * 2.0;
+    return MaxOf(abs(b.rgb - a.rgb)) / (max(MaxOf(a.rgb), MaxOf(b.rgb)) + 0.02);
 }
 
-// HUD: a colour that stands still where the scene under it moves (more than a pixel between the frames).
-bool HudAt(float2 uv)
+// How much a sample looks like HUD, 0 to 1: a colour that stands still where the scene under it moves. The scene's
+// motion is the pixel's own -- the dilated one took a leaf's motion for the background between the leaves, which
+// stands still under a slow move, and foliage passed for HUD, flipping from one frame to the other.
+float HudScore(float2 uv)
 {
     const int2 c = clamp(int2(uv * float2(outWidth, outHeight)), int2(0, 0), int2(outWidth, outHeight) - 1);
-    const float2 sceneMotion = MotionAt(uv) * float2(outWidth, outHeight);
-    return dot(sceneMotion, sceneMotion) > 1.0 && StaticAt(c);
+    const float2 motion = MotionHere(uv) * float2(outWidth, outHeight);
+    const float moving = saturate((length(motion) - 1.5) / 1.5);
+    const float still = saturate(1.0 - ChangeAt(c) / (staticThreshold * 3.0));
+    return moving * still;
 }
 
+// Catmull-Rom, five bilinear taps, clamped to the four texels around: as sharp as the real frames. Bilinear
+// softened every generated frame a little, and fine detail -- leaves, branches -- went sharp, soft, sharp: a shimmer.
+float4 SampleSharp(Texture2D<float4> tex, float2 uv)
+{
+    const float2 size = float2(outWidth, outHeight);
+    const float2 pos = uv * size;
+    const float2 c1 = floor(pos - 0.5) + 0.5;
+    const float2 f = pos - c1;
+
+    const float2 w0 = f * (-0.5 + f * (1.0 - 0.5 * f));
+    const float2 w1 = 1.0 + f * f * (-2.5 + 1.5 * f);
+    const float2 w2 = f * (0.5 + f * (2.0 - 1.5 * f));
+    const float2 w3 = f * f * (-0.5 + 0.5 * f);
+    const float2 w12 = w1 + w2;
+    const float2 t0 = (c1 - 1.0) / size;
+    const float2 t3 = (c1 + 2.0) / size;
+    const float2 t12 = (c1 + w2 / w12) / size;
+
+    const float a = w12.x * w0.y;
+    const float b = w0.x * w12.y;
+    const float c = w12.x * w12.y;
+    const float d = w3.x * w12.y;
+    const float e = w12.x * w3.y;
+
+    float4 r = tex.SampleLevel(Linear, float2(t12.x, t0.y), 0) * a + tex.SampleLevel(Linear, float2(t0.x, t12.y), 0) * b +
+               tex.SampleLevel(Linear, t12, 0) * c + tex.SampleLevel(Linear, float2(t3.x, t12.y), 0) * d +
+               tex.SampleLevel(Linear, float2(t12.x, t3.y), 0) * e;
+    r /= a + b + c + d + e;
+
+    const int2 hi = int2(outWidth, outHeight) - 1;
+    const int2 base = int2(c1 - 0.5);
+    const float4 s00 = tex.Load(int3(clamp(base, int2(0, 0), hi), 0));
+    const float4 s10 = tex.Load(int3(clamp(base + int2(1, 0), int2(0, 0), hi), 0));
+    const float4 s01 = tex.Load(int3(clamp(base + int2(0, 1), int2(0, 0), hi), 0));
+    const float4 s11 = tex.Load(int3(clamp(base + int2(1, 1), int2(0, 0), hi), 0));
+
+    return clamp(r, min(min(s00, s10), min(s01, s11)), max(max(s00, s10), max(s01, s11)));
+}
+
+// Every decision below is a weight that slides, never a switch. A switch flips from one pixel to its neighbour and
+// from one generated frame to the next wherever the two frames half agree -- foliage above all, fine, contrasted,
+// with noisy motion -- and the leaves trembled and slid.
 [numthreads(8, 8, 1)]
 void CSMain(uint3 id : SV_DispatchThreadID)
 {
@@ -100,14 +152,16 @@ void CSMain(uint3 id : SV_DispatchThreadID)
         }
     }
 
-    const float3 delta = abs(curHere.rgb - prevHere.rgb);
-    const float scale = max(MaxOf(curHere.rgb), MaxOf(prevHere.rgb)) + 0.02;
+    // Unchanged: this frame's pixel. Fading out of it rather than dropping it at a threshold.
+    const float change = MaxOf(abs(curHere.rgb - prevHere.rgb)) / (max(MaxOf(curHere.rgb), MaxOf(prevHere.rgb)) + 0.02);
 
-    if (MaxOf(delta) / scale <= staticThreshold)
+    if (change <= staticThreshold * 0.5)
     {
         Output[id.xy] = curHere;
         return;
     }
+
+    const float unchanged = saturate(1.0 - (change - staticThreshold * 0.5) / (staticThreshold * 1.5));
 
     float2 m = MotionAt(uv);
 
@@ -119,65 +173,66 @@ void CSMain(uint3 id : SV_DispatchThreadID)
 
     float4 fromCur;
     float4 fromPrev;
-    bool curIsHud = false;
-    bool prevIsHud = false;
 
     if (hasHudless != 0)
     {
         // The scene alone: nothing of the HUD can be dragged along.
-        fromCur = HudlessCur.SampleLevel(Linear, q, 0);
-        fromPrev = HudlessPrev.SampleLevel(Linear, p, 0);
+        fromCur = SampleSharp(HudlessCur, q);
+        fromPrev = SampleSharp(HudlessPrev, p);
     }
     else
     {
-        fromCur = CurColor.SampleLevel(Linear, q, 0);
-        fromPrev = PrevColor.SampleLevel(Linear, p, 0);
-        curIsHud = HudAt(q);
-        prevIsHud = HudAt(p);
+        fromCur = SampleSharp(CurColor, q);
+        fromPrev = SampleSharp(PrevColor, p);
     }
 
-    float w = t;
+    float w = t;      // how much of this frame's sample
+    float here = 0.0; // how much of the pixel as this frame shows it
 
     if (!Inside(p))
         w = 1.0;
     else if (!Inside(q))
         w = 0.0;
-    else if (curIsHud && !prevIsHud)
-        w = 0.0;
-    else if (prevIsHud && !curIsHud)
-        w = 1.0;
-    else if (curIsHud && prevIsHud)
-    {
-        // HUD on both sides: the pixel itself, as this frame shows it.
-        Output[id.xy] = curHere;
-        return;
-    }
     else
     {
+        float hud = 0.0;
+
+        if (hasHudless == 0)
+        {
+            // A piece of HUD fetched from beside the pixel on one side: the other side's sample. On both: the
+            // pixel itself.
+            const float hc = HudScore(q);
+            const float hp = HudScore(p);
+            w = lerp(w, 0.0, hc * (1.0 - hp));
+            w = lerp(w, 1.0, hp * (1.0 - hc));
+            here = hc * hp;
+            hud = max(hc, hp);
+        }
+
         const float norm = max(MaxOf(fromCur.rgb), MaxOf(fromPrev.rgb)) + 0.02;
         const float disagree = MaxOf(abs(fromCur.rgb - fromPrev.rgb)) / norm;
 
-        // Screen-anchored: the pixel matches itself in the last frame far better than the scene moved along its
-        // motion does -- a HUD, transparent ones included (their colour moves with the scene behind them, so
-        // they never look still). Shown as this frame shows it.
-        const float anchored = MaxOf(abs(curHere.rgb - prevHere.rgb)) /
-                               (max(MaxOf(curHere.rgb), MaxOf(prevHere.rgb)) + 0.02);
-
-        if (hasHudless == 0 && disagree > 0.15 && anchored < disagree * 0.35)
-        {
-            Output[id.xy] = curHere;
-            return;
-        }
-
-        // The two frames disagree (one sees what the other does not, or one sample is a piece of HUD fetched
-        // from beside the pixel): trust the sample closer to what is really at this pixel now.
+        // The two frames disagree (one sees what the other does not): lean toward the sample closer to what is
+        // really at this pixel now -- by how much closer, not which.
         const float toCur = MaxOf(abs(fromCur.rgb - curHere.rgb));
         const float toPrev = MaxOf(abs(fromPrev.rgb - curHere.rgb));
-        const float side = toCur <= toPrev ? 1.0 : 0.0;
-        w = lerp(t, side, saturate((disagree - 0.1) / 0.2));
+        const float side = smoothstep(0.0, 1.0, toPrev / (toCur + toPrev + 1e-4));
+        w = lerp(w, side, saturate((disagree - 0.12) / 0.3) * (1.0 - hud));
+
+        // Screen-anchored -- a transparent HUD, its colour moving with the scene behind it: the pixel matches
+        // itself in the last frame far better than the scene moved along its motion does, while that motion is
+        // real (a couple of pixels at least, the pixel's own).
+        if (hasHudless == 0)
+        {
+            const float2 motion = MotionHere(uv) * float2(outWidth, outHeight);
+            const float moving = saturate((length(motion) - 2.0) / 2.0);
+            const float anchored = saturate((disagree * 0.25 - change) / max(disagree * 0.15, 1e-3));
+            here = max(here, moving * anchored * saturate((disagree - 0.2) / 0.15));
+        }
     }
 
     float4 result = lerp(fromPrev, fromCur, w);
+    result = lerp(result, curHere, max(here, unchanged));
 
     if (debugView != 0)
         result.rgb *= float3(0.6, 1.0, 0.6);

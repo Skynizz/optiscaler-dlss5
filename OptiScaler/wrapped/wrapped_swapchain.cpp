@@ -12,6 +12,8 @@
 #include <menu/menu_overlay_dx.h>
 
 #include <misc/FrameLimit.h>
+#include <framegen/synced/PresentPacer.h>
+#include <framegen/synced/FGMeter.h>
 
 #include <d3d11.h>
 #include <d3d12.h>
@@ -535,6 +537,15 @@ static HRESULT LocalPresent(IDXGISwapChain* pSwapChain, UINT SyncInterval, UINT 
 
         _frameCounter++;
         State::Instance().frameCount = _frameCounter;
+    }
+
+    // Present pacing, the frame generation meter, the auto multiplier (all off by default): the real swapchain's
+    // Present is hooked, beneath Streamline's frame generation. The meter's thumbnail of this frame goes on the
+    // queue that presents it, so it is read after the frame is drawn and before it is shown.
+    if (willPresent)
+    {
+        PresentPacer::Hook(pSwapChain);
+        FGMeter::Thumbnail(pSwapChain, cq);
     }
 
     LOG_DEBUG("Calling original present");

@@ -24,6 +24,26 @@ SyncedDXGISwapChain::SyncedDXGISwapChain(IDXGISwapChain* real, ID3D12CommandQueu
     _gameQueue->AddRef();
     _queue->GetDevice(IID_PPV_ARGS(&_device));
 
+    // Under Streamline (a game shipping DLSS Frame Generation) the swapchain arrives on Streamline's own pacer queue,
+    // not the game's: frame generation then works among NVIDIA's pacing, unsynchronised with the game's rendering,
+    // and the GPU hung (The Witcher 3, DRED). Said plainly; removing sl.dlss_g.dll from the game avoids it.
+    {
+        wchar_t name[128] = {};
+        UINT size = sizeof(name) - sizeof(wchar_t);
+
+        if (_gameQueue->GetPrivateData(WKPDID_D3DDebugObjectNameW, &size, name) == S_OK)
+        {
+            const std::wstring queueName(name, size / sizeof(wchar_t));
+
+            if (queueName.find(L"sl.dlss_g") != std::wstring::npos)
+                LOG_ERROR("Synced FG: the swapchain is on Streamline's DLSS-G queue ({}), not the game's -- expect hangs. "
+                          "Remove or rename sl.dlss_g.dll in the game folder to use Synced FG",
+                          wstring_to_string(queueName));
+            else
+                LOG_INFO("Synced FG: game queue {}", wstring_to_string(queueName));
+        }
+    }
+
     LARGE_INTEGER frequency {};
     QueryPerformanceFrequency(&frequency);
     _qpcFrequency = std::max<LONGLONG>(frequency.QuadPart, 1);
@@ -32,6 +52,7 @@ SyncedDXGISwapChain::SyncedDXGISwapChain(IDXGISwapChain* real, ID3D12CommandQueu
     {
         _device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&_fence));
         _device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&_readyFence));
+        _readyEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
         _fenceEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);
 
         for (auto& slot : _slots)
@@ -50,7 +71,14 @@ SyncedDXGISwapChain::SyncedDXGISwapChain(IDXGISwapChain* real, ID3D12CommandQueu
 
     CreateProxies();
     ReadRefreshRate();
+
+    _timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+
+    if (_timer == nullptr)
+        LOG_WARN("Synced FG: no high-resolution timer, pacing falls back to Sleep");
+
     _thread = std::thread(&SyncedDXGISwapChain::PresenterLoop, this);
+    _watchdog = std::thread(&SyncedDXGISwapChain::WatchdogLoop, this);
 
     LOG_INFO("Synced FG swapchain created, {} back buffers", _proxies.size());
 }
@@ -166,6 +194,87 @@ void SyncedDXGISwapChain::ReadRefreshRate()
     }
 }
 
+// Sleeps on the high-resolution timer until half a millisecond before `due`, then spins.
+void SyncedDXGISwapChain::WaitUntil(LONGLONG due)
+{
+    while (true)
+    {
+        LARGE_INTEGER now {};
+        QueryPerformanceCounter(&now);
+        const double remainingMs = (double) (due - now.QuadPart) * 1000.0 / (double) _qpcFrequency;
+
+        if (remainingMs <= 0.0)
+            return;
+
+        if (remainingMs > 0.6)
+        {
+            if (_timer != nullptr)
+            {
+                LARGE_INTEGER relative {};
+                relative.QuadPart = -(LONGLONG) ((remainingMs - 0.5) * 10000.0); // 100 ns units, relative
+
+                if (SetWaitableTimerEx(_timer, &relative, 0, nullptr, nullptr, nullptr, 0))
+                {
+                    WaitForSingleObject(_timer, 100);
+                    continue;
+                }
+            }
+
+            Sleep(remainingMs > 2.0 ? 1 : 0);
+        }
+        else
+        {
+            YieldProcessor();
+        }
+    }
+}
+
+// Every present (or drop), and every few seconds a line: the presents per second, the mean interval between them
+// and the 99th percentile, the largest, and how many generated frames were dropped.
+void SyncedDXGISwapChain::RecordPresent(bool presented)
+{
+    LARGE_INTEGER now {};
+    QueryPerformanceCounter(&now);
+
+    if (!presented)
+    {
+        _dropped++;
+        return;
+    }
+
+    if (_lastPresent != 0)
+        _presentIntervals.push_back((double) (now.QuadPart - _lastPresent) * 1000.0 / (double) _qpcFrequency);
+
+    _lastPresent = now.QuadPart;
+
+    if (_statsStart == 0)
+        _statsStart = now.QuadPart;
+
+    const double elapsed = (double) (now.QuadPart - _statsStart) / (double) _qpcFrequency;
+
+    if (elapsed < 5.0 || _presentIntervals.size() < 10)
+        return;
+
+    std::vector<double> sorted = _presentIntervals;
+    std::sort(sorted.begin(), sorted.end());
+    double mean = 0.0;
+
+    for (double v : sorted)
+        mean += v;
+
+    mean /= (double) sorted.size();
+    const double p99 = sorted[std::min(sorted.size() - 1, (size_t) ((double) sorted.size() * 0.99))];
+
+    LOG_INFO("Synced FG pacing: {:.0f} presents/s, interval {:.2f} ms mean, {:.2f} ms p99, {:.2f} ms max, {} dropped"
+             " | batches {}, late {}, no generated frame {}, game held {:.0f} ms",
+             (double) _presentIntervals.size() / elapsed, mean, p99, sorted.back(), _dropped, _batches.exchange(0),
+             _batchesLate.exchange(0), _batchesBare.exchange(0), _heldMs.exchange(0.0));
+
+    _presentIntervals.clear();
+    _dropped = 0;
+    _statsStart = now.QuadPart;
+}
+
 double SyncedDXGISwapChain::GameFps() const
 {
     return _interval > 0.0 ? (double) _qpcFrequency / _interval : 0.0;
@@ -232,7 +341,12 @@ HRESULT SyncedDXGISwapChain::HandOver(UINT SyncInterval, UINT Flags)
         const double dt = (double) (now.QuadPart - _lastArrival);
 
         if (dt > 0.0 && dt < (double) _qpcFrequency / 5.0)
+        {
+            if (_interval > 0.0)
+                _jitter = _jitter * 0.95 + std::abs(dt - _interval) * 0.05;
+
             _interval = _interval <= 0.0 ? dt : _interval * 0.9 + dt * 0.1;
+        }
     }
 
     _lastArrival = now.QuadPart;
@@ -255,15 +369,23 @@ HRESULT SyncedDXGISwapChain::HandOver(UINT SyncInterval, UINT Flags)
         _gameQueue->Signal(_readyFence, ready);
     }
 
-    // Spread over one game frame: the first now, each next one an equal step later. The real frame lands one
-    // step before the next game frame's first generated one.
-    const double step = _pending.empty() ? 0.0 : _interval / (double) _pending.size();
+    // The batch is scheduled by the presenter when the GPU has it ready (see PresenterLoop).
+    _batches++;
+
+    bool anyGenerated = false;
+
+    for (const auto& f : _pending)
+        anyGenerated |= f.generated;
+
+    if (!anyGenerated)
+        _batchesBare++;
 
     for (size_t i = 0; i < _pending.size(); i++)
     {
         Job job {};
         job.frame = _pending[i];
-        job.due = now.QuadPart + (LONGLONG) (step * (double) i);
+        job.batchIndex = (UINT) i;
+        job.batchSize = (UINT) _pending.size();
         job.syncInterval = SyncInterval;
         job.flags = Flags;
         job.readyValue = ready;
@@ -286,14 +408,48 @@ HRESULT SyncedDXGISwapChain::HandOver(UINT SyncInterval, UINT Flags)
 
     _wake.notify_one();
 
-    // Held back like a real swapchain: never more than one real frame waiting besides the one being shown.
-    _drain.wait(lock, [this] { return _realFramesQueued < 2 || _stop; });
+    // Held back like a real swapchain, but loosely: up to two real frames waiting besides the one being shown.
+    // With one, the game was held back two thirds of the time and handed its frames over in the presenter's rhythm
+    // instead of its own. Frame generation keeps three output sets, so none is rewritten while still queued.
+    LARGE_INTEGER heldFrom {};
+    QueryPerformanceCounter(&heldFrom);
+    _drain.wait(lock, [this] { return _realFramesQueued < 3 || _stop; });
     lock.unlock();
+
+    LARGE_INTEGER heldTo {};
+    QueryPerformanceCounter(&heldTo);
+    _heldMs = _heldMs.load() + (double) (heldTo.QuadPart - heldFrom.QuadPart) * 1000.0 / (double) _qpcFrequency;
 
     // The game renders its next frames into the back buffers the present queue copies from. Before it gets back
     // to the one this frame used -- three frames on with three buffers -- the present queue must be done with it.
     ThrottleGpu(3);
     return S_OK;
+}
+
+void SyncedDXGISwapChain::WatchdogLoop()
+{
+    static const char* stages[] = { "idle", "waiting for its time", "waiting for a slot", "recording",
+                                    "executing", "in Present" };
+
+    while (true)
+    {
+        {
+            std::unique_lock<std::mutex> lock(_mutex);
+
+            if (_wake.wait_for(lock, std::chrono::milliseconds(200), [this] { return _stop; }))
+                return;
+        }
+
+        if (_device == nullptr || _device->GetDeviceRemovedReason() == S_OK)
+            continue;
+
+        const int stage = std::clamp(_presenterStage.load(), 0, 5);
+        LOG_ERROR("Synced FG watchdog: the device is lost; the presenter was {}, {} jobs queued, fence {} of {}",
+                  stages[stage], _jobs.size(), _fence != nullptr ? _fence->GetCompletedValue() : 0, _fenceValue);
+
+        Util::GetDeviceRemovedReason(_device);
+        return;
+    }
 }
 
 void SyncedDXGISwapChain::PresenterLoop()
@@ -314,36 +470,83 @@ void SyncedDXGISwapChain::PresenterLoop()
             _busy = true;
         }
 
-        // Wait for the frame's time: sleep while far, spin the last millisecond and a half.
-        while (true)
+        if (job.batchIndex == 0)
         {
+            // The batch's frames are finished on the GPU before anything of it is scheduled.
+            _presenterStage = 1;
+
+            if (_readyFence != nullptr && _readyEvent != nullptr && job.readyValue != 0 &&
+                _readyFence->GetCompletedValue() < job.readyValue)
+            {
+                _readyFence->SetEventOnCompletion(job.readyValue, _readyEvent);
+                WaitForSingleObject(_readyEvent, 1000);
+            }
+
             LARGE_INTEGER now {};
             QueryPerformanceCounter(&now);
-            const double remainingMs = (double) (job.due - now.QuadPart) * 1000.0 / (double) _qpcFrequency;
 
-            if (remainingMs <= 0.0)
-                break;
+            // The GPU's own frame interval and irregularity; a gap of more than 200 ms is a pause, not a frame.
+            if (_lastReady != 0)
+            {
+                const double dt = (double) (now.QuadPart - _lastReady);
 
-            if (remainingMs > 1.5)
-                Sleep(1);
-            else
-                YieldProcessor();
+                if (dt > 0.0 && dt < (double) _qpcFrequency / 5.0)
+                {
+                    if (_gpuInterval > 0.0)
+                        _gpuJitter = _gpuJitter * 0.95 + std::abs(dt - _gpuInterval) * 0.05;
+
+                    _gpuInterval = _gpuInterval <= 0.0 ? dt : _gpuInterval * 0.9 + dt * 0.1;
+                }
+            }
+
+            _lastReady = now.QuadPart;
+
+            // Spread over one frame, each frame an equal step after the last, the batch starting where the last
+            // one's cadence says -- not when this frame happened to be ready, which jitters. A safety margin, three
+            // times the irregularity (at most half a frame), lets a frame ready late still start on its slot; never
+            // earlier than now, never later than the margin plus one step (no latency creep).
+            const double interval = _gpuInterval > 0.0 ? _gpuInterval : _interval;
+            const double step = interval / (double) std::max(job.batchSize, 1u);
+            const double margin = std::clamp(_gpuJitter * 3.0, 0.0005 * (double) _qpcFrequency,
+                                             std::max(interval * 0.5, 0.0005 * (double) _qpcFrequency));
+            LONGLONG start = now.QuadPart + (LONGLONG) margin;
+
+            if (_nextBatch != 0)
+            {
+                if (_nextBatch < now.QuadPart)
+                    _batchesLate++;
+
+                start = std::clamp(_nextBatch, now.QuadPart, now.QuadPart + (LONGLONG) (margin + step));
+            }
+
+            _batchStart = start;
+            _batchStep = step;
+            _nextBatch = start + (LONGLONG) (step * (double) job.batchSize);
         }
+
+        job.due = _batchStart + (LONGLONG) (_batchStep * (double) job.batchIndex);
+
+        // Wait for the frame's time, precisely.
+        _presenterStage = 1;
+        WaitUntil(job.due);
 
         bool drop = false;
 
         if (job.frame.generated)
         {
-            // Late: the next frame is already due. A generated frame shown late is worse than none.
+            // Really late only: more than a whole step behind its time. A generated frame a little late is better
+            // than a hole in the cadence.
             LARGE_INTEGER now {};
             QueryPerformanceCounter(&now);
-
-            std::lock_guard<std::mutex> lock(_mutex);
-            drop = !_jobs.empty() && _jobs.front().due <= now.QuadPart;
+            drop = (double) (now.QuadPart - job.due) > _batchStep;
         }
 
         if (!drop)
-            PresentJob(job);
+            RecordPresent(PresentJob(job));
+        else
+            RecordPresent(false);
+
+        _presenterStage = 0;
 
         {
             std::lock_guard<std::mutex> lock(_mutex);
@@ -375,11 +578,15 @@ bool SyncedDXGISwapChain::PresentJob(const Job& job)
     if (slot.list == nullptr)
         return false;
 
+    _presenterStage = 2;
+
     if (slot.fenceValue != 0 && _fence->GetCompletedValue() < slot.fenceValue)
     {
         _fence->SetEventOnCompletion(slot.fenceValue, _fenceEvent);
         WaitForSingleObject(_fenceEvent, 1000);
     }
+
+    _presenterStage = 3;
 
     if (slot.allocator->Reset() != S_OK || slot.list->Reset(slot.allocator, nullptr) != S_OK)
         return false;
@@ -421,6 +628,8 @@ bool SyncedDXGISwapChain::PresentJob(const Job& job)
     if (slot.list->Close() != S_OK)
         return false;
 
+    _presenterStage = 4;
+
     // The frame is finished on the game's queue before ours reads it.
     if (_readyFence != nullptr && job.readyValue != 0)
         _queue->Wait(_readyFence, job.readyValue);
@@ -431,6 +640,7 @@ bool SyncedDXGISwapChain::PresentJob(const Job& job)
     slot.fenceValue = ++_fenceValue;
     _queue->Signal(_fence, slot.fenceValue);
 
+    _presenterStage = 5;
     const HRESULT result = _real->Present(job.syncInterval, job.flags);
 
     if (FAILED(result))
@@ -490,6 +700,9 @@ ULONG STDMETHODCALLTYPE SyncedDXGISwapChain::Release()
         if (_thread.joinable())
             _thread.join();
 
+        if (_watchdog.joinable())
+            _watchdog.join();
+
         WaitGpu();
         ReleaseBuffers();
 
@@ -510,6 +723,12 @@ ULONG STDMETHODCALLTYPE SyncedDXGISwapChain::Release()
 
         if (_fenceEvent != nullptr)
             CloseHandle(_fenceEvent);
+
+        if (_timer != nullptr)
+            CloseHandle(_timer);
+
+        if (_readyEvent != nullptr)
+            CloseHandle(_readyEvent);
 
         if (_device != nullptr)
             _device->Release();

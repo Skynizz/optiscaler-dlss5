@@ -62,7 +62,7 @@ class SyncedFG_Dx12 : public virtual IFGFeature_Dx12
   private:
     static constexpr UINT kMaxGenerated = 3;
     static constexpr UINT kHistory = 3;  // a frame still waiting to be presented is never overwritten
-    static constexpr UINT kOutputSets = 2;
+    static constexpr UINT kOutputSets = 3; // as many as real frames may be in flight
 
     SyncedDXGISwapChain* _synced = nullptr;
     std::unique_ptr<SFG_Dx12> _generator;

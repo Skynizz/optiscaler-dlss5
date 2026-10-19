@@ -112,6 +112,22 @@ HMODULE LibraryLoadHooks::LoadLibraryCheckW(std::wstring libName, LPCWSTR lpLibF
     // c:\programdata/nvidia/ngx/models//dlss/versions/20316673/files/160_e658700.bin
     if (libName.ends_with(L".bin"))
     {
+        // DLSSGUseGameDll: NVIDIA's downloaded DLSS-G gives way to the game's own nvngx_dlssg.dll.
+        if (Config::Instance()->FGDLSSGUseGameDll.value_or_default() && normalizedPath.contains(L"\\versions\\") &&
+            normalizedPath.contains(L"\\dlssg\\") && State::Instance().NVNGX_DLSSG_Path.has_value())
+        {
+            const std::wstring gameDll = State::Instance().NVNGX_DLSSG_Path.value();
+
+            if (HMODULE game = NtdllProxy::LoadLibraryExW_Ldr(gameDll.c_str(), NULL, 0); game != nullptr)
+            {
+                LOG_INFO("DLSSGUseGameDll: {} loaded instead of NVIDIA's download {}", wstring_to_string(gameDll),
+                         libNameA);
+                return game;
+            }
+
+            LOG_WARN("DLSSGUseGameDll: could not load {}, NVIDIA's download is used", wstring_to_string(gameDll));
+        }
+
         auto loadedBin = NtdllProxy::LoadLibraryExW_Ldr(lpLibFullPath, NULL, 0);
 
         if (loadedBin && normalizedPath.contains(L"\\versions\\"))

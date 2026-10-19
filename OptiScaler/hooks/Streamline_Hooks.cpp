@@ -118,6 +118,40 @@ void StreamlineHooks::streamlineLogCallback(sl::LogType type, const char* msg)
     if (msg == nullptr)
         return;
 
+    // Frame pacing's view of the display: G-SYNC on or off, V-Sync, independent flip, the driver's V-Sync mode.
+    // Shown in the Frame generation section, where a G-SYNC dropping out explains tearing or stutter at once.
+    if (const char* rs = strstr(msg, "GSYNC FS OFF is "); rs != nullptr)
+    {
+        auto& st = State::Instance();
+        int value = -1;
+
+        if (sscanf_s(rs, "GSYNC FS OFF is %d", &value) == 1)
+        {
+            if (value == 1 && st.slGsyncOff == 0)
+                st.slGsyncSwitches++;
+
+            st.slGsyncOff = value;
+        }
+
+        if (const char* v = strstr(msg, "VSync enabled is "); v != nullptr && sscanf_s(v, "VSync enabled is %d", &value) == 1)
+            st.slVsyncOn = value;
+
+        if (const char* f = strstr(msg, "iFlip is "); f != nullptr && sscanf_s(f, "iFlip is %d", &value) == 1)
+            st.slIndependentFlip = value;
+
+        if (const char* d = strstr(msg, "DRS VSync mode is "); d != nullptr)
+        {
+            d += strlen("DRS VSync mode is ");
+            size_t n = 0;
+
+            while (d[n] != 0 && d[n] != ',' && n + 1 < sizeof(st.slDrsVsync))
+                n++;
+
+            memcpy(st.slDrsVsync, d, n);
+            st.slDrsVsync[n] = 0;
+        }
+    }
+
     char* trimmed_msg = trimStreamlineLog(msg);
     if (trimmed_msg != nullptr)
     {
@@ -279,7 +313,9 @@ sl::Result StreamlineHooks::hkslInit(const sl::Preferences& pref, uint64_t sdkVe
         }
     }
 
-    if (State::Instance().activeFgInput == FGInput::DLSSG || State::Instance().activeFgOutput == FGOutput::DLSSG)
+    // Not OptiScaler's own request: that one is the DLSS-G being injected.
+    if (!State::Instance().optiSlInitInProgress &&
+        (State::Instance().activeFgInput == FGInput::DLSSG || State::Instance().activeFgOutput == FGOutput::DLSSG))
     {
         std::vector<sl::Feature> localFeaturesToLoad(pref.featuresToLoad, pref.featuresToLoad + pref.numFeaturesToLoad);
         std::erase(localFeaturesToLoad, sl::kFeatureDLSS_G);
@@ -1240,6 +1276,9 @@ sl::Result StreamlineHooks::hkslDLSSGSetOptions(const sl::ViewportHandle& viewpo
     lastDlssgViewport = viewport;
     lastDlssgOptions = options;
 
+    if (State::Instance().activeFgOutput != FGOutput::DLSSG)
+        State::Instance().dlssgGameNative = true;
+
     // Avoid reading past the game's struct's size
     sl::DLSSGOptions newOptions {};
     auto newStructVer = newOptions.structVersion;
@@ -1903,6 +1942,7 @@ void StreamlineHooks::updateDlssgOptions()
     if (o_slDLSSGSetOptions)
     {
         LOG_FUNC();
+
         hkslDLSSGSetOptions(lastDlssgViewport, lastDlssgOptions);
     }
 }

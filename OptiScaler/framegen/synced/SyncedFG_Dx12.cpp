@@ -337,17 +337,23 @@ bool SyncedFG_Dx12::Present()
     if (proxy == nullptr || !EnsureTextures(proxy))
         return false;
 
-    // A rebuilt swapchain, or a frame the upscaler did not run on: the last frame is not this one's neighbour.
+    // A rebuilt swapchain, or a real jump in the upscaler's frames: the last frame is not this one's neighbour.
+    // The upscaler often runs twice between two presents (the counter steps by 2): that is still the next frame,
+    // and treating it as a jump left every other real frame without its generated frames -- a hole of a whole
+    // frame, the stutter. No new upscale at all: no new motion vectors, nothing generated this time.
     static UINT64 lastFrameCount = 0;
+    const UINT64 framesSince = _frameCount - lastFrameCount;
+    const bool newInputs = framesSince != 0;
 
-    if (_synced->Generation() != _swapchainGeneration || _frameCount != lastFrameCount + 1)
+    if (_synced->Generation() != _swapchainGeneration || framesSince > 4)
         _previousValid = false;
 
     _swapchainGeneration = _synced->Generation();
     lastFrameCount = _frameCount;
 
-    // Nothing of ours is reused before the GPU is done with it: at most two real frames in flight.
-    _synced->ThrottleGpu(2);
+    // Nothing of ours is reused before the GPU is done with it: the output set this frame writes was last read
+    // by the presenter three real frames ago (three sets, at most three real frames in flight).
+    _synced->ThrottleGpu(kOutputSets);
 
     auto cmd = GetSCCommandList(fIndex);
 
@@ -428,7 +434,7 @@ bool SyncedFG_Dx12::Present()
         hudPrev = {};
     }
 
-    if (_previousValid && IsActive() && !IsPaused() && mv.resource != nullptr && dp.resource != nullptr)
+    if (_previousValid && newInputs && IsActive() && !IsPaused() && mv.resource != nullptr && dp.resource != nullptr)
     {
         if (_generator == nullptr)
             _generator = std::make_unique<SFG_Dx12>("Synced FG", _device);

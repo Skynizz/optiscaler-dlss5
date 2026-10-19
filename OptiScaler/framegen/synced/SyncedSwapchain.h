@@ -5,6 +5,7 @@
 #include <dxgi1_6.h>
 #include <d3d12.h>
 
+#include <atomic>
 #include <condition_variable>
 #include <deque>
 #include <mutex>
@@ -123,6 +124,8 @@ class DECLSPEC_UUID("6b3c7c0e-5c1e-4b0b-9a8e-2f1d5a7e93c4") SyncedDXGISwapChain 
         QueuedFrame frame;
         UINT64 realIndex = 0; // for a real frame: its hand-over number
         UINT64 readyValue = 0; // the game's queue has finished this frame at this value of _readyFence
+        UINT batchIndex = 0;   // position in its batch (0 = first, scheduled when the GPU has the frame ready)
+        UINT batchSize = 1;
         LONGLONG due = 0; // QPC ticks
         UINT syncInterval = 0;
         UINT flags = 0;
@@ -162,6 +165,13 @@ class DECLSPEC_UUID("6b3c7c0e-5c1e-4b0b-9a8e-2f1d5a7e93c4") SyncedDXGISwapChain 
     UINT _proxyIndex = 0;
     UINT64 _generation = 0;
 
+    // The watchdog: checks the device every 200 ms and logs why it was lost (DRED, when on) at once -- the game's
+    // own crash handler kills the process before anything else asks. Also says what the presenter was doing.
+    std::thread _watchdog;
+    std::atomic<int> _presenterStage { 0 }; // 0 idle, 1 waiting for its time, 2 waiting for a slot, 3 recording,
+                                            // 4 executing, 5 in Present
+    void WatchdogLoop();
+
     // The presenter.
     std::thread _thread;
     std::mutex _mutex;              // the job queue and everything below
@@ -188,6 +198,44 @@ class DECLSPEC_UUID("6b3c7c0e-5c1e-4b0b-9a8e-2f1d5a7e93c4") SyncedDXGISwapChain 
 
     double _refreshHz = 0.0;
     void ReadRefreshRate();
+
+    // A high-resolution waitable timer: Sleep(1) can last 15 ms without a raised timer resolution, which at 4x
+    // (a frame every 4 ms) put the generated frames anywhere.
+    HANDLE _timer = nullptr;
+    void WaitUntil(LONGLONG due);
+
+    // The cadence: when the next batch's first frame is due, carried from batch to batch so the game's own jitter
+    // in handing frames over does not reach the screen.
+    LONGLONG _nextBatch = 0;
+
+    // How irregularly the game hands its frames over (mean deviation from its interval, QPC ticks), and the safety
+    // margin kept from it: every batch is shown that much later than it could be, so a frame handed over up to
+    // that late still starts on its slot instead of leaving a hole -- the stutter of a late frame.
+    double _jitter = 0.0;
+
+    // The cadence the presenter keeps, measured where it matters: when the GPU has finished each frame (and its
+    // generated frames). GPU-bound -- ray tracing at 30 fps -- the GPU finishes a frame most of a frame after the game
+    // hands it over, so a schedule taken from the hand-over had the generated frames ready all at once, bunched or
+    // late and dropped: a quarter of them at 30 fps in The Witcher 3.
+    HANDLE _readyEvent = nullptr;
+    LONGLONG _lastReady = 0;
+    double _gpuInterval = 0.0;
+    double _gpuJitter = 0.0;
+    LONGLONG _batchStart = 0;
+    double _batchStep = 0.0;
+
+    // Measured output pacing, logged every few seconds: intervals between presents, and frames dropped.
+    LONGLONG _lastPresent = 0;
+    LONGLONG _statsStart = 0;
+    std::vector<double> _presentIntervals;
+    UINT _dropped = 0;
+    // Batches since the last line: in all, started late (the frame came after its slot), with no generated
+    // frame, and the time the game's thread spent held back in Present (ms).
+    std::atomic<UINT> _batches { 0 };
+    std::atomic<UINT> _batchesLate { 0 };
+    std::atomic<UINT> _batchesBare { 0 };
+    std::atomic<double> _heldMs { 0.0 };
+    void RecordPresent(bool presented);
 
     // Pacing: the game's frame interval, smoothed, in QPC ticks.
     LONGLONG _qpcFrequency = 1;
