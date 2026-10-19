@@ -199,6 +199,13 @@ bool Config::Reload(std::filesystem::path iniPath)
             FGSyncedDebug.set_from_config(readBool("FrameGen", "SyncedDebug"));
             FGSyncedDred.set_from_config(readBool("FrameGen", "SyncedDred"));
             FGSyncedCapToRefresh.set_from_config(readBool("FrameGen", "SyncedCapToRefresh"));
+            FGSpeckleCleanup.set_from_config(readBool("FrameGen", "SpeckleCleanup"));
+            FGSpeckleCleanupStrength.set_from_config(readFloat("FrameGen", "SpeckleCleanupStrength"));
+            FGSpeckleCleanupDebug.set_from_config(readBool("FrameGen", "SpeckleCleanupDebug"));
+            FGMeter.set_from_config(readBool("FrameGen", "Meter"));
+            FGDLSSGUseGameDll.set_from_config(readBool("FrameGen", "DLSSGUseGameDll"));
+            FGAutoMultiplier.set_from_config(readBool("FrameGen", "AutoMultiplier"));
+            FGAutoMultiplierTarget.set_from_config(readFloat("FrameGen", "AutoMultiplierTarget"));
             if (FGDLSSGInterpolationCount.has_value() &&
                 (FGDLSSGInterpolationCount.value() < 1 || FGDLSSGInterpolationCount.value() > 6))
                 FGDLSSGInterpolationCount.reset();
@@ -338,8 +345,10 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrScanAnchorValue.set_from_config(readFloat("DlssNr", "ScanAnchorValue"));
             DlssNrScanAnchorWhitePoint.set_from_config(readFloat("DlssNr", "ScanAnchorWhitePoint"));
             DlssNrScanAnchors.set_from_config(readString("DlssNr", "ScanAnchors"));
+            DlssNrPassStyles.set_from_config(readString("DlssNr", "PassStyles"));
             DlssNrScanInverted.set_from_config(readBool("DlssNr", "ScanInverted"));
             DlssNrWhitePointTrim.set_from_config(readFloat("DlssNr", "WhitePointTrim"));
+            DlssNrAutoFollowsGameExposure.set_from_config(readBool("DlssNr", "AutoFollowsGameExposure"));
             DlssNrAutoCapture.set_from_config(readBool("DlssNr", "AutoCapture"));
             DlssNrWhitePointScale.set_from_config(readFloat("DlssNr", "WhitePointScale"));
             DlssNrPreset.set_from_config(readUInt("DlssNr", "Preset"));
@@ -400,6 +409,10 @@ bool Config::Reload(std::filesystem::path iniPath)
             DlssNrRegionMaskStrength.set_from_config(readFloat("DlssNr", "RegionMaskStrength"));
             DlssNrRegionMaskIgnoreFloor.set_from_config(readBool("DlssNr", "RegionMaskIgnoreFloor"));
             DlssNrRegionMaskShow.set_from_config(readBool("DlssNr", "RegionMaskShow"));
+            DlssNrMotionFade.set_from_config(readFloat("DlssNr", "MotionFade"));
+            DlssNrMotionFadeStart.set_from_config(readFloat("DlssNr", "MotionFadeStart"));
+            DlssNrMotionFadeEnd.set_from_config(readFloat("DlssNr", "MotionFadeEnd"));
+            DlssNrMotionFadeSkipModel.set_from_config(readBool("DlssNr", "MotionFadeSkipModel"));
             DlssNrJbuUpsample.set_from_config(readBool("DlssNr", "JbuUpsample"));
             DlssNrJbuSigma.set_from_config(readFloat("DlssNr", "JbuSigma"));
             UseGenericAppIdWithDlss.set_from_config(readBool("DLSS", "UseGenericAppIdWithDlss"));
@@ -1085,6 +1098,19 @@ bool Config::SaveIni()
         ini.SetValue("FrameGen", "SyncedDred", GetBoolValue(Instance()->FGSyncedDred.value_for_config()).c_str());
         ini.SetValue("FrameGen", "SyncedCapToRefresh",
                      GetBoolValue(Instance()->FGSyncedCapToRefresh.value_for_config()).c_str());
+        ini.SetValue("FrameGen", "SpeckleCleanup",
+                     GetBoolValue(Instance()->FGSpeckleCleanup.value_for_config()).c_str());
+        ini.SetValue("FrameGen", "SpeckleCleanupStrength",
+                     GetFloatValue(Instance()->FGSpeckleCleanupStrength.value_for_config()).c_str());
+        ini.SetValue("FrameGen", "SpeckleCleanupDebug",
+                     GetBoolValue(Instance()->FGSpeckleCleanupDebug.value_for_config()).c_str());
+        ini.SetValue("FrameGen", "Meter", GetBoolValue(Instance()->FGMeter.value_for_config()).c_str());
+        ini.SetValue("FrameGen", "DLSSGUseGameDll",
+                     GetBoolValue(Instance()->FGDLSSGUseGameDll.value_for_config()).c_str());
+        ini.SetValue("FrameGen", "AutoMultiplier",
+                     GetBoolValue(Instance()->FGAutoMultiplier.value_for_config()).c_str());
+        ini.SetValue("FrameGen", "AutoMultiplierTarget",
+                     GetFloatValue(Instance()->FGAutoMultiplierTarget.value_for_config()).c_str());
         ini.SetValue("DLSSG", "InterpolationCount",
                      GetIntValue(Instance()->FGDLSSGInterpolationCount.value_for_config()).c_str());
         ini.SetValue("DLSSG", "UseGamesReflexMarkers",
@@ -1281,10 +1307,13 @@ bool Config::SaveIni()
     // reset to default on the next run.
     ini.SetValue("DlssNr", "WhitePointSource", GetIntValue(Instance()->DlssNrWhitePointSource.value_for_config()).c_str());
     ini.SetValue("DlssNr", "WhitePointTrim", GetFloatValue(Instance()->DlssNrWhitePointTrim.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "AutoFollowsGameExposure",
+                 GetBoolValue(Instance()->DlssNrAutoFollowsGameExposure.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ScanTrim", GetFloatValue(Instance()->DlssNrScanTrim.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ScanAnchorValue", GetFloatValue(Instance()->DlssNrScanAnchorValue.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ScanAnchorWhitePoint", GetFloatValue(Instance()->DlssNrScanAnchorWhitePoint.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ScanAnchors", Instance()->DlssNrScanAnchors.value_for_config_or("").c_str());
+    ini.SetValue("DlssNr", "PassStyles", Instance()->DlssNrPassStyles.value_for_config_or("").c_str());
     ini.SetValue("DlssNr", "ScanInverted", GetBoolValue(Instance()->DlssNrScanInverted.value_for_config()).c_str());
     ini.SetValue("DlssNr", "ScanMeter", GetBoolValue(Instance()->DlssNrScanMeter.value_for_config()).c_str());
     ini.SetValue("DlssNr", "Passes", GetIntValue(Instance()->DlssNrPasses.value_for_config()).c_str());
@@ -1377,6 +1406,12 @@ bool Config::SaveIni()
     ini.SetValue("DlssNr", "RegionMaskIgnoreFloor",
                  GetBoolValue(Instance()->DlssNrRegionMaskIgnoreFloor.value_for_config()).c_str());
     ini.SetValue("DlssNr", "RegionMaskShow", GetBoolValue(Instance()->DlssNrRegionMaskShow.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "MotionFade", GetFloatValue(Instance()->DlssNrMotionFade.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "MotionFadeStart",
+                 GetFloatValue(Instance()->DlssNrMotionFadeStart.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "MotionFadeEnd", GetFloatValue(Instance()->DlssNrMotionFadeEnd.value_for_config()).c_str());
+    ini.SetValue("DlssNr", "MotionFadeSkipModel",
+                 GetBoolValue(Instance()->DlssNrMotionFadeSkipModel.value_for_config()).c_str());
     ini.SetValue("DlssNr", "JbuUpsample", GetBoolValue(Instance()->DlssNrJbuUpsample.value_for_config()).c_str());
     ini.SetValue("DlssNr", "JbuSigma", GetFloatValue(Instance()->DlssNrJbuSigma.value_for_config()).c_str());
         ini.SetValue("DLSS", "RenderPresetOverride",

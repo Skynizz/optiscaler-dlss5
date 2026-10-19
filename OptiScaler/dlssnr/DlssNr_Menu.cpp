@@ -7,6 +7,8 @@
 
 #include <Config.h>
 #include <menu/menu_common.h>
+#include <hooks/Streamline_Hooks.h>
+#include <framegen/synced/FGMeter.h>
 
 #include <imgui/imgui.h>
 
@@ -235,6 +237,7 @@ static void SectionQuickSetup(Config* config)
         config->DlssNrCacheSurfaceFill = true;
         config->DlssNrCacheAntiPop = true;
         DlssNr::SetCompareMode(DlssNr::CompareMode::Yours);
+        DlssNr::RequestSettleReset();
     };
 
     ImGui::TextUnformatted("Presets:");
@@ -564,6 +567,55 @@ static void SectionLook(Config* config)
                        "\noff when done. Not shown in side-by-side compare or a debug view, where the"
                        "\nmask stands aside.");
     }
+
+    // Steady in motion.
+    {
+        bool steady = config->DlssNrMotionFade.value_or_default() > 0.0f;
+
+        if (ImGui::Checkbox("Steady in motion (no torn grass on fast turns)", &steady))
+            config->DlssNrMotionFade = steady ? 1.0f : 0.0f;
+
+        HelpMarker("DLSS 5's added detail does not follow thin moving things exactly: on a fast camera turn"
+                   "\ngrass and foliage tear, and frame generation copies the tear into every frame it makes."
+                   "\nMeasured in The Witcher 3: the grass about 30% less steady from frame to frame with"
+                   "\nDLSS 5 than without, at the same speed."
+                   "\n\nOn, each pixel gives the game's own picture back as it moves faster -- at that speed"
+                   "\nthe eye sees the tear, not the detail. Still or slow, DLSS 5 is untouched. Changes live."
+                   "\nShow mask tints in cyan what it gives back.");
+
+        if (steady)
+        {
+            float amount = config->DlssNrMotionFade.value_or_default();
+            if (ImGui::SliderFloat("How much at speed", &amount, 0.05f, 1.0f, "%.2f"))
+                config->DlssNrMotionFade = std::clamp(amount, 0.05f, 1.0f);
+
+            HelpMarker("How much of the game's picture comes back on the fastest pixels: 1 all of it.");
+
+            float start = config->DlssNrMotionFadeStart.value_or_default();
+            float end = config->DlssNrMotionFadeEnd.value_or_default();
+
+            if (ImGui::SliderFloat("From (px per frame)", &start, 0.0f, 60.0f, "%.0f"))
+                config->DlssNrMotionFadeStart = std::max(start, 0.0f);
+
+            if (ImGui::SliderFloat("To (px per frame)", &end, 1.0f, 120.0f, "%.0f"))
+                config->DlssNrMotionFadeEnd = std::max(end, config->DlssNrMotionFadeStart.value_or_default() + 1.0f);
+
+            HelpMarker("The speeds, in pixels the image moves per rendered frame, where it starts giving the"
+                       "\ngame's picture back and where it is complete. Lower: steadier, less DLSS 5 in motion.");
+
+            bool skip = config->DlssNrMotionFadeSkipModel.value_or_default();
+            if (ImGui::Checkbox("Skip the model on fast turns (+fps)", &skip))
+                config->DlssNrMotionFadeSkipModel = skip;
+
+            HelpMarker("Past the \"To\" speed the edit is given back anyway, so the model's work is barely seen:"
+                       "\nit then runs one frame in eight (with the edit cache), and at its usual pace the moment"
+                       "\nthe view slows. Its cost goes to the frame rate exactly when frame generation needs it.");
+
+            bool show = config->DlssNrRegionMaskShow.value_or_default();
+            if (ImGui::Checkbox("Show mask##steady", &show))
+                config->DlssNrRegionMaskShow = show;
+        }
+    }
 }
 
 // The frame rate check: optimised, vanilla or off, live, with the frames the game renders.
@@ -626,19 +678,575 @@ static void SectionLive(Config* config)
 }
 
 // Performance: model resolution and passes, the model in the background, frame generation pacing.
+// What injecting NVIDIA's frame generation into a game without it needs, and what is missing. OptiScaler loads
+// Streamline from a "streamline" folder beside itself (StreamlineProxy::LoadStreamline); without it the output
+// silently falls back to none at startup. Checked once a second, not every frame.
+static void InjectedFGStatus()
+{
+    static const wchar_t* files[] = { L"sl.interposer.dll", L"sl.common.dll", L"sl.dlss_g.dll",
+                                      L"sl.reflex.dll",     L"sl.pcl.dll",    L"nvngx_dlssg.dll" };
+    static std::string missing;
+    static std::filesystem::path folder;
+    static double checkedAt = -10.0;
+
+    if (ImGui::GetTime() - checkedAt > 1.0)
+    {
+        checkedAt = ImGui::GetTime();
+        folder = std::filesystem::path(Config::Instance()->MainDllPath.value_or(L".")) / L"streamline";
+        missing.clear();
+
+        for (const auto* f : files)
+        {
+            std::error_code ec;
+
+            if (!std::filesystem::exists(folder / f, ec))
+                missing += (missing.empty() ? "" : ", ") + wstring_to_string(f);
+        }
+    }
+
+    const auto api = State::Instance().swapchainApi;
+
+    if (api == API::Vulkan || api == API::DX11)
+    {
+        ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f),
+                           "Injected frame generation needs DirectX 12: switch the game to DX12.");
+        return;
+    }
+
+    if (missing.empty())
+    {
+        ImGui::TextColored(ImVec4(0.45f, 0.8f, 0.45f, 1.0f), "NVIDIA frame generation files: found.");
+        return;
+    }
+
+    ImGui::TextColored(ImVec4(1.0f, 0.55f, 0.3f, 1.0f), "Missing NVIDIA frame generation files: %s",
+                       missing.c_str());
+    ImGui::TextWrapped("They go in %s. They come with games that ship DLSS Frame Generation (sl.*.dll and "
+                       "nvngx_dlssg.dll beside the game's exe), or with NVIDIA's Streamline SDK. Then save "
+                       "and restart the game.",
+                       wstring_to_string(folder.wstring()).c_str());
+
+    if (ImGui::Button("Open the folder##slfolder"))
+    {
+        std::error_code ec;
+        std::filesystem::create_directories(folder, ec);
+        ShellExecuteW(nullptr, L"open", folder.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+    }
+}
+
+// Frame generation, all of it in one place: what generates the frames, how many, and how they reach the screen.
+//
+// NVIDIA DLSS Frame Generation covers both cases. A game that ships it: its multiplier is overridden as it reaches
+// Streamline ("As in game" leaves the game's choice). A game without it: OptiScaler injects NVIDIA's (Frame Gen output
+// "DLSSG"), which needs a restart the first time. Synced FG, OptiScaler's own, stays as an experimental choice.
+static void SectionFrameGen(Config* config)
+{
+    auto& state = State::Instance();
+    const bool native = state.dlssgGameNative && state.activeFgOutput != FGOutput::DLSSG;
+    const bool fgOn = config->FGEnabled.value_or_default();
+
+    // What generates the frames: 0 off, 1 NVIDIA, 2 Synced FG.
+    int type = 0;
+
+    if (config->FGOutput.value_or_default() == FGOutput::Synced && fgOn)
+        type = 2;
+    else if (native)
+        type = config->FGDLSSGOverrideInterpolationCount.has_value() &&
+                       config->FGDLSSGOverrideInterpolationCount.value() == 0 &&
+                       !config->FGDLSSGOverrideForceDMFG.value_or_default()
+                   ? 0
+                   : 1;
+    else
+        type = config->FGOutput.value_or_default() == FGOutput::DLSSG && fgOn ? 1 : 0;
+
+    // Speckle cleanup: before the upscaler, so it helps whatever generates the frames (and the real ones).
+    {
+        bool cleanup = config->FGSpeckleCleanup.value_or_default();
+
+        if (ImGui::Checkbox("Speckle cleanup (dots on fast turns)", &cleanup))
+            config->FGSpeckleCleanup = cleanup;
+
+        HelpMarker("Ray-traced effects (ambient occlusion above all) trace a few rays per pixel and smooth the"
+                   "\nresult with their history. When the camera turns fast the history is lost and the raw noise"
+                   "\nshows: isolated dark and bright pixels, which the upscaler turns into a mesh of dots and"
+                   "\nframe generation copies into every frame it makes."
+                   "\n\nThis removes them from the game's image before the upscaler: only pixels far outside what"
+                   "\ntheir neighbours agree on, only where the image moves. Edges and still images are left"
+                   "\nalone. Works with or without DLSS 5 and frame generation. Changes live.");
+
+        if (cleanup)
+        {
+            ImGui::SameLine(0.0f, 16.0f);
+            bool debug = config->FGSpeckleCleanupDebug.value_or_default();
+
+            if (ImGui::Checkbox("Show it##checker", &debug))
+                config->FGSpeckleCleanupDebug = debug;
+
+            HelpMarker("Tints in red what the cleanup touches: it should only light up on fast turns.");
+
+            float strength = config->FGSpeckleCleanupStrength.value_or_default();
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+
+            if (ImGui::SliderFloat("Cleanup strength", &strength, 0.0f, 1.0f, "%.2f"))
+                config->FGSpeckleCleanupStrength = strength;
+        }
+    }
+
+
+    // Synced FG is only listed while it is the one picked (from OptiScaler's Frame Gen tab): NVIDIA's frame
+    // generation is better on every card it runs on.
+    static const char* types[] = { "Off", "NVIDIA DLSS Frame Generation", "Synced FG (experimental)" };
+    ImGui::SetNextItemWidth(ImGui::GetFontSize() * 16.0f);
+
+    if (ImGui::Combo("Frame generation##fgtype", &type, types, type == 2 ? 3 : 2))
+    {
+        if (type == 0)
+        {
+            if (native)
+            {
+                config->FGDLSSGOverrideForceDMFG = false;
+                config->FGDLSSGOverrideInterpolationCount = 0;
+                StreamlineHooks::updateDlssgOptions();
+            }
+
+            if (config->FGOutput.value_or_default() == FGOutput::DLSSG ||
+                config->FGOutput.value_or_default() == FGOutput::Synced)
+            {
+                config->FGEnabled = false;
+            }
+        }
+        else if (type == 1)
+        {
+            if (native)
+            {
+                if (config->FGOutput.value_or_default() == FGOutput::Synced)
+                    config->FGEnabled = false;
+
+                // Back on: the game's own choice.
+                config->FGDLSSGOverrideInterpolationCount.reset();
+                config->FGDLSSGOverrideForceDMFG = false;
+                StreamlineHooks::updateDlssgOptions();
+            }
+            else
+            {
+                config->FGInput = FGInput::Upscaler;
+                config->FGOutput = FGOutput::DLSSG;
+                config->FGEnabled = true;
+
+                if (state.activeFgOutput == FGOutput::DLSSG)
+                    state.fgChanged = true;
+            }
+        }
+        else
+        {
+            config->FGInput = FGInput::Upscaler;
+            config->FGOutput = FGOutput::Synced;
+            config->FGEnabled = true;
+
+            if (state.activeFgOutput == FGOutput::Synced)
+                state.fgChanged = true;
+        }
+    }
+
+    HelpMarker("What generates the frames. Everything about frame generation is set here."
+               "\n\nNVIDIA DLSS Frame Generation: NVIDIA's own, the best quality. In a game that ships it, turn"
+               "\nit on in the game; the multiplier below can then replace the game's. In a game without it,"
+               "\nOptiScaler injects it (save the settings and restart the game the first time)."
+               "\n\nSynced FG: OptiScaler's own generator. Experimental.");
+
+    // Restart needed: the output picked is not the one running.
+    const FGOutput wanted = type == 1 && !native ? FGOutput::DLSSG : type == 2 ? FGOutput::Synced : state.activeFgOutput;
+
+    if (type != 0 && wanted != state.activeFgOutput)
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "Save the settings and restart the game to start it.");
+
+    // Injected into a game without it: what it needs, and what is missing.
+    if (type == 1 && !native)
+        InjectedFGStatus();
+
+    if (type == 1)
+    {
+        // The multiplier: 0 Off, 1..5 = 2x..6x, 6 Dynamic; -1 the game's own.
+        int current = 1;
+
+        if (native)
+        {
+            if (config->FGDLSSGOverrideForceDMFG.value_or_default())
+                current = 6;
+            else if (config->FGDLSSGOverrideInterpolationCount.has_value())
+                current = std::clamp(config->FGDLSSGOverrideInterpolationCount.value(), 1, 5);
+            else
+                current = -1;
+        }
+        else
+        {
+            current = config->FGDLSSGForceDMFG.value_or_default()
+                          ? 6
+                          : std::clamp(config->FGDLSSGInterpolationCount.value_or_default(), 1, 5);
+        }
+
+        static const char* names[] = { "Off", "2x", "3x", "4x", "5x", "6x", "Dynamic" };
+        const bool autoMultiplier = config->FGAutoMultiplier.value_or_default();
+        ImGui::BeginDisabled(autoMultiplier);
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8.0f);
+
+        if (ImGui::BeginCombo("Multiplier##nvfg", current < 0 ? "As in game" : names[current]))
+        {
+            if (native && ImGui::Selectable("As in game", current < 0))
+            {
+                config->FGDLSSGOverrideInterpolationCount.reset();
+                config->FGDLSSGOverrideForceDMFG = false;
+                StreamlineHooks::updateDlssgOptions();
+            }
+
+            for (int i = 1; i < IM_ARRAYSIZE(names); i++)
+            {
+                // NVIDIA's Dynamic MFG only where NVIDIA runs it (an RTX 50); the auto multiplier does it elsewhere.
+                if (i == 6 && !state.dlssgGameDMFGSupported && current != 6)
+                    continue;
+
+                // Never offer more than NVIDIA allows on this GPU: the entry stays visible, greyed, with the reason.
+                const bool allowed = i == 6 || !state.dlssgMfgMax.has_value() || i <= state.dlssgMfgMax.value();
+                const std::string label =
+                    allowed ? std::string(names[i]) : std::string(names[i]) + "  (you need to use MFG  unlock by renodx)";
+
+                if (!ImGui::Selectable(label.c_str(), current == i, allowed ? 0 : ImGuiSelectableFlags_Disabled))
+                    continue;
+
+                if (native)
+                {
+                    config->FGDLSSGOverrideForceDMFG = i == 6;
+
+                    if (i != 6)
+                        config->FGDLSSGOverrideInterpolationCount = i;
+
+                    StreamlineHooks::updateDlssgOptions();
+                }
+                else
+                {
+                    config->FGDLSSGForceDMFG = i == 6;
+
+                    if (i != 6)
+                        config->FGDLSSGInterpolationCount = i;
+                }
+            }
+
+            ImGui::EndCombo();
+        }
+
+        HelpMarker("Frames shown per frame the game renders. Changes live, and replaces the game's choice."
+                   "\n\"As in game\" (a game that ships DLSS Frame Generation): the multiplier picked in the game."
+                   "\nDynamic: NVIDIA picks the multiplier each frame to reach the display's refresh rate."
+                   "\nNVIDIA allows multi frame generation (3x to 6x) on an RTX 50; earlier cards get 2x."
+                   "\nMultipliers above what NVIDIA allows on this GPU are greyed out.");
+
+        ImGui::EndDisabled();
+
+        if (state.dlssgMfgMax.has_value())
+        {
+            ImGui::SameLine(0.0f, 16.0f);
+            ImGui::TextDisabled("NVIDIA allows up to %dx here", state.dlssgMfgMax.value() + 1);
+
+            // More than NVIDIA allows (a value saved on another GPU, or in the ini): Streamline refuses it and stays at
+            // its maximum.
+            const int picked = native ? (config->FGDLSSGOverrideInterpolationCount.has_value()
+                                             ? config->FGDLSSGOverrideInterpolationCount.value()
+                                             : 0)
+                                      : config->FGDLSSGInterpolationCount.value_or_default();
+
+            if (picked > state.dlssgMfgMax.value())
+                ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
+                                   "NVIDIA only allows %dx on this GPU, so it runs at %dx. Pick %dx or less.",
+                                   state.dlssgMfgMax.value() + 1, state.dlssgMfgMax.value() + 1,
+                                   state.dlssgMfgMax.value() + 1);
+        }
+
+        // The auto multiplier: our Dynamic MFG, for any card NVIDIA's frame generation runs on.
+        {
+            bool autoOn = autoMultiplier;
+
+            if (ImGui::Checkbox("Auto multiplier##nvfg", &autoOn))
+                config->FGAutoMultiplier = autoOn;
+
+            HelpMarker("Picks 2x to 6x by itself from the frames the game renders, so the frames shown stay just"
+                       "\nunder the target: the display's refresh rate unless set. NVIDIA's Dynamic Multi Frame"
+                       "\nGeneration does this on an RTX 50 only; this works wherever NVIDIA's frame generation"
+                       "\nruns. Fewer invented frames when they are not needed (fewer artefacts, less latency),"
+                       "\nnever more than the display can show. Whole multipliers only, steady: it waits before"
+                       "\ngoing up and comes down at once. Your chosen multiplier comes back when it is off.");
+
+            if (autoOn)
+            {
+                const FGMeter::Snapshot m = FGMeter::Get();
+                ImGui::SameLine(0.0f, 16.0f);
+
+                if (m.autoMultiplier > 0)
+                    ImGui::TextColored(ImVec4(0.4f, 0.85f, 0.4f, 1.0f), "now %dx (target %.0f fps)", m.autoMultiplier,
+                                       m.target);
+                else
+                    ImGui::TextDisabled("waiting for frame generation to run");
+
+                float target = config->FGAutoMultiplierTarget.value_or_default();
+                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+
+                if (ImGui::SliderFloat("Target fps (0 = display)##nvfg", &target, 0.0f, 480.0f, "%.0f"))
+                    config->FGAutoMultiplierTarget = target;
+
+                HelpMarker("Frames shown per second the auto multiplier aims just under. 0: 95% of the display's"
+                           "\nrefresh rate, which leaves G-SYNC room and never shows more than the display can.");
+            }
+        }
+
+        // The meter: what frame generation actually delivers.
+        {
+            bool meter = config->FGMeter.value_or_default();
+
+            if (ImGui::Checkbox("Frame generation meter##nvfg", &meter))
+                config->FGMeter = meter;
+
+            HelpMarker("Measures what frame generation delivers, at the real swapchain beneath NVIDIA's frame"
+                       "\ngeneration:"
+                       "\n- shown and rendered frames per second, and the multiplier that results;"
+                       "\n- on time / stacked / late: how evenly frames are handed to the display (stacked: right"
+                       "\n  on top of the one before, as good as lost);"
+                       "\n- duplicates: generated frames identical to the one before while the scene moves -- a"
+                       "\n  multiplier that only raises the counter;"
+                       "\n- queued: frames waiting to be shown (each one is latency)."
+                       "\nAlso logged every 5 s. Measured where frames are submitted, not on the screen itself.");
+
+            if (meter)
+            {
+                const FGMeter::Snapshot m = FGMeter::Get();
+
+                if (!m.valid)
+                {
+                    ImGui::TextDisabled("Measuring...");
+                }
+                else
+                {
+                    ImGui::Text("Shown %.0f fps, rendered %.1f fps: x%.2f", m.shownFps, m.renderedFps, m.multiplier);
+
+                    if (m.refresh > 0.0)
+                    {
+                        ImGui::SameLine(0.0f, 12.0f);
+
+                        if (m.shownFps > m.refresh * 1.01)
+                            ImGui::TextColored(ImVec4(1.0f, 0.5f, 0.3f, 1.0f), "above the %.0f Hz display!", m.refresh);
+                        else
+                            ImGui::TextDisabled("display %.0f Hz", m.refresh);
+                    }
+
+                    const ImVec4 good(0.4f, 0.85f, 0.4f, 1.0f);
+                    const ImVec4 warn(1.0f, 0.75f, 0.3f, 1.0f);
+                    const ImVec4 bad(1.0f, 0.45f, 0.35f, 1.0f);
+
+                    // Handed over a batch at a time: NVIDIA's flip metering spaces them in the driver, after us.
+                    if (m.stacked > 0.5)
+                    {
+                        ImGui::TextDisabled("Handed over in batches (flip metering spaces them in the driver)");
+                    }
+                    else
+                    {
+                        ImGui::TextColored(m.onTime >= 0.9 ? good : m.onTime >= 0.75 ? warn : bad, "On time %.0f%%",
+                                           m.onTime * 100.0);
+                        ImGui::SameLine(0.0f, 12.0f);
+                        ImGui::TextColored(m.stacked <= 0.02 ? good : m.stacked <= 0.08 ? warn : bad,
+                                           "stacked %.0f%%", m.stacked * 100.0);
+                        ImGui::SameLine(0.0f, 12.0f);
+                        ImGui::TextDisabled("late %.0f%%", m.late * 100.0);
+                    }
+
+                    ImGui::SameLine(0.0f, 12.0f);
+
+                    if (m.duplicatesKnown)
+                        ImGui::TextColored(m.duplicates <= 0.05 ? good : m.duplicates <= 0.2 ? warn : bad,
+                                           "duplicates %.0f%%", m.duplicates * 100.0);
+                    else
+                        ImGui::TextDisabled("duplicates: move the camera");
+
+                    if (m.queued >= 0)
+                    {
+                        ImGui::SameLine(0.0f, 12.0f);
+                        ImGui::TextDisabled("queued %d", m.queued);
+                    }
+
+                    // Tearing: a frame flipped while the display is still drawing the one before.
+                    ImGui::TextColored(m.tearRisk <= 0.01 ? good : m.tearRisk <= 0.05 ? warn : bad,
+                                       "Tear risk %.0f%%", m.tearRisk * 100.0);
+                    ImGui::SameLine(0.0f, 12.0f);
+                    ImGui::TextDisabled("tearing allowed %.0f%%, faster than one refresh %.0f%%, sync interval %d",
+                                        m.tearingAllowed * 100.0, m.fasterThanScan * 100.0, m.syncInterval);
+                }
+            }
+        }
+
+        // The game's own DLSS-G instead of NVIDIA's download.
+        {
+            static const bool useGameAtStart = Config::Instance()->FGDLSSGUseGameDll.value_or_default();
+            bool useGame = config->FGDLSSGUseGameDll.value_or_default();
+
+            if (ImGui::Checkbox("Use the game's DLSS-G version", &useGame))
+                config->FGDLSSGUseGameDll = useGame;
+
+            HelpMarker("NVIDIA downloads newer DLSS Frame Generation versions over the air and always loads the"
+                       "\nnewest, whatever version the game shipped with. On, the game's own nvngx_dlssg.dll is used"
+                       "\ninstead: the version the game was tested with, for when a newer download looks worse"
+                       "\nin a given game. Needs a restart.");
+
+            if (useGame != useGameAtStart)
+                ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "Save the settings and restart the game to apply.");
+        }
+
+        // NVIDIA's flip metering: frames released at their time by the display engine. An RTX 50 has it in hardware;
+        // with multi frame generation unlocked on an RTX 40 it is asked for all the same. Off, NVIDIA's DLSS-G paces
+        // the frames itself, in software, as it does for 2x on an RTX 40. Read when NVAPI is first asked: restart.
+        static const bool flipAtStart = !Config::Instance()->DisableFlipMetering.value_or_default();
+        bool flip = !config->DisableFlipMetering.value_or_default();
+
+        if (ImGui::Checkbox("NVIDIA flip metering", &flip))
+            config->DisableFlipMetering = !flip;
+
+        HelpMarker("NVIDIA's frame release timing. An RTX 50 does it in its display engine. On an RTX 40 with"
+                   "\nmulti frame generation unlocked it is requested all the same, without the hardware."
+                   "\n\nMeasured on an RTX 4070 in The Witcher 3 at 6x: on, the frames are handed over six at"
+                   "\nonce and six wait in the display queue; off, NVIDIA's frame generation paces them itself"
+                   "\n-- 96-98% on time, none stacked, one waiting -- for about one rendered frame per second"
+                   "\nless. 6x stays available. On an RTX 40, off is recommended. Needs a restart.");
+
+        if (flip != flipAtStart)
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "Save the settings and restart the game to apply.");
+
+        // The display, as NVIDIA's frame pacing sees it: G-SYNC dropping out is tearing or stutter.
+        if (state.slGsyncOff >= 0)
+        {
+            if (state.slGsyncOff == 0)
+                ImGui::TextColored(ImVec4(0.4f, 0.85f, 0.4f, 1.0f), "G-SYNC active");
+            else
+                ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "G-SYNC off right now");
+
+            ImGui::SameLine(0.0f, 12.0f);
+            ImGui::TextDisabled("V-Sync %s, %s, driver V-Sync: %s, dropped out %d times",
+                                state.slVsyncOn == 1 ? "on" : state.slVsyncOn == 0 ? "off" : "?",
+                                state.slIndependentFlip == 1   ? "straight to the screen"
+                                : state.slIndependentFlip == 0 ? "composed by Windows"
+                                                               : "?",
+                                state.slDrsVsync[0] != 0 ? state.slDrsVsync : "?", state.slGsyncSwitches);
+
+            HelpMarker("Read from NVIDIA's frame generation. G-SYNC only works while the game goes straight to"
+                       "\nthe screen; when Windows composes it (an overlay on top, windowed mode) G-SYNC drops out"
+                       "\nand you get tearing or stutter. A few drop-outs at start-up and in menus are normal."
+                       "\nIf it drops out in game: set G-SYNC to \"windowed and full screen\" in the NVIDIA panel,"
+                       "\nor turn off overlays drawn over the game.");
+        }
+    }
+    else if (type == 2)
+    {
+        int synced = (int) std::clamp(config->FGSyncedFrames.value_or_default(), 1u, 3u) - 1;
+        static const char* syncedNames[] = { "2x", "3x", "4x" };
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8.0f);
+
+        if (ImGui::Combo("Multiplier##synced", &synced, syncedNames, IM_ARRAYSIZE(syncedNames)))
+            config->FGSyncedFrames = (uint32_t) synced + 1;
+
+        HelpMarker("OptiScaler's own frame generation, from the game's motion vectors and depth. Changes live.");
+
+        bool syncedDebug = config->FGSyncedDebug.value_or_default();
+
+        if (ImGui::Checkbox("Tint generated frames", &syncedDebug))
+            config->FGSyncedDebug = syncedDebug;
+
+        HelpMarker("Shows the generated frames slightly green, to check they arrive evenly between real ones.");
+    }
+}
+
 static void GroupPerformance(Config* config)
 {
-    int passes = (int) std::clamp(config->DlssNrPasses.value_or_default(), 1u, 3u);
+    int passes = (int) std::clamp(config->DlssNrPasses.value_or_default(), 1u, 30u);
 
-    if (ImGui::SliderInt("Model passes", &passes, 1, 3))
-        config->DlssNrPasses = (uint32_t) std::clamp(passes, 1, 3);
+    if (ImGui::SliderInt("Model passes", &passes, 1, 30))
+        config->DlssNrPasses = (uint32_t) std::clamp(passes, 1, 30);
 
     HelpMarker("Multi-pass, as in RenoDX: the model runs again on its own answer, each pass on a"
                "\nmodel of its own with its own temporal history, and the result is composed once"
                "\nagainst the game's frame -- detail builds up, colour does not compound."
                "\n\nEach pass costs a full model run on the frames where the model runs (every frame,"
-               "\nor one in N with the edit cache). A new pass is built on one frame and used from the"
-               "\nnext, so raising this never hitches the GPU. 1 is the usual single pass.");
+               "\nor one in N with the edit cache), and video memory of its own. A new pass is built on"
+               "\none frame and used from the next, so raising this never hitches the GPU. 1 is the usual"
+               "\nsingle pass; 3 with mixed styles is where most people stop.");
+
+    if (passes > 3)
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
+                           "%d passes: about %dx the model's cost, and %d models in video memory. Pair with the "
+                           "edit cache.",
+                           passes, passes, passes);
+
+    // A style per pass after the first: inherit (the main style) by default, or stacked looks.
+    if (passes > 1 && ImGui::TreeNode("Style of each pass"))
+    {
+        std::vector<int> styles;
+        {
+            const std::string list = config->DlssNrPassStyles.value_or_default();
+            size_t start = 0;
+
+            while (!list.empty() && start <= list.size() && styles.size() < 29)
+            {
+                const size_t end = std::min(list.find(',', start), list.size());
+                const std::string token = list.substr(start, end - start);
+                char* stop = nullptr;
+                const long v = std::strtol(token.c_str(), &stop, 10);
+                styles.push_back(stop != token.c_str() && v >= 0 && v <= 2 ? (int) v : -1);
+                start = end + 1;
+            }
+        }
+
+        styles.resize(std::max<size_t>(styles.size(), (size_t) passes - 1), -1);
+
+        static const char* names[] = { "Inherit", "Default", "Natural", "Cinematic" };
+        static const char* mainNames[] = { "Default", "Natural", "Cinematic" };
+        bool changed = false;
+
+        ImGui::TextDisabled("Pass 1: %s (the model style above)",
+                            mainNames[std::min(config->DlssNrStyle.value_or_default(), 2u)]);
+
+        for (int p = 2; p <= passes; p++)
+        {
+            int choice = styles[p - 2] + 1;
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 9.0f);
+            const std::string label = "Pass " + std::to_string(p) + "##passstyle" + std::to_string(p);
+
+            if (ImGui::Combo(label.c_str(), &choice, names, IM_ARRAYSIZE(names)))
+            {
+                styles[p - 2] = choice - 1;
+                changed = true;
+            }
+        }
+
+        HelpMarker("Each pass after the first can use a style of its own, or inherit the main one."
+                   "\nStacking looks is the point: Natural + Default + Cinematic, or Natural + Natural +"
+                   "\nCinematic, over 3 passes. Changing one rebuilds that pass only.");
+
+        if (ImGui::SmallButton("All inherit"))
+        {
+            std::fill(styles.begin(), styles.end(), -1);
+            changed = true;
+        }
+
+        if (changed)
+        {
+            // Trailing inherits are dropped, so an all-inherit list is empty, as before.
+            while (!styles.empty() && styles.back() < 0)
+                styles.pop_back();
+
+            std::string list;
+
+            for (size_t i = 0; i < styles.size(); i++)
+                list += (i ? "," : "") + std::to_string(styles[i]);
+
+            config->DlssNrPassStyles = list;
+        }
+
+        ImGui::TreePop();
+    }
 
     const bool preSrOn = config->DlssNrPreSr.value_or_default();
 
@@ -794,61 +1402,6 @@ static void GroupPerformance(Config* config)
                "\nframes land evenly. No cost. No effect without frame generation.");
 
     ImGui::EndDisabled();
-
-    // Synced FG is picked under OptiScaler's Frame Gen output list; its own settings sit here, beside the model's.
-    ImGui::Spacing();
-    ImGui::TextUnformatted("Synced FG (Frame Gen output \"Synced FG\", input \"Upscaler\"):");
-
-    {
-        // One switch for all of it: picks Synced FG under Frame Gen (input Upscaler, output Synced FG) and turns
-        // frame generation on. The output is chosen when the game starts, so the first time it needs a restart.
-        const bool selected = config->FGOutput.value_or_default() == FGOutput::Synced;
-        const bool running = State::Instance().activeFgOutput == FGOutput::Synced;
-        bool use = selected && config->FGEnabled.value_or_default();
-
-        if (ImGui::Checkbox("Synced FG", &use))
-        {
-            if (use)
-            {
-                config->FGInput = FGInput::Upscaler;
-                config->FGOutput = FGOutput::Synced;
-                config->FGEnabled = true;
-
-                if (running)
-                    State::Instance().fgChanged = true;
-            }
-            else
-            {
-                config->FGEnabled = false;
-            }
-        }
-
-        HelpMarker("Turns Synced FG on and off. On also selects it under Frame Gen (input Upscaler, output Synced"
-                   "\nFG); the first time, save the settings and restart the game. After that it switches live.");
-
-        if (use && !running)
-            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f),
-                               "Save the settings and restart the game to start Synced FG.");
-    }
-
-    int synced = (int) std::clamp(config->FGSyncedFrames.value_or_default(), 1u, 3u) - 1;
-    static const char* syncedNames[] = { "2x (1 generated)", "3x (2 generated)", "4x (3 generated)" };
-
-    if (ImGui::Combo("Synced FG multiplier", &synced, syncedNames, IM_ARRAYSIZE(syncedNames)))
-        config->FGSyncedFrames = (uint32_t) synced + 1;
-
-    HelpMarker("OptiScaler's own frame generation: frames generated between two real frames from the"
-               "\ngame's motion vectors and depth, presented at even intervals by a swapchain of its own."
-               "\nNo vendor runtime and no unlock: 3x and 4x work on any D3D12 GPU."
-               "\n\nPicked under Frame Gen (output \"Synced FG\", input \"Upscaler\"), which needs a restart."
-               "\nThe multiplier changes live. Experimental.");
-
-    bool syncedDebug = config->FGSyncedDebug.value_or_default();
-
-    if (ImGui::Checkbox("Tint generated frames", &syncedDebug))
-        config->FGSyncedDebug = syncedDebug;
-
-    HelpMarker("Shows the generated frames slightly green, to check they arrive evenly between real ones.");
 }
 
 // Image stability: what keeps the carried edit from flickering, pulsing or popping.
@@ -1302,7 +1855,28 @@ static void GroupColour(Config* config)
                        "\nafterwards.");
 
         // Availability, in colour, for the option currently chosen.
-        if (source == 3)
+        if (source == 3 && !vk)
+        {
+            bool follow = config->DlssNrAutoFollowsGameExposure.value_or_default();
+
+            if (ImGui::Checkbox("Follow the game's exposure when it gives one", &follow))
+                config->DlssNrAutoFollowsGameExposure = follow;
+
+            HelpMarker("Some games adapt their own exposure (eyes adjusting from a cave to daylight) and"
+                       "\nhand it to the upscaler. Measuring the frame on top of that is two adaptations on"
+                       "\none picture, and the brightness pumps -- Red Dead Redemption 2 in HDR."
+                       "\nOn: such games use their own exposure, the others are measured as before."
+                       "\nOff: always measured from the frame.");
+        }
+
+        if (source == 3 && ex.autoFollowing && ex.exposure > 1e-6f)
+        {
+            const float trim = std::clamp(config->DlssNrWhitePointTrim.value_or_default(), 0.25f, 4.0f);
+            ImGui::TextColored(ImVec4(0.45f, 0.8f, 0.45f, 1.0f),
+                               "Following the game's exposure %.4f  ->  white point %.2f", ex.exposure,
+                               ex.preExposure / ex.exposure * trim);
+        }
+        else if (source == 3)
         {
             const float wp = DlssNr::AutoWhitePoint();
 
@@ -2285,6 +2859,9 @@ void RenderMenu(Config* config, float menuResScale)
 
         ImGui::SeparatorText("Look");
         SectionLook(config);
+
+        ImGui::SeparatorText("Frame generation");
+        SectionFrameGen(config);
 
         ImGui::SeparatorText("Frame rate check");
         SectionLive(config);

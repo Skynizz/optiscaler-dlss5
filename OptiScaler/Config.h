@@ -457,6 +457,12 @@ class Config
     // choice cannot reach it: there is nothing to keep consistent, because there is only one value.
     CustomOptional<uint32_t> DlssNrWhitePointSource { 1 };
 
+    // Automatic (source 3) follows the game's own exposure texture where the game hands one to the upscaler
+    // and it reads as a real exposure. Measuring the frame on top of a game that adapts its own exposure is
+    // two adaptations on one picture: in Red Dead Redemption 2 (HDR, D3D12) the measured paper white swung
+    // 0.07x-0.17x within seconds and the picture pumped. D3D12 only. Off: Automatic always measures the frame.
+    CustomOptional<bool> DlssNrAutoFollowsGameExposure { true };
+
     CustomOptional<bool> DlssNrScanMeter { false };
 
     CustomOptional<float> DlssNrScanAnchorValue { 0.0f };       // legacy single anchor, migrated then unused
@@ -511,6 +517,11 @@ class Config
     // again -- so 8 costs eight times, near enough. There is no shortcut and no amortisation: the
     // passes are sequential and each one needs the last one's output.
     CustomOptional<uint32_t> DlssNrPasses { 1 };
+
+    // The model style of each pass after the first, comma-separated from pass 2 on: 0 Default, 1 Natural,
+    // 2 Cinematic, -1 (or nothing) inherit the main style. "0,2" with Style=1 is Natural + Default + Cinematic.
+    // Empty: every pass inherits, as before.
+    CustomOptional<std::string> DlssNrPassStyles { std::string() };
 
     // Which depth convention the model is told the guide uses.
     //
@@ -671,6 +682,16 @@ class Config
     CustomOptional<bool> DlssNrRegionMaskIgnoreFloor { true };
     // Tint the part left as the game drew it, to set the distance.
     CustomOptional<bool> DlssNrRegionMaskShow { false };
+    // Steady in motion: where a pixel moves fast, the game's own frame comes back over DLSS 5's edit, gradually from
+    // MotionFadeStart to MotionFadeEnd render pixels per frame. The model's added detail does not follow thin moving
+    // geometry exactly (grass, foliage) and tears on fast turns; frame generation then copies the tear into every
+    // frame it makes. 0: off, the edit everywhere as before.
+    CustomOptional<float> DlssNrMotionFade { 0.0f };
+    CustomOptional<float> DlssNrMotionFadeStart { 6.0f };
+    CustomOptional<float> DlssNrMotionFadeEnd { 30.0f };
+    // With steady in motion: while the view moves faster than MotionFadeEnd, where the edit is given back anyway, the
+    // model runs only one frame in eight -- its cost goes to the frame rate when frame generation needs it most.
+    CustomOptional<bool> DlssNrMotionFadeSkipModel { true };
 
     // Joint bilateral enlargement of a below-size model's answer, guided by the full-size frame.
     // Only acts when the model resolution is under 100%; off is the resolve exactly as it was.
@@ -1045,6 +1066,21 @@ class Config
     // Synced FG never presents more frames per second than the display refreshes: fewer frames are generated when
     // the game runs fast enough that the multiplier would go past it. Off: the multiplier as set, always.
     CustomOptional<bool> FGSyncedCapToRefresh { true };
+    // Speckle cleanup before the upscaler: the raw noise ray-traced effects leave when the camera turns fast
+    // (ambient occlusion in The Witcher 3) is removed from the render-resolution colour, so neither the upscaler
+    // nor frame generation spreads it. Off: the upscaler reads the game's colour as before.
+    CustomOptional<bool> FGSpeckleCleanup { false };
+    CustomOptional<float> FGSpeckleCleanupStrength { 1.0f };
+    CustomOptional<bool> FGSpeckleCleanupDebug { false };
+    // Frame generation meter: frames shown and rendered, pacing, duplicates, display queue. Off: nothing measured.
+    CustomOptional<bool> FGMeter { false };
+    // The game's own nvngx_dlssg.dll instead of the one NVIDIA downloads over the air (NGX picks the newer): the
+    // version the game was tested with. Read when DLSS-G loads: restart. Off: NGX's choice.
+    CustomOptional<bool> FGDLSSGUseGameDll { false };
+    // Auto multiplier: 2x to 6x chosen from the rendered frame rate to stay under a target (0: the display's refresh
+    // rate). Off: the multiplier as set.
+    CustomOptional<bool> FGAutoMultiplier { false };
+    CustomOptional<float> FGAutoMultiplierTarget { 0.0f };
     CustomOptional<bool> FGDLSSGUseGamesReflexMarkers { true };
     CustomOptional<int, NoDefault>
         FGDLSSGOverrideInterpolationCount; // For overriding game's value sent to SL, could be Nvngx FG, could be noFG
