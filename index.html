@@ -1,0 +1,462 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>DLSS 5 Optimised, technical report</title>
+<meta name="description" content="How DLSS 5 Optimised works: every feature from 1.0 to 1.3.0, with measurements and the experiments that failed.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: a technical dossier — sticky table of contents on wide screens, one reading column, numbered sections because the report really is ordered by release and subsystem. */
+:root {
+  --bg: #f6f7f5;
+  --paper: #ffffff;
+  --fg: #1c2321;
+  --muted: #5b6763;
+  --rule: #d9dfdc;
+  --accent: #0f6b5c;
+  --accent-soft: #e2f0ec;
+  --warn: #9a5a00;
+  --warn-soft: #fbf0dc;
+  --bad: #a3322a;
+  --bad-soft: #f8e4e2;
+  --code-bg: #eef1ef;
+  --display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --body: "Source Serif 4", Georgia, "Times New Roman", serif;
+  --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #121615; --paper: #181d1c; --fg: #e3e8e6; --muted: #9aa7a2; --rule: #2c3533;
+    --accent: #5cc7b1; --accent-soft: #17312c; --warn: #e2a54a; --warn-soft: #2e2414;
+    --bad: #ec8a80; --bad-soft: #351b19; --code-bg: #1f2624; color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #121615; --paper: #181d1c; --fg: #e3e8e6; --muted: #9aa7a2; --rule: #2c3533;
+  --accent: #5cc7b1; --accent-soft: #17312c; --warn: #e2a54a; --warn-soft: #2e2414;
+  --bad: #ec8a80; --bad-soft: #351b19; --code-bg: #1f2624; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--fg); font-family: var(--body); font-size: 17px; line-height: 1.62;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  padding-block: 32px 64px;
+}
+.wrap { max-width: 1180px; margin: 0 auto; display: grid; grid-template-columns: 260px minmax(0, 1fr); gap: 48px; align-items: start; }
+@media (max-width: 900px) { .wrap { grid-template-columns: minmax(0, 1fr); gap: 24px; } nav.toc { position: static !important; max-height: none !important; } }
+header.cover { grid-column: 1 / -1; border-bottom: 2px solid var(--fg); padding-bottom: 20px; display: grid; gap: 8px; }
+.eyebrow { font-family: var(--mono); font-size: 12.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--accent); }
+h1 { font-family: var(--display); font-weight: 800; font-size: clamp(30px, 4.4vw, 46px); line-height: 1.08; margin: 0; text-wrap: balance; letter-spacing: -0.01em; }
+.lede { font-size: 19px; color: var(--muted); max-width: 70ch; margin: 0; }
+.meta { font-family: var(--mono); font-size: 13px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 6px 22px; }
+nav.toc { position: sticky; top: calc(env(safe-area-inset-top, 0px) + 16px); max-height: calc(100vh - 32px); overflow: auto; font-family: var(--display); font-size: 14px; padding-right: 8px; }
+nav.toc ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+nav.toc ol ol { padding-left: 14px; margin: 2px 0 6px; font-weight: 500; }
+nav.toc a { color: var(--fg); text-decoration: none; display: block; padding: 3px 6px; border-radius: 4px; line-height: 1.35; }
+nav.toc a:hover, nav.toc a:focus-visible { background: var(--accent-soft); color: var(--accent); outline: none; }
+nav.toc .n { font-family: var(--mono); color: var(--muted); font-size: 12px; margin-right: 6px; }
+main { min-width: 0; }
+section { padding-block: 8px 28px; border-bottom: 1px solid var(--rule); }
+section:last-child { border-bottom: 0; }
+h2 { font-family: var(--display); font-weight: 800; font-size: 28px; line-height: 1.15; margin: 28px 0 10px; text-wrap: balance; }
+h2 .n, h3 .n { font-family: var(--mono); font-weight: 600; color: var(--accent); margin-right: 10px; font-size: .78em; }
+h3 { font-family: var(--display); font-weight: 700; font-size: 21px; margin: 30px 0 6px; text-wrap: balance; }
+h4 { font-family: var(--display); font-weight: 700; font-size: 15px; letter-spacing: .03em; text-transform: uppercase; color: var(--muted); margin: 20px 0 4px; }
+p, ul, ol.plain { max-width: 72ch; margin: 8px 0; }
+ul { padding-left: 22px; }
+li { margin: 3px 0; }
+strong { font-weight: 600; }
+code, .k { font-family: var(--mono); font-size: .86em; background: var(--code-bg); padding: 1px 5px; border-radius: 3px; overflow-wrap: anywhere; }
+pre { font-family: var(--mono); font-size: 13.5px; line-height: 1.5; background: var(--code-bg); padding: 12px 14px; border-radius: 6px; overflow-x: auto; max-width: 100%; margin: 10px 0; }
+.tbl { overflow-x: auto; max-width: 100%; margin: 12px 0; }
+table { border-collapse: collapse; font-size: 15px; min-width: 420px; }
+th, td { text-align: left; padding: 6px 12px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { font-family: var(--display); font-size: 13px; letter-spacing: .03em; text-transform: uppercase; color: var(--muted); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--mono); font-size: 14px; }
+.facts { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 10px; margin: 14px 0; max-width: 72ch; }
+.fact { background: var(--paper); border: 1px solid var(--rule); border-radius: 6px; padding: 10px 12px; }
+.fact .v { font-family: var(--mono); font-size: 20px; font-weight: 600; color: var(--accent); font-variant-numeric: tabular-nums; }
+.fact .l { font-size: 14px; color: var(--muted); line-height: 1.4; }
+.note { max-width: 72ch; border-left: 3px solid var(--accent); background: var(--accent-soft); padding: 10px 14px; border-radius: 0 6px 6px 0; margin: 12px 0; font-size: 16px; }
+.note.warn { border-color: var(--warn); background: var(--warn-soft); }
+.note.bad { border-color: var(--bad); background: var(--bad-soft); }
+.tag { font-family: var(--mono); font-size: 11.5px; letter-spacing: .05em; text-transform: uppercase; padding: 2px 7px; border-radius: 3px; vertical-align: 3px; margin-left: 8px; white-space: nowrap; }
+.tag.on { background: var(--accent-soft); color: var(--accent); }
+.tag.exp { background: var(--warn-soft); color: var(--warn); }
+.tag.cut { background: var(--bad-soft); color: var(--bad); }
+.where { font-family: var(--mono); font-size: 13px; color: var(--muted); margin: 2px 0 8px; overflow-wrap: anywhere; }
+a { color: var(--accent); }
+@media (prefers-reduced-motion: no-preference) { html { scroll-behavior: smooth; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="cover">
+  <div class="eyebrow">Technical report · OptiScaler fork · DLSS 5 Neural Rendering</div>
+  <h1>DLSS 5 Optimised: everything that was built, and how it works</h1>
+  <p class="lede">Every feature of the project, from the base (1.0 to 1.2.1) to version 1.3.0: the technique behind it, where it lives in the code, the measured numbers, and the attempts that failed.</p>
+  <div class="meta"><span>Test system: RTX 4070 · 2560×1440 · 360 Hz G-SYNC · driver 617.14 · Windows 11</span><span>Games: The Witcher 3, Cyberpunk 2077, The Last of Us Part I, Red Dead Redemption 2, Control</span><span>Version 1.3.0</span><span><a href="https://github.com/Skynizz/optiscaler-dlss5">github.com/Skynizz/optiscaler-dlss5</a></span></div>
+</header>
+
+<nav class="toc" aria-label="Contents">
+<ol>
+  <li><a href="#principle"><span class="n">1</span>Principle and architecture</a></li>
+  <li><a href="#base"><span class="n">2</span>The base: 1.0 to 1.2.1</a>
+    <ol>
+      <li><a href="#presr">Pre-SR</a></li>
+      <li><a href="#cache">Edit cache</a></li>
+      <li><a href="#scale">Working scale and JBU</a></li>
+      <li><a href="#wp">White point</a></li>
+      <li><a href="#presets">Presets and x8</a></li>
+      <li><a href="#tools">Comparison and benchmark</a></li>
+    </ol></li>
+  <li><a href="#fg"><span class="n">3</span>1.3.0: frame generation</a>
+    <ol>
+      <li><a href="#fg-central">Central section and multiplier</a></li>
+      <li><a href="#fg-auto">Auto multiplier</a></li>
+      <li><a href="#fg-meter">Frame generation meter</a></li>
+      <li><a href="#fg-flip">Flip metering</a></li>
+      <li><a href="#fg-gsync">G-SYNC status</a></li>
+      <li><a href="#fg-gamedll">The game's DLSS-G version</a></li>
+      <li><a href="#fg-inject">DLSS-G injection</a></li>
+      <li><a href="#fg-synced">Synced FG</a></li>
+    </ol></li>
+  <li><a href="#img"><span class="n">4</span>1.3.0: DLSS 5 image</a>
+    <ol>
+      <li><a href="#speckle">Speckle cleanup</a></li>
+      <li><a href="#region">Region</a></li>
+      <li><a href="#passes">30 passes, a style each</a></li>
+      <li><a href="#hdr">HDR exposure</a></li>
+      <li><a href="#steady">Steady in motion</a></li>
+      <li><a href="#settle">Reset after a preset</a></li>
+    </ol></li>
+  <li><a href="#infra"><span class="n">5</span>Installation and reliability</a></li>
+  <li><a href="#research"><span class="n">6</span>Experiments and negative results</a>
+    <ol>
+      <li><a href="#tiles">Per-region model</a></li>
+      <li><a href="#latewarp">Late warp</a></li>
+      <li><a href="#others">Other abandoned ideas</a></li>
+    </ol></li>
+  <li><a href="#method"><span class="n">7</span>Measurement method</a></li>
+  <li><a href="#options"><span class="n">8</span>Appendix: options and settings</a></li>
+</ol>
+</nav>
+
+<main>
+
+<section id="principle">
+<h2><span class="n">1</span>Principle and architecture</h2>
+<p>DLSS 5 Neural Rendering is an NVIDIA model (<code>nvngx_dlssnr.dll</code>) that reworks the lighting and materials of an already rendered frame. Used as is, it is expensive: about <strong>13 ms per frame</strong> at 1440p on an RTX 4070, which roughly halves the frame rate. The project is a fork of OptiScaler, built on Dagherbou's OptiScaler_DLSSNR. It keeps <strong>exactly the same NVIDIA model</strong> and changes three things:</p>
+<ul>
+  <li><strong>where</strong> it runs in the frame: before or after the upscaler, at which resolution;</li>
+  <li><strong>when</strong> it runs: every frame or one in N, with a cache that carries its answer between runs;</li>
+  <li><strong>how</strong> its answer is composed with the game's frame: frequency bands, light stabilisation, masks.</li>
+</ul>
+<p>NVIDIA's model is never redistributed. Only a small "forwarder" (<code>nvngx.dll_dlssnr.dll</code>) ships: it calls the model from the right module, because the model checks who calls it.</p>
+
+<h4>The path of a frame with NVIDIA frame generation</h4>
+<pre>game → sl.interposer.dll (Streamline)
+    → sl.dlss_g plugin         ← OptiScaler hooks here (slGetPluginFunction: multiplier)
+    → nvngx_dlssg + DLSS-G "pacer" queue
+    → OptiScaler's wrapped swapchain (LocalPresent)   ← thumbnails, measurements
+    → real swapchain, Present detour (vtable 8 / 22)  ← every frame timestamped
+    → DXGI / DWM / display
+
+Real frame: the game's DLSS inputs (colour, depth, motion vectors)
+    → [speckle cleanup] → [DLSS 5 pre-SR] → DLSS SR upscaler → [DLSS 5 after SR] → present</pre>
+<div class="note"><strong>Design rule, always:</strong> everything added can be turned on and off from the OptiScaler menu and from <code>OptiScaler.ini</code>. Turned off, the behaviour is the original one.</div>
+</section>
+
+<section id="base">
+<h2><span class="n">2</span>The base: versions 1.0 to 1.2.1</h2>
+<p>What existed before 1.3.0, and what explains the performance numbers shown since the first Reddit post (r/nvidia, 7 October; about 6,000 downloads since).</p>
+
+<h3 id="presr">Pre-SR: DLSS 5 before the upscaler</h3>
+<p class="where">shaders/dlssnr/DlssNr_Dx12.cpp · EvaluateBeforeUpscale / EndBeforeUpscale · [DlssNr] PreSr</p>
+<p>In the upscaler's NGX evaluate hook (<code>NVSDK_NGX_Feature_SuperSampling</code>), the game's colour, still at render resolution (for example 1484×835 instead of 2560×1440), is copied into a texture of our own. The whole DLSS 5 pass runs on that copy, then the colour pointer in the parameter block is swapped so the upscaler enlarges the enriched frame. The original pointer is put back right after.</p>
+<ul>
+  <li>About 2.9 times fewer pixels to process, and DLSS SR's temporal accumulation steadies what the model adds.</li>
+  <li>With Ray Reconstruction (DLSSD, Cyberpunk path tracing) there is no usable pre-denoise image. The pass moves after the upscaler on its own.</li>
+  <li><code>PreSrReduced</code> also applies the working scale in pre-SR, for the cheapest possible frame (x8 preset).</li>
+</ul>
+
+<h3 id="cache">Edit cache: the model one frame in N</h3>
+<p class="where">shaders/dlssnr/DlssNr_EditCache_Dx12.cpp · [DlssNr] Cache*</p>
+<p>The central idea of the project: the cache does not keep the image the model produces but its <strong>edit</strong>, that is, what it changed relative to the game's frame. The edit is reprojected with the game's motion vectors and applied to the following frames, while the model only runs one frame in N (<code>CacheInterval</code>, 1 to 16).</p>
+<ul>
+  <li><strong>Two bands.</strong> The edit is split into a low band (light, broad colour) and a high band (detail). The low band is smoothed over time (<code>CacheLowTemporal</code> 0.95). The high band keeps its confidence (<code>CacheHighDecay</code>) and can be smoothed when the game is noisy (<code>CacheNoiseAware</code>).</li>
+  <li><strong>Anti-ghosting (fingerprint).</strong> Each pixel keeps a fingerprint of its 3×3 neighbourhood. When the game's frame moves away from it by more than a tolerance in stops (<code>CacheFingerprintTolerance</code>), the pixel drops the carried edit. <code>CacheContext</code> also watches the surroundings (the light an object left on the ground after it moved), and <code>CacheSurfaceFill</code> fills rejected pixels with the broad part of the edit from a nearby identical surface. Result: up to 60% less trailing at long intervals.</li>
+  <li><strong>No pulsing.</strong> <code>CacheSoftRefresh</code> makes each new answer start from what was on screen instead of jumping to it. The cause found: objects without motion vectors (paper, debris, hands). The light step on the model's frame went from 0.0023-0.0027 to 0.0013 stop in Control. <code>CacheCrossfade</code> blends between two answers (off in pre-SR, where it blurred detail).</li>
+  <li><strong>Light pop-in.</strong> <code>CacheAntiPop</code> caps how fast a region's light may change, in stops per second, turning a jump into a short fade.</li>
+  <li><strong>Smart cadence.</strong> <code>CacheAdaptiveSpeed</code> shortens the interval in proportion to camera speed and lengthens it at rest (<code>CacheStillMax</code>, held through small motion by <code>CacheStillHold</code>). The model also runs at once when too much of the edit is rejected. <code>CacheMotionPriority</code> and <code>CacheBudgetMs</code> cap the average cost.</li>
+  <li><strong>Model history.</strong> On a refresh, the model is handed the motion accumulated since its last run (<code>CacheModelHistory</code> = 1), so it reprojects its own history correctly.</li>
+</ul>
+
+<h3 id="scale">Working scale and guided upsampling</h3>
+<p class="where">[DlssNr] WorkingScale · JbuUpsample</p>
+<p>After the upscaler, the model can work on a reduced copy of the frame (for example 67%). Its answer is enlarged again by a <strong>joint bilateral upsample</strong> (JBU) guided by the full-resolution frame, so edges stay sharp. An important measurement: the model has a <strong>large fixed cost</strong> (about 2.5 ms at 25% resolution, 4.3 ms at 50%, 10.5 ms at full size in Control). A smaller size therefore saves less than the pixel count suggests.</p>
+
+<h3 id="wp">White point: four sources</h3>
+<p class="where">ResolveWhitePoint · [DlssNr] WhitePointSource</p>
+<p>The model was trained on finished (sRGB) frames, while an HDR game's buffer is linear, with an arbitrary scale. A "white point" maps one to the other, and there are four sources:</p>
+<div class="tbl"><table>
+<tr><th>Source</th><th>Principle</th></tr>
+<tr><td>0 Paper white</td><td>A fixed setting. Right for a game whose exposure never moves.</td></tr>
+<tr><td>1 The game's exposure</td><td>The exposure texture the game hands the upscaler, read in the shader with no latency. A guard declares it unreliable if it swings by more than 8 stops (seen in Control: from 0.00025 to 116).</td></tr>
+<tr><td>2 A buffer the scan found</td><td>An exposure buffer the game computes without passing it on, found by its shape and anchored by the user.</td></tr>
+<tr><td>3 Automatic</td><td>The scene's average, measured on the frame before our pass (64×64 grid, geometric mean without the extremes) and smoothed over time. It adapts between a dark interior and the outdoors.</td></tr>
+</table></div>
+
+<h3 id="presets">Presets and the x8 preset</h3>
+<p>Presets set placement, scale, interval and cache options in one click. Max quality, Strong, Quality, Balanced and Performance are based on measurements in Control. <strong>Strong</strong> answers the "it looks like a ReShade preset" criticism: after the upscaler, Natural style, 2 passes, every other frame. With Ray Reconstruction it gives 32 fps against 26 for the stock pass.</p>
+<p><strong>x8</strong> puts frame rate first: pre-SR at half the render resolution, the model every 8th frame, fingerprint and pop-in smoothing off, so the frame where the model runs stays cheap and frame times stay even.</p>
+<div class="tbl"><table>
+<tr><th>The Last of Us Part I, built-in benchmark</th><th class="num">FPS</th><th class="num">DLSS 5 cost / frame</th></tr>
+<tr><td>DLSS 5 off</td><td class="num">83.9</td><td class="num">—</td></tr>
+<tr><td>DLSS 5 as OptiScaler ships it</td><td class="num">39.2</td><td class="num">13.2 ms</td></tr>
+<tr><td>Performance</td><td class="num">68.6</td><td class="num">2.5 ms</td></tr>
+<tr><td><strong>x8</strong></td><td class="num"><strong>77.3</strong></td><td class="num"><strong>~0.9 ms</strong></td></tr>
+</table></div>
+<p>1.2.1 fixed a brightness jump specific to x8: the light smoothing did not run in pre-SR when anti pop-in was off. The light step on the model's frame went from 0.016 to 0.002 stop.</p>
+
+<h3 id="tools">Live comparison and benchmark</h3>
+<p>F6 switches live between Optimised (your settings), Vanilla (the pass as shipped) and Off. The built-in benchmark runs these phases in turn, captures frames and writes an HTML report (fps, cost, frame-time regularity, the model's share). <code>PrivateCreate</code> creates the model on a queue of our own rather than inside the game's frame: creating the feature was a known cause of GPU hangs.</p>
+</section>
+
+<section id="fg">
+<h2><span class="n">3</span>Version 1.3.0: frame generation</h2>
+
+<h3 id="fg-central">Central section and multiplier override <span class="tag on">1.3.0</span></h3>
+<p class="where">dlssnr/DlssNr_Menu.cpp · SectionFrameGen · hooks/Streamline_Hooks.cpp · [DLSSG] OverrideInterpolationCount</p>
+<p>All of frame generation sits in one section of the DLSS 5 tab: type (off, NVIDIA DLSS Frame Generation, experimental Synced FG), multiplier, auto multiplier, flip metering, DLSS-G version and the meter.</p>
+<ul>
+  <li><strong>A game that ships DLSS-G:</strong> OptiScaler intercepts <code>slDLSSGSetOptions</code> at the plugin level and rewrites <code>numFramesToGenerate</code> = multiplier − 1 (5 for 6x). The value is replayed at once on every change. A first version that skipped this replay failed, because The Witcher 3 only calls SetOptions when a setting changes. "As in game" leaves the game's choice.</li>
+  <li><strong>Guard:</strong> the maximum NVIDIA allows (<code>numFramesToGenerateMax</code>, read through <code>slDLSSGGetState</code>) is remembered. Multipliers above it are greyed out with "not available on this GPU", instead of failing silently.</li>
+  <li><strong>Diagnosing a 6x that did not apply:</strong> the cause was neither OptiScaler nor NVIDIA's over-the-air update, but a setting turned off in a third-party tool on the test machine. Verified by launching the game without OptiScaler. Telltale lines in Streamline's log: "multi-frame not available" and "numFramesToGenerate greater than numFramesToGenerateMax".</li>
+</ul>
+
+<h3 id="fg-auto">Auto multiplier <span class="tag on">1.3.0</span></h3>
+<p class="where">framegen/synced/FGMeter.cpp · RunAuto · [FrameGen] AutoMultiplier, AutoMultiplierTarget</p>
+<p>It picks a whole multiplier from 2x to 6x so the frames shown stay just under a target (95% of the display's refresh rate by default). It relies on the rate of real frames, counted on every upscaler evaluation.</p>
+<pre>R = rendered frames per second; T = target (0 → 0.95 × refresh rate)
+step down if R × m     > 1.02 × T for 0.3 s
+step up   if R × (m+1) < 0.97 × T for 1.5 s</pre>
+<p>It is a temporary value (<code>set_volatile_value</code>): the multiplier saved in the ini is not modified and comes back when the option is turned off. Measured in The Witcher 3 with a 100 fps target: 6x to 3x in 1.5 s, holding 86 fps shown. 6x costs about 4.5 more rendered fps than 3x.</p>
+
+<h3 id="fg-meter">Frame generation meter <span class="tag on">1.3.0</span></h3>
+<p class="where">framegen/synced/FGMeter.cpp · PresentPacer.cpp · shaders/fg_meter · [FrameGen] Meter</p>
+<p>The real swapchain's Present is detoured (vtable entries 8 and 22, Present and Present1), beneath Streamline. Every frame sent to the display, real or generated, is therefore timestamped when it actually leaves.</p>
+<ul>
+  <li><strong>Shown and rendered frames:</strong> presents counted, against upscaler evaluations (two evaluations less than 2 ms apart count as one frame).</li>
+  <li><strong>On time, stacked, late:</strong> the gap between two consecutive presents, against the expected interval.</li>
+  <li><strong>Queue:</strong> <code>GetLastPresentCount − FrameStatistics.PresentCount</code>, the frames presented but not yet on screen.</li>
+  <li><strong>Tear risk:</strong> the share of frames presented with tearing allowed (sync interval 0) that land less than one scan after the previous one.</li>
+  <li><strong>Duplicate frames:</strong> a shader reduces each frame to a 64×36 luminance thumbnail on the presenting queue. For each frame i, d<sub>i</sub> = Σ|t<sub>i</sub> − t<sub>i−1</sub>| / Σ ½(t<sub>i</sub> + t<sub>i−1</sub>). A frame counts as a duplicate if d &lt; 0.2 × median while the scene moves (median &gt; 0.003). Measured: 0% duplicates during pans in Witcher (d ≈ 0.12, against 0.001 at rest).</li>
+  <li><strong>Frame dump</strong> (diagnostic, file <code>fgdump.trigger</code>): 14 consecutive frames written as sent to the display. This is what proved the "torn" grass came from the real frames, not from frame generation or the display.</li>
+</ul>
+<p>A bug fixed along the way: the ring of 8 thumbnails could not tell "full" from "empty", and nothing was read back once all 8 were in flight.</p>
+
+<h3 id="fg-flip">Flip metering: no more frames in bursts <span class="tag on">1.3.0</span></h3>
+<p class="where">[NvApi] DisableFlipMetering</p>
+<p>Flip metering is NVIDIA's system that releases each generated frame at its time through the display engine. It is RTX 50 hardware; on RTX 40 it is requested with no hardware behind it. The meter showed the effect:</p>
+<div class="facts">
+  <div class="fact"><div class="v">83%</div><div class="l">frames stacked on the previous one, Witcher 3 at 6x, flip metering on</div></div>
+  <div class="fact"><div class="v">6</div><div class="l">frames waiting in the queue, same case</div></div>
+  <div class="fact"><div class="v">96-98%</div><div class="l">frames on time with flip metering off, 1 queued</div></div>
+  <div class="fact"><div class="v">4 in 7 ms</div><div class="l">then 23 ms of nothing: the cadence seen in Cyberpunk before the fix</div></div>
+</div>
+<p>The cost is about 1 rendered fps, and 6x stays available. The option needs a restart. It is recommended on RTX 40.</p>
+
+<h3 id="fg-gsync">G-SYNC status <span class="tag on">1.3.0</span></h3>
+<p class="where">hooks/Streamline_Hooks.cpp</p>
+<p>Streamline writes a line like "GSYNC FS OFF is %d, VSync enabled is %d … iFlip is %d" to its log. OptiScaler parses it in passing, stores G-SYNC, V-Sync, independent flip and the number of switches in the shared state, and the menu shows it. You see at once when G-SYNC drops out.</p>
+
+<h3 id="fg-gamedll">Keeping the game's DLSS-G version <span class="tag on">1.3.0</span></h3>
+<p class="where">hooks/LibraryLoad_Hooks.cpp · [FrameGen] DLSSGUseGameDll</p>
+<p>NGX downloads newer DLSS Frame Generation builds (the <code>.bin</code> files under <code>…\dlssg\versions\…</code>) and always loads the newest. The library load hook detects that path and loads the <code>nvngx_dlssg.dll</code> shipped with the game instead. Why it helps: some third-party tools only apply their quality fixes to the versions they know (here 310.9.1, against the downloaded 310.9.16). With the game's version, generated trees are visibly less doubled (Witcher, 6x at 196 fps). Needs a restart.</p>
+
+<h3 id="fg-inject">Injecting NVIDIA DLSS-G into games without it <span class="tag on">1.3.0</span></h3>
+<p class="where">proxies/Streamline_Proxy.h · hooks/FG_Hooks.cpp · State.h · [FrameGen] FGInput=Upscaler, FGOutput=DLSSG</p>
+<p>OptiScaler can load its own Streamline (a <code>streamline\</code> folder beside the DLL: sl.interposer, sl.common, sl.dlss_g, sl.reflex, sl.pcl, nvngx_dlssg) and feed DLSS-G from the upscaler's inputs. In Red Dead Redemption 2, two bugs stopped it:</p>
+<ol class="plain">
+  <li><strong>OptiScaler sabotaged itself.</strong> Its <code>slInit</code> hook removes DLSS-G from the list a game requests, so the game and OptiScaler do not both load it. In a game without Streamline, the interposer loaded is OptiScaler's own: it was hooked too, and OptiScaler's own request lost DLSS-G. Streamline logged "Ignoring plugin sl.dlss_g since it was not requested by the host", then the "No DLSSG Support" dialog closed the game. Fix: an <code>optiSlInitInProgress</code> flag exempts OptiScaler's call from the filter.</li>
+  <li><strong>DLSS-G refused to generate on every frame</strong> (<code>eDLSSGStatusFailGetCurrentBackBufferIndexNotCalled</code>, 15,272 errors in one session). DLSS-G requires <code>GetCurrentBackBufferIndex</code> to be called every frame. RDR2 never calls it: it tracks the index itself. OptiScaler only made the call for games without Reflex markers, and RDR2 sends them. The call is now made every frame while the DLSS-G output is active; it is a plain query with no side effect.</li>
+</ol>
+<p>Result: RDR2 with injected DLSS-G at 2x, about 123 fps shown, zero status errors. The menu shows "files found", the list of missing files with a button that opens the folder, or "needs DirectX 12". On RTX 40, injection stays at the 2x NVIDIA allows.</p>
+
+<h3 id="fg-synced">Synced FG <span class="tag exp">experimental</span></h3>
+<p class="where">framegen/synced · shaders/synced_fg</p>
+<p>OptiScaler's own frame generation (up to 6x), from the game's motion vectors and depth. It runs on every card but is not recommended. In 1.3.0: soft weights instead of per-pixel choices (less shimmer in foliage), a sharper 5-tap Catmull-Rom resample, and a HUD test on undilated motion. It was taken out of the central menu (shown only when selected): at a low frame rate it queued 3 real frames, with 4 fps in menus and huge latency. NVIDIA's frame generation remains the best on every card it runs on.</p>
+</section>
+
+<section id="img">
+<h2><span class="n">4</span>Version 1.3.0: DLSS 5 image</h2>
+
+<h3 id="speckle">Speckle cleanup: the ray-traced dots <span class="tag on">1.3.0</span></h3>
+<p class="where">shaders/checker_guard (CheckerGuard, CG_Dx12, CG_Common) · inputs/NVNGX_DLSS_Dx12.cpp · [FrameGen] SpeckleCleanup, SpeckleCleanupStrength, SpeckleCleanupDebug</p>
+<p><strong>Diagnosis.</strong> On fast turns in The Witcher 3, a mesh of dots covered the picture. A first checkerboard detector was wrong. A render-resolution capture showed it was <strong>per-pixel noise from ray-traced ambient occlusion</strong> (RTAO), which loses its history when the camera turns fast. DLSS SR's 1.5× upscale lays that noise on a regular grid, hence the mesh. Frame generation then copies it into every generated frame. The noise goes away with RTAO off, but not with the GI settings.</p>
+<p><strong>Principle.</strong> Before the upscaler, on a copy of the colour that the upscaler reads instead of the original, a shader applies this filter to each pixel:</p>
+<pre>median and median deviation (MAD) of the 8 neighbours, sorted by a Sort8 (Batcher) network
+margin   = 2.5 × MAD + 0.06 × (median + 0.02)
+outlier  = saturate((|L − median| − margin) / margin)
+moving   = smoothstep(2 px, 8 px, speed)            ← never on a still frame
+surface  = second difference of 1/z < 0.01          ← smooth planes only
+weight   = outlier × moving × surface × strength</pre>
+<p>The <strong>surface test</strong> protects foliage. On a plane, 1/z is affine on screen, so its second difference is close to zero. On leaves, grass or a silhouette it jumps, and the pixel is left alone. Without this test, trees took on a "cartoon" look. Depth is read through a view matched to its format (R32G8X24, D24S8…): the generic translation had already caused a "device removed".</p>
+<div class="facts">
+  <div class="fact"><div class="v">79 → 7.8</div><div class="l">mesh score (FFT energy at the 1.5× grid frequencies), worst frame of The Witcher 3</div></div>
+  <div class="fact"><div class="v">4.3</div><div class="l">the same measure with RTAO off: the floor</div></div>
+</div>
+<p>Debug views: red for what is cleaned, blue for what is protected, and raw depth through <code>speckle-debug.txt</code>.</p>
+
+<h3 id="region">Region: choose where DLSS 5 applies <span class="tag on">1.3.0</span></h3>
+<p class="where">DlssNr_Dx12.cpp · regionMask lambda · dlssnr.hlsl mode 5 · [DlssNr] RegionMask, RegionMaskDistance, RegionMaskSoftness, RegionMaskStrength, RegionMaskIgnoreFloor, RegionMaskShow</p>
+<p>The number one criticism of DLSS 5: it redraws faces. Region keeps part of the picture exactly as the game rendered it, chosen by depth:</p>
+<ul>
+  <li><strong>Scenery only (keep characters)</strong>: what is near the camera (usually the character, face included) stays as the game rendered it; everything behind gets DLSS 5.</li>
+  <li><strong>Foreground only</strong>: the other way round.</li>
+  <li><strong>Whole frame</strong>: the original behaviour.</li>
+</ul>
+<p><strong>How it works.</strong> The model still runs on the whole frame, so its lighting stays coherent. After its pass, a copy of the edited frame is blended with the original per pixel: output = lerp(edited, original, mask). The mask is built in the shader from the game's depth:</p>
+<ul>
+  <li><code>RegionMaskDistance</code>: where "near" ends, in the depth buffer's own units. About 40 for a third-person character.</li>
+  <li><code>RegionMaskSoftness</code>: the width of the transition, in stops of distance on either side.</li>
+  <li><code>RegionMaskStrength</code>: how much of the original picture the protected area gets back (1 = all of it, 0.5 = half of the effect).</li>
+  <li><code>RegionMaskIgnoreFloor</code>: only upright surfaces (characters, props, pillars) count as near, not the ground under the camera.</li>
+  <li><code>RegionMaskShow</code> tints the protected area so the mask can be set by eye.</li>
+</ul>
+<p>The cost is a fraction of a millisecond, with no fps lost.</p>
+
+<h3 id="passes">Up to 30 passes, a style per pass <span class="tag on">1.3.0</span></h3>
+<p class="where">DlssNr_Dx12.cpp · kMaxPasses, EffPassStyle · [DlssNr] Passes (1-30), PassStyles</p>
+<p>Multi-pass runs the model again on its own answer. Each pass has its own feature, so its own temporal history, and the final composition with the game's frame happens once: detail builds up, colour does not. 1.3.0 raises the limit from 3 to <strong>30 passes</strong> and adds a <strong>style per pass</strong>.</p>
+<ul>
+  <li>Pass 1 uses the main "Model style". Passes 2 to N read <code>PassStyles</code>, a comma-separated list (0 Default, 1 Natural, 2 Cinematic, −1 inherit). Example: Style=1 and PassStyles=0,2 give Natural + Default + Cinematic.</li>
+  <li>Each pass remembers the style it was built with (<code>passStyle[p]</code>). When its style changes, only that pass is parked and rebuilt. Passes are built one per frame and never evaluated on the frame they are built on (that is the known GPU hang).</li>
+  <li>The cost is linear: about one full model run per pass, and about <strong>200 MB of video memory per pass</strong> at a 1280×720 model resolution. Stress test at 30 passes in Witcher: 29 features built, no failure or crash, 13.6 GB of video memory (past the card's 12 GB), about 13 fps. The menu warns above 3 passes.</li>
+</ul>
+
+<h3 id="hdr">HDR exposure: no more pumping <span class="tag on">1.3.0</span></h3>
+<p class="where">DlssNr_Dx12.cpp · EffectiveWhitePointSource · [DlssNr] AutoFollowsGameExposure</p>
+<p><strong>Symptom.</strong> In RDR2, the brightness "jumped all over the place". <strong>Cause.</strong> The game had been switched from Vulkan to DirectX 12. The Vulkan path has no automatic white point (a fixed value), whereas the DX12 path measures the frame continuously. In HDR, the measured paper white swung between 0.07× and 0.17× within seconds, on top of the game's own eye adaptation: two adaptations on one picture.</p>
+<p><strong>Fix.</strong> RDR2 hands its exposure texture to the upscaler. When the source is "Automatic", the game has already provided such a texture and it has not been declared unreliable, the effective source becomes 1 (the game's exposure, read in the shader with no latency). The choice latches on "ever provided", not "provided this frame", so it does not flip when a game drops the texture for a frame. If the exposure turns out to be absurd, it falls back to measuring. Witcher, TLOU and Cyberpunk provide no texture, so nothing changes for them. Result in RDR2: paper white steady at about 0.03×. Can be turned off: <code>AutoFollowsGameExposure=false</code>.</p>
+
+<h3 id="steady">Steady in motion <span class="tag exp">off by default</span></h3>
+<p class="where">dlssnr.hlsl mode 5 · DlssNr_EditCache_Dx12.cpp · [DlssNr] MotionFade, MotionFadeStart, MotionFadeEnd, MotionFadeSkipModel</p>
+<p><strong>Diagnosis.</strong> The meter showed a 0% tear risk (sync interval 1, never tearing), and the frame dump showed the torn grass in the <strong>real</strong> frames: it was DLSS 5 in motion, not the display. Residual measured after aligning the camera, at about 15 px per frame: 0.220 with DLSS 5, 0.168 without.</p>
+<p><strong>Principle.</strong> Per pixel, the DLSS 5 edit fades back to the game's frame as speed rises between 6 and 30 render px per frame:</p>
+<pre>moving = MotionFade × smoothstep(Start, max(End, Start + 0.5), speed)
+back   = 1 − (1 − region) × (1 − moving)
+output = lerp(edited, original, back)</pre>
+<p>Result: 0.177 at 17 px, almost the level of the frame without DLSS 5. <code>MotionFadeSkipModel</code> runs the model one frame in 8 when the cache's average speed goes over min(0.8 × End, 24) px, releasing 20% lower. The threshold is not End because the counter caps each pixel at 32 px and the average never reaches 30. On a fast pan: 32.5-35 rendered fps against 30.5-33, and 97-98% of frames on time against 92-94%. Users found it buggy in practice, so it is off by default.</p>
+
+<h3 id="settle">Reset after a preset <span class="tag on">1.3.0</span></h3>
+<p class="where">DlssNr_Dx12.cpp · RequestSettleReset, ConsumeUpscalerReset · inputs/NVNGX_DLSS_Dx12.cpp</p>
+<p>Reported symptom: after clicking x8, a frozen semi-transparent picture stayed over the game until the preset was clicked again. The bug could not be reproduced, despite three scenarios (x8 alone, Max quality to x8, Strong to x8) in two games, with and without frame generation. Since clicking again fixed it, a temporal history was holding a bad frame through the transition. Each preset click now schedules two full flushes, at +12 and +60 frames (once rebuilds are done): edit cache invalidated, model history reset, and the <code>NVSDK_NGX_Parameter_Reset</code> flag handed to the upscaler. In pre-SR, DLSS SR's accumulation is what can hold a ghost picture for a long time on a still scene.</p>
+</section>
+
+<section id="infra">
+<h2><span class="n">5</span>Installation and reliability</h2>
+<ul>
+  <li><strong>The installer keeps the ini</strong> on update: <code>INSTALL.bat</code> no longer rewrites <code>OptiScaler.ini</code>, only the program files are replaced. Tested: clean install, an update that keeps a setting, an uninstall that removes the four files.</li>
+  <li>The installer picks a free name (<code>winmm.dll</code>, or <code>OptiScaler.asi</code> beside an ASI loader), never replaces a file it did not install, and can switch another mod off by renaming it, restored on uninstall.</li>
+  <li><strong>No pacing added to Present.</strong> A first "Present pacing" that held frames back blocked Streamline's present thread (84 → 20 presents per second). It was removed: the Present detour now only serves the meter.</li>
+  <li>NVIDIA's model never ships. A check in the packaging script refuses <code>nvngx_dlssnr.dll</code>.</li>
+</ul>
+</section>
+
+<section id="research">
+<h2><span class="n">6</span>Experiments and negative results</h2>
+<p>What was built, measured, then set aside. These results save anyone from walking into the same dead ends.</p>
+
+<h3 id="tiles">Running the model per region (tiles) <span class="tag cut">dropped</span></h3>
+<p class="where">RunTileProbe · file dlssnr-tileprobe.trigger · forwarder export dlssnr_call_evaluate_rect</p>
+<p>The idea: give each region a compute budget according to its importance (face, hair against a flat wall), as the optimisation problem max Σ w<sub>i</sub>Q<sub>i</sub>(b<sub>i</sub>) subject to Σ C<sub>i</sub> ≤ T. A probe measured, on a real frame from Witcher (pre-SR 1704×960), what the model allows:</p>
+<div class="tbl"><table>
+<tr><th>Area evaluated</th><th class="num">Cost</th></tr>
+<tr><td>6% of the frame</td><td class="num">2.38 ms</td></tr>
+<tr><td>25%</td><td class="num">2.81 ms</td></tr>
+<tr><td>56%</td><td class="num">4.05 ms</td></tr>
+<tr><td>100%</td><td class="num">5.9 ms</td></tr>
+<tr><td>2×2 tiles (4 calls)</td><td class="num">11.2 ms</td></tr>
+</table></div>
+<ul>
+  <li>The model honours subrectangles (correlation 0.70 to 0.86 with the full pass) and is deterministic: two full passes give an identical output.</li>
+  <li>But the cost is about <strong>1.9 ms fixed per call</strong> plus 4.1 ms × area. A quarter of the frame per frame costs 2.85 ms, as much as the current cache running every other frame.</li>
+  <li>An isolated tile differs from the full pass by 0.08 stop, 60% of the edit itself: the model uses wide context. With 64 px of feathered overlap the seams are 4 times less visible, but the tone mismatch remains.</li>
+</ul>
+<p>Conclusion: the budget must stay <strong>temporal</strong> (which frames) plus per-pixel validity, which is what the cache already does.</p>
+
+<h3 id="latewarp">Late warp: aim decoupled from fps <span class="tag cut">removed from 1.3.0</span></h3>
+<p class="where">kept on a separate experiment branch</p>
+<p><strong>The problem.</strong> Frame generation interpolates: it waits for the next real frame before showing anything. At 25 base fps and 6x, the camera answers the mouse 80 to 100 ms late, however many frames are shown.</p>
+<p><strong>The principle.</strong> Each frame sent to the display is turned to where the mouse has taken the camera since it was made, just before it is shown. A pure camera rotation is a homography H = K·R·K⁻¹, which only needs the focal length. What was built:</p>
+<ul>
+  <li><strong>Mouse:</strong> a low-level <code>WH_MOUSE_LL</code> hook on a dedicated thread, computing delta = announced position − cursor position.</li>
+  <li><strong>Self-calibration:</strong> a 320×180 thumbnail of each frame before the turn; its shift, measured from column and row profiles (SAD of the derivatives, parabolic sub-pixel) against a frame at least 40 ms older; then a regression of that shift on the filtered mouse, with a grid search over the latency D and the smoothing τ. The focal length is estimated from how much more the edges move than the centre during a yaw.</li>
+  <li><strong>Target:</strong> the mouse through a fixed 15 ms smoothing. Aiming at the fitted smoothing made latency unstable, because D and τ trade off against each other.</li>
+  <li><strong>Third person:</strong> the game's depth is copied on every real frame, and an orbit model gives each pixel a share of the turn = 1 − smoothstep(0.5; 0.9; n × pivot⁻¹). The pivot is the candidate that best predicts the next frame. Uncovered areas are detected by a consistency test, and screen-fixed elements (HUD, weapon) by a mask learnt on 8×8 blocks.</li>
+  <li><strong>Edges:</strong> a blurred, darkened mirror of the neighbouring content, with the shift capped at 8% of the width.</li>
+</ul>
+<div class="facts">
+  <div class="fact"><div class="v">~95 → 6-10 ms</div><div class="l">mouse to picture, Witcher 3 at 6x, as made against as shown</div></div>
+  <div class="fact"><div class="v">71 → 11 ms</div><div class="l">median of 39 measurements, Cyberpunk in first person</div></div>
+  <div class="fact"><div class="v">3-6%</div><div class="l">overshoot when a turn stops</div></div>
+</div>
+<p><strong>Why it was removed.</strong> Judged unplayable: blurred strips at the edges during fast turns, a doubled minimap (it turns with the view and is never learnt as fixed), and a doubled character in third person. Documented failures along the way: a continuous turn share shredded foliage, the "peripheral memory" left a seam, and running the calibration on the present thread caused a hitch every 0.5 s. In Cyberpunk it only worked after turning flip metering off: with frames in bursts, the motion between two frames was under one thumbnail pixel.</p>
+
+<h3 id="others">Other abandoned ideas</h3>
+<ul>
+  <li><strong>Edit super-resolution</strong> (jittering the model at 67% and accumulating): the machinery works (coherence 0.24 → 0.89), but the 67% edit itself smooths fine detail (×0.96 against ×1.06 at full size). The detail comes from the model synthesising at that resolution, not from information lost in the downsample.</li>
+  <li><strong>Asynchronous model</strong> (<code>CacheAsync</code>, kept but off): frame-time regularity 4.96 → 2.19 ms and p99 16.8 → 6.9 ms at x8, but two frames of extra latency. Not worth it.</li>
+  <li><strong>Present pacing:</strong> removed (see section 5).</li>
+  <li><strong>FGSync</strong> (frame generation paced on the model's cycle): experimental, off.</li>
+  <li><strong>Frame generation edge artifacts:</strong> content entering at the edge exists in no neighbouring real frame. This is inherent, measured at about 1.5 times the centre's residual.</li>
+</ul>
+</section>
+
+<section id="method">
+<h2><span class="n">7</span>Measurement method</h2>
+<p>Almost every decision was made on measurement, from automated game sessions (launch, save load, scripted mouse movement, captures), run while the machine was otherwise idle.</p>
+<div class="tbl"><table>
+<tr><th>Tool</th><th>What it measures</th></tr>
+<tr><td>meshscore.py</td><td>FFT energy at the 1.5× grid frequencies, on the worst tile: the dot mesh.</td></tr>
+<tr><td>tempcoh.py / dumpstrip.py</td><td>Frame-to-frame residual after aligning the camera: torn grass, stability.</td></tr>
+<tr><td>edgemetric.py</td><td>Error of generated frames at the edges against the centre (block search in both neighbouring real frames).</td></tr>
+<tr><td>fgdump + fgdump2png.py</td><td>14 consecutive frames as sent to the display, with timestamps.</td></tr>
+<tr><td>Frame generation meter</td><td>Cadence, queue, duplicates, tear risk, live.</td></tr>
+<tr><td>tileanalyse.py / tileoverlap.py</td><td>Tiles against the full pass: tone bias, seams, noise floor.</td></tr>
+<tr><td>thumbtrace.py</td><td>True shift between thumbnails (full 2D search) against the profile method.</td></tr>
+<tr><td>Built-in benchmark</td><td>FPS, cost, frame-time alternation, the model's share, HTML report.</td></tr>
+</table></div>
+<p>Benchmarks drift by 5 to 10% from one session to the next, so comparisons alternate A and B within the same session.</p>
+</section>
+
+<section id="options">
+<h2><span class="n">8</span>Appendix: options and settings added in 1.3.0</h2>
+<div class="tbl"><table>
+<tr><th>Ini key</th><th>Default</th><th>Role</th></tr>
+<tr><td><code>[DLSSG] OverrideInterpolationCount</code></td><td>auto</td><td>Forced multiplier (frames generated per real frame)</td></tr>
+<tr><td><code>[FrameGen] AutoMultiplier</code></td><td>false</td><td>Auto multiplier</td></tr>
+<tr><td><code>[FrameGen] AutoMultiplierTarget</code></td><td>0</td><td>Target in fps (0 = 95% of the refresh rate)</td></tr>
+<tr><td><code>[FrameGen] Meter</code></td><td>false</td><td>Frame generation meter</td></tr>
+<tr><td><code>[FrameGen] DLSSGUseGameDll</code></td><td>false</td><td>The game's DLSS-G version (restart)</td></tr>
+<tr><td><code>[NvApi] DisableFlipMetering</code></td><td>false</td><td>Turns flip metering off (restart), recommended on RTX 40</td></tr>
+<tr><td><code>[FrameGen] SpeckleCleanup</code></td><td>false</td><td>Speckle cleanup (Strength 1.0, Debug)</td></tr>
+<tr><td><code>[DlssNr] RegionMask</code></td><td>0</td><td>0 whole frame, 1 scenery only, 2 foreground only (+ Distance, Softness, Strength, IgnoreFloor, Show)</td></tr>
+<tr><td><code>[DlssNr] Passes</code></td><td>1</td><td>Number of passes, 1 to 30</td></tr>
+<tr><td><code>[DlssNr] PassStyles</code></td><td>empty</td><td>Style of passes 2+: 0 Default, 1 Natural, 2 Cinematic, −1 inherit</td></tr>
+<tr><td><code>[DlssNr] AutoFollowsGameExposure</code></td><td>true</td><td>The automatic white point follows the game's exposure where there is one</td></tr>
+<tr><td><code>[DlssNr] MotionFade</code></td><td>0</td><td>Steady in motion (Start 6, End 30, SkipModel)</td></tr>
+<tr><td><code>[FrameGen] FGInput / FGOutput</code></td><td>auto</td><td>Upscaler / DLSSG to inject NVIDIA frame generation</td></tr>
+</table></div>
+<p>NVIDIA's model (<code>nvngx_dlssnr.dll</code>) is not included: supply your own. Single-player games only, as with any OptiScaler build.</p>
+</section>
+
+</main>
+</div>
+</body>
+</html>
