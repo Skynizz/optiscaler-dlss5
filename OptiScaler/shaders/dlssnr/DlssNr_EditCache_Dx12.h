@@ -291,6 +291,7 @@ class DlssNrEditCache_Dx12 : public Shader_Dx12
     bool _adaptiveSpeed = false;
     unsigned int _adaptiveMin = 2;
     float _speed = -1.0f;          // pixels per frame, smoothed; negative until measured
+    bool _fastFaded = false;       // steady in motion's skip: the view moves past the speed where the edit is given back
     float _printRejected = 0.0f;
     float _staleNow = 0.0f;        // share of the frame without a believed edit, since the model ran
 

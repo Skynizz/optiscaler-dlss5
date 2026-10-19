@@ -843,6 +843,61 @@ __declspec(dllexport) int dlssnr_call_evaluate(ID3D12GraphicsCommandList *cmd, v
     return result;
 }
 
+// dlssnr_call_evaluate on part of the inputs: colour and output read and written at (baseX, baseY), the guides at
+// (guideBaseX, guideBaseY), each over the feature's own size. For the tile probe: whether the model honours a
+// subrect base, and what running it on part of the frame costs.
+__declspec(dllexport) int dlssnr_call_evaluate_rect(
+    ID3D12GraphicsCommandList *cmd, void *feature, void *capabilityParams, ID3D12Resource *color,
+    ID3D12Resource *depth, ID3D12Resource *motion, ID3D12Resource *output, unsigned int width, unsigned int height,
+    unsigned int guideWidth, unsigned int guideHeight, int depthInverted, int reset, float intensity, int style,
+    float localStructure, float localTone, float skinStructure, int useAutoMask, float mvScaleX, float mvScaleY,
+    unsigned int baseX, unsigned int baseY, unsigned int outBaseX, unsigned int outBaseY, unsigned int guideBaseX,
+    unsigned int guideBaseY) {
+    if (!feature || !capabilityParams || !g_snip.evaluate) {
+        return 0;
+    }
+    setResource(capabilityParams, "DLSSNR.Color", color);
+    setResource(capabilityParams, "DLSSNR.Depth", depth);
+    setResource(capabilityParams, "DLSSNR.MVec", motion);
+    setResource(capabilityParams, "DLSSNR.Output", output);
+
+    setUInt(capabilityParams, "DLSSNR.Enabled", 1);
+    setUInt(capabilityParams, "DLSSNR.Width", width);
+    setUInt(capabilityParams, "DLSSNR.Height", height);
+    setUInt(capabilityParams, "DLSSNR.DepthInverted", (unsigned int) depthInverted);
+    setUInt(capabilityParams, "DLSSNR.Reset", (unsigned int) reset);
+
+    setUInt(capabilityParams, "DLSSNR.ColorSubrectBaseX", baseX);
+    setUInt(capabilityParams, "DLSSNR.ColorSubrectBaseY", baseY);
+    setUInt(capabilityParams, "DLSSNR.ColorSubrectWidth", width);
+    setUInt(capabilityParams, "DLSSNR.ColorSubrectHeight", height);
+    setUInt(capabilityParams, "DLSSNR.OutputSubrectBaseX", outBaseX);
+    setUInt(capabilityParams, "DLSSNR.OutputSubrectBaseY", outBaseY);
+    setUInt(capabilityParams, "DLSSNR.OutputSubrectWidth", width);
+    setUInt(capabilityParams, "DLSSNR.OutputSubrectHeight", height);
+    setUInt(capabilityParams, "DLSSNR.DepthSubrectBaseX", guideBaseX);
+    setUInt(capabilityParams, "DLSSNR.DepthSubrectBaseY", guideBaseY);
+    setUInt(capabilityParams, "DLSSNR.DepthSubrectWidth", guideWidth);
+    setUInt(capabilityParams, "DLSSNR.DepthSubrectHeight", guideHeight);
+    setUInt(capabilityParams, "DLSSNR.MVecSubrectBaseX", guideBaseX);
+    setUInt(capabilityParams, "DLSSNR.MVecSubrectBaseY", guideBaseY);
+    setUInt(capabilityParams, "DLSSNR.MVecSubrectWidth", guideWidth);
+    setUInt(capabilityParams, "DLSSNR.MVecSubrectHeight", guideHeight);
+
+    setFloat(capabilityParams, "DLSSNR.MVecScaleX", mvScaleX);
+    setFloat(capabilityParams, "DLSSNR.MVecScaleY", mvScaleY);
+
+    setFloat(capabilityParams, "DLSSNR.Intensity", intensity);
+    setUInt(capabilityParams, "DLSSNR.Style", (unsigned int) style);
+    setFloat(capabilityParams, "DLSSNR.LocalStructureStrength", localStructure);
+    setFloat(capabilityParams, "DLSSNR.LocalToneStrength", localTone);
+    setFloat(capabilityParams, "DLSSNR.SkinStructureStrength", skinStructure);
+    setUInt(capabilityParams, "DLSSNR.UseAutoMask", (unsigned int) useAutoMask);
+
+    volatile int result = g_snip.evaluate(cmd, feature, capabilityParams, nullptr);
+    return result;
+}
+
 // Inputs NVIDIA's own Streamline plugin sets that the positional exports predate: the model's global
 // tone strength (read at create), and the interface as the game draws it -- its layer, its alpha, and
 // the composited back buffer -- which is what the model's UI correction was designed around. Called

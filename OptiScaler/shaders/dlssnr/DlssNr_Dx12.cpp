@@ -1,6 +1,8 @@
 #include "pch.h"
 
 #include <set>
+#include <fstream>
+#include <map>
 
 #include <dlssnr/DlssNr.h>
 
@@ -161,6 +163,11 @@ using PFN_NrEvaluate = int(__cdecl*) (ID3D12GraphicsCommandList*, void*, void*, 
                                       ID3D12Resource*, ID3D12Resource*, ID3D12Resource*, unsigned int,
                                       unsigned int, unsigned int, unsigned int, int, int, float, int,
                                       float, float, float, int, float, float);
+using PFN_NrEvaluateRect = int(__cdecl*) (ID3D12GraphicsCommandList*, void*, void*, ID3D12Resource*,
+                                          ID3D12Resource*, ID3D12Resource*, ID3D12Resource*, unsigned int,
+                                          unsigned int, unsigned int, unsigned int, int, int, float, int, float,
+                                          float, float, int, float, float, unsigned int, unsigned int,
+                                          unsigned int, unsigned int, unsigned int, unsigned int);
 using PFN_NrRelease = void(__cdecl*) (void*);
 using PFN_NrSetExtras = void(__cdecl*) (void*, float, ID3D12Resource*, ID3D12Resource*, ID3D12Resource*,
                                         unsigned int, unsigned int, unsigned int, unsigned int);
@@ -169,11 +176,15 @@ using PFN_NrProbeFloat = void(__cdecl*) (void*, const char*, float, int);
 
 // One per back buffer, so an allocator is never reset while its frame is still in flight.
 
+// The most passes the model may be run in on one frame (DlssNrPasses), each on a feature of its own.
+constexpr unsigned int kMaxPasses = 30;
+
 struct NrState
 {
     HMODULE forwarder = nullptr;
     PFN_NrCreate create = nullptr;
     PFN_NrEvaluate evaluate = nullptr;
+    PFN_NrEvaluateRect evaluateRect = nullptr; // tile probe only; absent from older forwarders
     PFN_NrRelease release = nullptr;
     PFN_NrSetExtras setExtras = nullptr;
     PFN_NrSetFloatSlot setFloatSlot = nullptr;
@@ -205,11 +216,14 @@ struct NrState
     //
     // Indexed by pass, so [0] is unused and the first extra pass is [1]. Wasting one pointer keeps
     // every index here equal to the pass number it belongs to.
-    void* passFeature[4] = {};
+    void* passFeature[kMaxPasses] = {};
 
     // Multi-pass: each extra pass's first evaluate resets its history, and the copy of the previous
     // pass's answer the next pass reads (the model cannot read and write one resource).
-    bool passReset[4] = { true, true, true, true };
+    bool passReset[kMaxPasses] = {};
+
+    // The style each extra pass was built with: a pass whose style is changed is rebuilt, alone.
+    uint32_t passStyle[kMaxPasses] = {};
     ID3D12Resource* passIn = nullptr;
     unsigned int passesRun = 1;
 
@@ -520,7 +534,41 @@ unsigned int EffPasses(const Config& cfg)
         return 1;
 
     const unsigned int p = g_benchPasses > 0 ? (unsigned int) g_benchPasses : cfg.DlssNrPasses.value_or_default();
-    return std::clamp(p, 1u, 3u);
+    return std::clamp(p, 1u, (unsigned int) kMaxPasses);
+}
+
+// The style of pass `pass` (1-based): pass 1 is the main style; later passes take theirs from PassStyles, or
+// inherit. A benchmark phase that sets a style sets it for every pass.
+uint32_t EffPassStyle(const Config& cfg, unsigned int pass)
+{
+    if (pass <= 1 || g_benchStyle >= 0 || ActiveCompare() == 1)
+        return EffStyle(cfg);
+
+    const std::string list = cfg.DlssNrPassStyles.value_or_default();
+    unsigned int index = 2;
+    size_t start = 0;
+
+    while (start <= list.size())
+    {
+        const size_t end = std::min(list.find(',', start), list.size());
+
+        if (index == pass)
+        {
+            const std::string token = list.substr(start, end - start);
+            char* stop = nullptr;
+            const long v = std::strtol(token.c_str(), &stop, 10);
+
+            if (stop != token.c_str() && v >= 0 && v <= 2)
+                return (uint32_t) v;
+
+            return EffStyle(cfg);
+        }
+
+        index++;
+        start = end + 1;
+    }
+
+    return EffStyle(cfg);
 }
 
 // The state the upscaler leaves its output in, and every pass here hands it back in.
@@ -619,6 +667,13 @@ unsigned long long g_captureWriteAtFrame = 0;
 
 // Dropping a file named dlssnr-capture.trigger beside OptiScaler requests a capture, so a session can
 // be asked for one from outside the game -- no alt-tab, no menu. Checked once a second, effectively.
+// RequestSettleReset: the frames at which every temporal history is flushed (0 = none pending).
+unsigned long long g_settleResetAt[2] = {};
+bool g_upscalerResetWanted = false;
+
+// Set by dlssnr-tileprobe.trigger: the next frame the model runs snapshots its inputs for RunTileProbe.
+bool g_tileProbeWanted = false;
+
 // Set by dlssnr-asyncprobe.trigger: the next frame the model runs also runs RunAsyncProbe.
 bool g_asyncProbeWanted = false;
 
@@ -641,6 +696,15 @@ void CheckCaptureTrigger()
     }
 
     // The async compute probe (RunAsyncProbe), the same way: run once on the next frame the model runs.
+    const auto tileTrigger = Util::DllPath().remove_filename() / "dlssnr-tileprobe.trigger";
+
+    if (std::filesystem::exists(tileTrigger, ec))
+    {
+        std::filesystem::remove(tileTrigger, ec);
+        g_tileProbeWanted = true;
+        LOG_INFO("DLSS-NR tile probe requested by trigger file");
+    }
+
     const auto asyncTrigger = Util::DllPath().remove_filename() / "dlssnr-asyncprobe.trigger";
 
     if (std::filesystem::exists(asyncTrigger, ec))
@@ -862,6 +926,7 @@ bool EnsureForwarder()
 
     g_nr.create = (PFN_NrCreate) GetProcAddress(g_nr.forwarder, "dlssnr_call_create");
     g_nr.evaluate = (PFN_NrEvaluate) GetProcAddress(g_nr.forwarder, "dlssnr_call_evaluate");
+    g_nr.evaluateRect = (PFN_NrEvaluateRect) GetProcAddress(g_nr.forwarder, "dlssnr_call_evaluate_rect");
     g_nr.release = (PFN_NrRelease) GetProcAddress(g_nr.forwarder, "dlssnr_call_release");
     // Optional: an older forwarder simply lacks it, and the model runs as before.
     g_nr.setExtras = (PFN_NrSetExtras) GetProcAddress(g_nr.forwarder, "dlssnr_call_set_extras");
@@ -1516,9 +1581,25 @@ void InvalidateExposureMeter()
 //
 // So a cut snaps and a drift eases. Walking out of a cave is a drift; a camera cut is not, and
 // pretending otherwise to avoid pumping just moves the failure somewhere more visible.
+// The source actually in use. Automatic (3) gives way to the game's own exposure (1) once the game has
+// handed one over and while it still reads as a real exposure: two adaptations on one picture pump. Latched
+// on "ever offered", not "offered this frame", so a game dropping the texture on a transition does not flip
+// the source back and forth -- source 1 already holds the last reading across those gaps.
+uint32_t EffectiveWhitePointSource(const Config& cfg)
+{
+    const uint32_t source = cfg.DlssNrWhitePointSource.value_or_default();
+
+    if (source == 3 && cfg.DlssNrAutoFollowsGameExposure.value_or_default() && g_nr.exposureEverOffered &&
+        !g_nr.exposureUnreliable)
+        return 1;
+
+    return source;
+}
+
 float ResolveWhitePoint(const Config& cfg, bool isHdrBuffer)
 {
     const float slider = cfg.DlssNrWhitePointScale.value_or_default();
+    const uint32_t source = EffectiveWhitePointSource(cfg);
 
     // A frame the game already tone mapped is display-referred: white is at 1 by definition and there
     // is nothing to measure. The slider stays available as a manual exposure on that path.
@@ -1549,13 +1630,13 @@ float ResolveWhitePoint(const Config& cfg, bool isHdrBuffer)
     // its shape, and two sources fighting over one number is the class of bug worth making
     // unreachable rather than merely unlikely.
     // Automatic: the scene's own average, times the user's trim.
-    if (cfg.DlssNrWhitePointSource.value_or_default() == 3 && g_nr.autoWhiteValid)
+    if (source == 3 && g_nr.autoWhiteValid)
     {
         const float trim = std::clamp(cfg.DlssNrWhitePointTrim.value_or_default(), 0.25f, 4.0f);
         return std::clamp(std::exp2(g_nr.autoWhiteLog) * trim, 0.01f, 65536.0f);
     }
 
-    if (cfg.DlssNrWhitePointSource.value_or_default() == 2)
+    if (source == 2)
     {
         // Multi-point: one or more calibration points the user placed, interpolated in log space by
         // the current scan value. One point is the original ratio law; more fit the buffer's actual
@@ -1568,8 +1649,7 @@ float ResolveWhitePoint(const Config& cfg, bool isHdrBuffer)
             return w;
     }
 
-    if (cfg.DlssNrWhitePointSource.value_or_default() == 1 && g_nr.gameExposure > 1e-6f &&
-        !g_nr.exposureUnreliable)
+    if (source == 1 && g_nr.gameExposure > 1e-6f && !g_nr.exposureUnreliable)
     {
         // Its own setting, not the manual divisor. See Config: they are different quantities with
         // different units and different sensible ranges, and sharing one value meant adjusting the
@@ -2649,6 +2729,497 @@ void ReportSkipOnce(const char* reason)
 // Defined after the pass; shared by its model path and the edit cache's cached frames.
 void FinishPassTiming(ID3D12GraphicsCommandList* cmdList, ID3D12CommandQueue* timingQueue);
 
+// Tile probe (dlssnr-tileprobe.trigger, diagnostics only). Can the model run on PART of the frame, so a scheduler
+// could spend it where the picture needs it? It answers three questions on one real frame:
+//   cost   -- the model on the whole frame, then features built for 6%, 25% and 56% tiles evaluated through a
+//             subrect of the same inputs: the cost curve, and how much of a call is fixed.
+//   seams  -- the frame covered by 2x2 tiles (four features, each with its own history), against the full run.
+//   history-- one feature roaming the four tiles, reset at each move, then roaming without reset.
+// The frame's inputs are copied on the game's list; four frames later everything runs on a direct queue of ours,
+// waited for (one hitch), and the outputs are written to dlssnr-tileprobe\ as .npy beside a summary.
+// A .npy file, as the edit cache's dump writes them.
+bool TileNpy(const std::filesystem::path& path, const char* descr, unsigned int height, unsigned int width,
+             unsigned int channels, const unsigned char* data, size_t bytesPerRow, size_t rowPitch)
+{
+    std::ofstream f(path, std::ios::binary);
+
+    if (!f)
+        return false;
+
+    char dict[256];
+    snprintf(dict, sizeof(dict), "{'descr': '%s', 'fortran_order': False, 'shape': (%u, %u, %u), }", descr, height,
+             width, channels);
+    std::string header(dict);
+    const size_t total = 10 + header.size() + 1;
+    header.append((64 - (total % 64)) % 64, ' ');
+    header.push_back('\n');
+    const unsigned char magic[8] = { 0x93, 'N', 'U', 'M', 'P', 'Y', 1, 0 };
+    f.write((const char*) magic, 8);
+    const uint16_t len = (uint16_t) header.size();
+    f.write((const char*) &len, 2);
+    f.write(header.data(), header.size());
+
+    for (unsigned int y = 0; y < height; ++y)
+        f.write((const char*) data + y * rowPitch, bytesPerRow);
+
+    return (bool) f;
+}
+
+namespace TileProbe
+{
+int phase = 0; // 0 idle, 1 inputs copied
+unsigned long long snapFrame = 0;
+ID3D12Resource* color = nullptr;
+ID3D12Resource* depth = nullptr;
+ID3D12Resource* motion = nullptr;
+DXGI_FORMAT format = DXGI_FORMAT_UNKNOWN;
+unsigned int w = 0, h = 0, gw = 0, gh = 0;
+float mvx = 1.0f, mvy = 1.0f;
+} // namespace TileProbe
+
+void RunTileProbe(ID3D12Device* device, const Config& cfg);
+
+void TileProbeTick(ID3D12GraphicsCommandList* cmdList, ID3D12Device* device, const Config& cfg,
+                   ID3D12Resource* modelInput, ID3D12Resource* depthIn, ID3D12Resource* motionIn, DXGI_FORMAT format,
+                   unsigned int w, unsigned int h, unsigned int gw, unsigned int gh, float mvx, float mvy)
+{
+    using namespace TileProbe;
+
+    if (phase == 1 && g_frames >= snapFrame + 4)
+    {
+        phase = 0;
+        RunTileProbe(device, cfg);
+        return;
+    }
+
+    if (!g_tileProbeWanted || phase != 0)
+        return;
+
+    g_tileProbeWanted = false;
+
+    if (g_nr.evaluateRect == nullptr)
+    {
+        LOG_ERROR("DLSS-NR tile probe: this forwarder has no dlssnr_call_evaluate_rect");
+        return;
+    }
+
+    if (!AsyncSnapshot(cmdList, device, modelInput, color) || !AsyncSnapshot(cmdList, device, depthIn, depth) ||
+        !AsyncSnapshot(cmdList, device, motionIn, motion))
+    {
+        LOG_ERROR("DLSS-NR tile probe: could not copy the inputs");
+        return;
+    }
+
+    TileProbe::format = format;
+    TileProbe::w = w & ~3u;
+    TileProbe::h = h & ~3u;
+    TileProbe::gw = gw;
+    TileProbe::gh = gh;
+    TileProbe::mvx = mvx;
+    TileProbe::mvy = mvy;
+    snapFrame = g_frames;
+    phase = 1;
+    LOG_INFO("DLSS-NR tile probe: inputs copied ({}x{}, guides {}x{}, format {}), running in 4 frames", w, h, gw, gh,
+             (int) format);
+}
+
+void RunTileProbe(ID3D12Device* device, const Config& cfg)
+{
+    using namespace TileProbe;
+
+    ID3D12CommandQueue* queue = nullptr;
+    ID3D12CommandAllocator* alloc = nullptr;
+    ID3D12GraphicsCommandList* list = nullptr;
+    ID3D12Fence* fence = nullptr;
+    ID3D12QueryHeap* stamps = nullptr;
+    ID3D12Resource* stampsBack = nullptr;
+    HANDLE done = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    UINT64 fenceValue = 0;
+
+    // The outputs: 0 the full run, 1 the 2x2 tiles with their own features, 2 one feature roaming with resets,
+    // 3 one feature roaming without, 4 a second full run on a feature of its own (the noise floor), 5-8 the
+    // overlapping tiles, each in a frame of its own (composited by the analysis); then the input.
+    constexpr int kOutputs = 9;
+    constexpr unsigned int kOverlap = 64;
+    ID3D12Resource* outputs[kOutputs] = {};
+    ID3D12Resource* readback[kOutputs + 1] = {};
+    D3D12_PLACED_SUBRESOURCE_FOOTPRINT footprint {};
+    UINT64 readbackBytes = 0;
+
+    // Features: 0 full, 1-3 the single tiles (6%, 25%, 56%), 4-7 the 2x2 tiles, 8 the roaming one, 9 the second
+    // full, 10 the overlapping tile.
+    constexpr int kFeatures = 11;
+    void* features[kFeatures] = {};
+    unsigned int fw[kFeatures] = {}, fh[kFeatures] = {};
+
+    auto cleanup = [&]()
+    {
+        for (void*& f : features)
+        {
+            if (f != nullptr && g_nr.release != nullptr)
+                g_nr.release(f);
+            f = nullptr;
+        }
+
+        for (ID3D12Resource* r : outputs)
+            if (r != nullptr)
+                r->Release();
+
+        for (ID3D12Resource* r : readback)
+            if (r != nullptr)
+                r->Release();
+
+        for (IUnknown* u : std::initializer_list<IUnknown*> { stampsBack, stamps, list, alloc, fence, queue })
+            if (u != nullptr)
+                u->Release();
+
+        if (done != nullptr)
+            CloseHandle(done);
+    };
+
+    auto submit = [&](const char* what) -> bool
+    {
+        if (FAILED(list->Close()))
+        {
+            LOG_ERROR("DLSS-NR tile probe: {}: the list would not close", what);
+            return false;
+        }
+
+        ID3D12CommandList* lists[] = { list };
+        queue->ExecuteCommandLists(1, lists);
+        queue->Signal(fence, ++fenceValue);
+        fence->SetEventOnCompletion(fenceValue, done);
+
+        if (WaitForSingleObject(done, 10000) != WAIT_OBJECT_0 || FAILED(device->GetDeviceRemovedReason()))
+        {
+            LOG_ERROR("DLSS-NR tile probe: {}: the GPU did not finish (removed 0x{:X})", what,
+                      (unsigned int) device->GetDeviceRemovedReason());
+            return false;
+        }
+
+        return SUCCEEDED(alloc->Reset()) && SUCCEEDED(list->Reset(alloc, nullptr));
+    };
+
+    D3D12_COMMAND_QUEUE_DESC qd {};
+    qd.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+
+    if (FAILED(device->CreateCommandQueue(&qd, IID_PPV_ARGS(&queue))) ||
+        FAILED(device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&alloc))) ||
+        FAILED(device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, alloc, nullptr, IID_PPV_ARGS(&list))) ||
+        FAILED(device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))))
+    {
+        LOG_ERROR("DLSS-NR tile probe: no queue, list or fence");
+        cleanup();
+        return;
+    }
+
+    constexpr UINT kStamps = 512;
+    D3D12_QUERY_HEAP_DESC hd {};
+    hd.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+    hd.Count = kStamps;
+    device->CreateQueryHeap(&hd, IID_PPV_ARGS(&stamps));
+
+    auto makeBuffer = [&](UINT64 bytes) -> ID3D12Resource*
+    {
+        ID3D12Resource* b = nullptr;
+        D3D12_HEAP_PROPERTIES rb {};
+        rb.Type = D3D12_HEAP_TYPE_READBACK;
+        D3D12_RESOURCE_DESC bd {};
+        bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        bd.Width = bytes;
+        bd.Height = 1;
+        bd.DepthOrArraySize = 1;
+        bd.MipLevels = 1;
+        bd.SampleDesc.Count = 1;
+        bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        device->CreateCommittedResource(&rb, D3D12_HEAP_FLAG_NONE, &bd, D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                        IID_PPV_ARGS(&b));
+        return b;
+    };
+
+    stampsBack = makeBuffer(kStamps * sizeof(UINT64));
+
+    for (ID3D12Resource*& o : outputs)
+        o = CreateScratch(device, format, w, h); // UNORDERED_ACCESS
+
+    auto snippet = Util::FindFilePath(g_dllDir, "nvngx_dlssnr.dll");
+
+    if (!snippet.has_value())
+        snippet = Util::FindFilePath(Util::ExePath().remove_filename(), "nvngx_dlssnr.dll");
+
+    if (stamps == nullptr || stampsBack == nullptr || outputs[kOutputs - 1] == nullptr || !snippet.has_value())
+    {
+        LOG_ERROR("DLSS-NR tile probe: no outputs, timestamps or runtime");
+        cleanup();
+        return;
+    }
+
+    // Feature sizes. Single tiles centred; the 2x2 tiles cover the frame exactly.
+    const float single[3] = { 0.25f, 0.5f, 0.75f };
+    fw[0] = w;
+    fh[0] = h;
+
+    for (int i = 0; i < 3; ++i)
+    {
+        fw[1 + i] = ((unsigned int) (w * single[i])) & ~1u;
+        fh[1 + i] = ((unsigned int) (h * single[i])) & ~1u;
+    }
+
+    for (int i = 4; i < 9; ++i)
+    {
+        fw[i] = w / 2;
+        fh[i] = h / 2;
+    }
+
+    fw[9] = w;
+    fh[9] = h;
+    fw[10] = w / 2 + kOverlap;
+    fh[10] = h / 2 + kOverlap;
+
+    // Built on one list and first evaluated on the next: building and evaluating together is the known hang.
+    SetExtras(cfg, nullptr, nullptr, 0, 0, 0, 0);
+
+    for (int i = 0; i < kFeatures; ++i)
+    {
+        features[i] = g_nr.create(snippet->wstring().c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(),
+                                  device, list, g_nr.capabilityParams, fw[i], fh[i],
+                                  (int) cfg.DlssNrPreset.value_or_default(), cfg.DlssNrIntensity.value_or_default(),
+                                  (int) EffStyle(cfg), cfg.DlssNrLocalStructure.value_or_default(),
+                                  cfg.DlssNrLocalTone.value_or_default(), cfg.DlssNrSkinStructure.value_or_default(),
+                                  cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, 1);
+
+        if (features[i] == nullptr)
+        {
+            LOG_ERROR("DLSS-NR tile probe: feature {} ({}x{}) could not be built", i, fw[i], fh[i]);
+            list->Close();
+            cleanup();
+            return;
+        }
+    }
+
+    if (!submit("building"))
+    {
+        cleanup();
+        return;
+    }
+
+    // The evaluations. Each is stamped; `job` records which feature and which iteration each stamp pair is.
+    struct Job
+    {
+        int feature;
+        int iteration;
+    };
+    std::vector<Job> jobs;
+    constexpr int kIterations = 12;
+
+    auto eval = [&](int f, ID3D12Resource* out, unsigned int bx, unsigned int by, unsigned int obx, unsigned int oby,
+                    bool reset, int iteration) -> int
+    {
+        const unsigned int gbx = (unsigned int) ((unsigned long long) bx * gw / w);
+        const unsigned int gby = (unsigned int) ((unsigned long long) by * gh / h);
+        const unsigned int gfw = (unsigned int) ((unsigned long long) fw[f] * gw / w);
+        const unsigned int gfh = (unsigned int) ((unsigned long long) fh[f] * gh / h);
+        const UINT s = (UINT) jobs.size() * 2;
+        const bool stamped = s + 1 < kStamps;
+
+        if (stamped)
+            list->EndQuery(stamps, D3D12_QUERY_TYPE_TIMESTAMP, s);
+
+        SetExtras(cfg, nullptr, nullptr, 0, 0, 0, 0);
+        const int r = g_nr.evaluateRect(
+            list, features[f], g_nr.capabilityParams, color, depth, motion, out, fw[f], fh[f], gfw, gfh,
+            g_nr.guideDepthInverted ? 1 : 0, reset ? 1 : 0, cfg.DlssNrIntensity.value_or_default(),
+            (int) EffStyle(cfg), cfg.DlssNrLocalStructure.value_or_default(), cfg.DlssNrLocalTone.value_or_default(),
+            cfg.DlssNrSkinStructure.value_or_default(), cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, mvx, mvy, bx,
+            by, obx, oby, gbx, gby);
+
+        if (stamped)
+        {
+            list->EndQuery(stamps, D3D12_QUERY_TYPE_TIMESTAMP, s + 1);
+            jobs.push_back({ f, iteration });
+        }
+
+        return r;
+    };
+
+    int firstError = 1;
+    auto note = [&](int r)
+    {
+        if (r != NVSDK_NGX_Result_Success && firstError == 1)
+            firstError = r;
+    };
+
+    // Cost: the full frame and the three single tiles, each run kIterations times on the same frame.
+    for (int it = 0; it < kIterations; ++it)
+        note(eval(0, outputs[0], 0, 0, 0, 0, it == 0, it));
+
+    ID3D12Resource* scratch = outputs[3]; // overwritten later by the roaming run
+    for (int i = 1; i <= 3; ++i)
+        for (int it = 0; it < kIterations; ++it)
+        {
+            const unsigned int bx = (w - fw[i]) / 2, by = (h - fh[i]) / 2;
+            note(eval(i, scratch, bx, by, bx, by, it == 0, 10 + it));
+        }
+
+    // Seams: 2x2 tiles, each its own feature and history, written into one frame.
+    const unsigned int tx[4] = { 0, w / 2, 0, w / 2 }, ty[4] = { 0, 0, h / 2, h / 2 };
+
+    for (int it = 0; it < kIterations; ++it)
+        for (int t = 0; t < 4; ++t)
+            note(eval(4 + t, outputs[1], tx[t], ty[t], tx[t], ty[t], it == 0, 20 + it));
+
+    // History: one feature roaming the four tiles -- reset at every move (output 2), then never (output 3).
+    for (int it = 0; it < kIterations; ++it)
+        for (int t = 0; t < 4; ++t)
+            note(eval(8, outputs[2], tx[t], ty[t], tx[t], ty[t], true, 30 + it));
+
+    for (int it = 0; it < kIterations; ++it)
+        for (int t = 0; t < 4; ++t)
+            note(eval(8, outputs[3], tx[t], ty[t], tx[t], ty[t], it == 0 && t == 0, 40 + it));
+
+    // Noise floor: the full frame again, on a feature of its own.
+    for (int it = 0; it < kIterations; ++it)
+        note(eval(9, outputs[4], 0, 0, 0, 0, it == 0, 50 + it));
+
+    // Overlapping tiles, kOverlap px into each other, each written into a frame of its own.
+    const unsigned int ox[4] = { 0, w / 2 - kOverlap, 0, w / 2 - kOverlap };
+    const unsigned int oy[4] = { 0, 0, h / 2 - kOverlap, h / 2 - kOverlap };
+
+    for (int t = 0; t < 4; ++t)
+        for (int it = 0; it < 4; ++it)
+            note(eval(10, outputs[5 + t], ox[t], oy[t], ox[t], oy[t], it == 0, 60 + it));
+
+    list->ResolveQueryData(stamps, D3D12_QUERY_TYPE_TIMESTAMP, 0, (UINT) jobs.size() * 2, stampsBack, 0);
+
+    // Read the outputs and the input back.
+    D3D12_RESOURCE_DESC od = outputs[0]->GetDesc();
+    device->GetCopyableFootprints(&od, 0, 1, 0, &footprint, nullptr, nullptr, &readbackBytes);
+    ID3D12Resource* sources[kOutputs + 1] = { outputs[0], outputs[1], outputs[2], outputs[3], outputs[4],
+                                              outputs[5], outputs[6], outputs[7], outputs[8], color };
+
+    for (int i = 0; i < kOutputs + 1; ++i)
+    {
+        readback[i] = makeBuffer(readbackBytes);
+
+        if (readback[i] == nullptr)
+            continue;
+
+        const D3D12_RESOURCE_STATES from =
+            i < kOutputs ? D3D12_RESOURCE_STATE_UNORDERED_ACCESS : D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE;
+        Barrier(list, sources[i], from, D3D12_RESOURCE_STATE_COPY_SOURCE);
+        D3D12_TEXTURE_COPY_LOCATION dst {};
+        dst.pResource = readback[i];
+        dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        dst.PlacedFootprint = footprint;
+        D3D12_TEXTURE_COPY_LOCATION src {};
+        src.pResource = sources[i];
+        src.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        src.SubresourceIndex = 0;
+        // The input copy is the size the frame was; only the probed w x h is read.
+        D3D12_BOX box { 0, 0, 0, w, h, 1 };
+        list->CopyTextureRegion(&dst, 0, 0, 0, &src, &box);
+        Barrier(list, sources[i], D3D12_RESOURCE_STATE_COPY_SOURCE, from);
+    }
+
+    if (!submit("evaluating"))
+    {
+        cleanup();
+        return;
+    }
+
+    // Timings.
+    UINT64 freq = 0;
+    queue->GetTimestampFrequency(&freq);
+    std::map<int, std::vector<double>> perGroup; // iteration / 10 * 10 + feature-kind
+    std::map<int, std::vector<double>> perFeature;
+    void* mapped = nullptr;
+
+    if (freq != 0 && SUCCEEDED(stampsBack->Map(0, nullptr, &mapped)) && mapped != nullptr)
+    {
+        const UINT64* t = (const UINT64*) mapped;
+
+        for (size_t j = 0; j < jobs.size(); ++j)
+        {
+            const double ms = (double) (t[2 * j + 1] - t[2 * j]) * 1000.0 / (double) freq;
+
+            if (jobs[j].iteration % 10 != 0) // the first run of each carries the reset
+                perFeature[jobs[j].iteration / 10 * 100 + jobs[j].feature].push_back(ms);
+        }
+
+        D3D12_RANGE nothing { 0, 0 };
+        stampsBack->Unmap(0, &nothing);
+    }
+
+    // The minimum is the model's own cost: our queue shares the GPU with the game running beside it, and that
+    // only ever adds. The median is kept to show how much it added.
+    auto median = [](std::vector<double> v)
+    {
+        if (v.empty())
+            return -1.0;
+        std::sort(v.begin(), v.end());
+        return v[0];
+    };
+    auto middle = [](std::vector<double> v)
+    {
+        if (v.empty())
+            return -1.0;
+        std::sort(v.begin(), v.end());
+        return v[v.size() / 2];
+    };
+
+    std::string summary = std::format("frame {}x{}, guides {}x{}, format {}, first error 0x{:X}\n", w, h, gw, gh,
+                                      (int) format, (unsigned int) firstError);
+    const double full = median(perFeature[0]);
+    summary += std::format("(minimum of {} runs; medians shown in brackets, inflated by the game beside us)\n",
+                           kIterations - 1);
+    summary += std::format("full {}x{}: {:.3f} ms [{:.3f}]\n", w, h, full, middle(perFeature[0]));
+    summary += std::format("full again, own feature: {:.3f} ms [{:.3f}]\n", median(perFeature[500 + 9]),
+                           middle(perFeature[500 + 9]));
+    summary += std::format("overlapping tile {}x{}: {:.3f} ms\n", fw[10], fh[10], median(perFeature[600 + 10]));
+
+    for (int i = 1; i <= 3; ++i)
+    {
+        const double ms = median(perFeature[100 + i]);
+        summary += std::format("tile {}x{} ({:.1f}% of the pixels): {:.3f} ms ({:.1f}% of full)\n", fw[i], fh[i],
+                               100.0 * fw[i] * fh[i] / (w * h), ms, full > 0 ? 100.0 * ms / full : 0.0);
+    }
+
+    double tiles = 0.0;
+    for (int t = 0; t < 4; ++t)
+        tiles += median(perFeature[200 + 4 + t]);
+    summary += std::format("2x2 tiles, own features: {:.3f} ms for all four\n", tiles);
+    summary += std::format("roaming feature with reset: {:.3f} ms per tile, without: {:.3f} ms per tile\n",
+                           median(perFeature[300 + 8]), median(perFeature[400 + 8]));
+
+    // Files.
+    const auto dir = Util::DllPath().remove_filename() / "dlssnr-tileprobe";
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    static const char* names[kOutputs + 1] = { "full", "tiles", "roam_reset", "roam_keep", "full_b",
+                                               "ov_tl", "ov_tr", "ov_bl", "ov_br", "input" };
+    const bool half4 = format == DXGI_FORMAT_R16G16B16A16_FLOAT;
+    const bool float4 = format == DXGI_FORMAT_R32G32B32A32_FLOAT;
+    const unsigned int bpp = half4 ? 8 : (float4 ? 16 : 4);
+
+    for (int i = 0; i < kOutputs + 1; ++i)
+    {
+        void* m = nullptr;
+
+        if (readback[i] == nullptr || FAILED(readback[i]->Map(0, nullptr, &m)) || m == nullptr)
+            continue;
+
+        TileNpy(dir / (std::string(names[i]) + ".npy"), half4 ? "<f2" : (float4 ? "<f4" : "<u4"), h, w,
+                 half4 || float4 ? 4 : 1, (const unsigned char*) m + footprint.Offset, (size_t) w * bpp,
+                 footprint.Footprint.RowPitch);
+        D3D12_RANGE nothing { 0, 0 };
+        readback[i]->Unmap(0, &nothing);
+    }
+
+    std::ofstream(dir / "summary.txt") << summary;
+    LOG_INFO("DLSS-NR tile probe:\n{}", summary);
+    cleanup();
+}
+
 } // namespace
 
 // ---------------------------------------------------------------------------------------------
@@ -2739,7 +3310,39 @@ bool DlssNr_Dx12::DispatchPass(ID3D12GraphicsCommandList* InCmdList, const DlssN
     };
 
     for (uint32_t i = 0; i < kSrvCount; ++i)
-        CreateShaderResourceView(_device, srvs[i], currentHeap.GetSrvCPU(i));
+    {
+        // A depth texture (the region mask reads one) is viewed in its readable format. The generic translation
+        // turns R32_FLOAT_X8X24 into D32_FLOAT_S8X24_UINT -- a depth-stencil format, invalid for a shader view --
+        // and the device was removed the moment the mask came on in The Witcher 3 (depth with stencil).
+        DXGI_FORMAT depthView = DXGI_FORMAT_UNKNOWN;
+
+        switch (srvs[i]->GetDesc().Format)
+        {
+        case DXGI_FORMAT_R32G8X24_TYPELESS:
+        case DXGI_FORMAT_D32_FLOAT_S8X24_UINT:
+        case DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS:
+            depthView = DXGI_FORMAT_R32_FLOAT_X8X24_TYPELESS;
+            break;
+        case DXGI_FORMAT_R24G8_TYPELESS:
+        case DXGI_FORMAT_D24_UNORM_S8_UINT:
+        case DXGI_FORMAT_R24_UNORM_X8_TYPELESS:
+            depthView = DXGI_FORMAT_R24_UNORM_X8_TYPELESS;
+            break;
+        case DXGI_FORMAT_D32_FLOAT:
+            depthView = DXGI_FORMAT_R32_FLOAT;
+            break;
+        case DXGI_FORMAT_D16_UNORM:
+            depthView = DXGI_FORMAT_R16_UNORM;
+            break;
+        default:
+            break;
+        }
+
+        if (depthView != DXGI_FORMAT_UNKNOWN)
+            CreateShaderResourceView(_device, srvs[i], currentHeap.GetSrvCPU(i), depthView, false);
+        else
+            CreateShaderResourceView(_device, srvs[i], currentHeap.GetSrvCPU(i));
+    }
 
     ID3D12Resource* const uavs[kUavCount] = {
         OutTarget,
@@ -3209,6 +3812,22 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     ++g_frames;
     TickNrRetired();
 
+    // RequestSettleReset: the histories go now that the switch has landed.
+    for (unsigned long long& at : g_settleResetAt)
+    {
+        if (at != 0 && g_frames >= at)
+        {
+            at = 0;
+            g_nr.reset = true;
+
+            if (g_cache != nullptr)
+                g_cache->Invalidate();
+
+            g_upscalerResetWanted = true;
+            LOG_INFO("DLSS-NR: settings settled, every temporal history flushed (cache, model, upscaler)");
+        }
+    }
+
     if (g_captureWriteAtFrame != 0 && g_frames >= g_captureWriteAtFrame)
     {
         g_captureWriteAtFrame = 0;
@@ -3277,7 +3896,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // Gated on the source the menu actually writes. This read the retired WhitePointFromExposure
     // flag while consumption keyed on WhitePointSource == 1, so choosing "the game's own exposure"
     // never dispatched the meter and the white point silently fell back to the slider.
-    const bool exposureSettingOn = cfg.DlssNrWhitePointSource.value_or_default() == 1;
+    const bool exposureSettingOn = EffectiveWhitePointSource(cfg) == 1;
 
     // Nothing held from before the option was switched off may survive switching it back on. See
     // InvalidateExposureMeter for what froze and why it read as a colour cast.
@@ -3314,7 +3933,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
     // The automatic white point measures the frame as the upscaler wrote it, every frame, on the full
     // 64 x 64 grid. Exclusive with the exposure courier above: they share the meter and its readback.
-    if (g_nr.meter != nullptr && cfg.DlssNrWhitePointSource.value_or_default() == 3 && !wantExposure)
+    if (g_nr.meter != nullptr && EffectiveWhitePointSource(cfg) == 3 && !wantExposure)
     {
         DlssNrConstants meterParams {};
         meterParams.Mode = DlssNrMode_Meter;
@@ -3350,8 +3969,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     uint32_t useGameExposure = 0;
     float exposurePreMul = 0.0f;
 
-    if (cfg.DlssNrWhitePointSource.value_or_default() == 1 && frame.ExposureTexture != nullptr &&
-        !g_nr.exposureUnreliable)
+    if (EffectiveWhitePointSource(cfg) == 1 && frame.ExposureTexture != nullptr && !g_nr.exposureUnreliable)
     {
         exposureTex = (ID3D12Resource*) frame.ExposureTexture;
         useGameExposure = 1;
@@ -3568,11 +4186,19 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // the whole edit, and a character walking out of the near band gets it back at once). Off -- the default --
     // reaches none of this. It stands aside for the instruments, as the cache does: side by side (whose layout is
     // not the frame's), a debug view, a capture.
-    auto regionMask = [&](ID3D12Resource* original, D3D12_RESOURCE_STATES originalState, ID3D12Resource* depthReadable)
+    auto regionMask = [&](ID3D12Resource* original, D3D12_RESOURCE_STATES originalState, ID3D12Resource* depthReadable,
+                          ID3D12Resource* motionReadable)
     {
-        const uint32_t mode = cfg.DlssNrRegionMask.value_or_default();
+        uint32_t mode = cfg.DlssNrRegionMask.value_or_default();
 
-        if (mode == 0 || mode > 2 || original == nullptr || depthReadable == nullptr ||
+        if (mode > 2)
+            mode = 0;
+
+        // Steady in motion rides the same pass; it needs the motion vectors.
+        const float motionFade = motionReadable != nullptr ? std::clamp(cfg.DlssNrMotionFade.value_or_default(), 0.0f, 1.0f)
+                                                           : 0.0f;
+
+        if ((mode == 0 && motionFade <= 0.0f) || original == nullptr || depthReadable == nullptr ||
             cfg.DlssNrCompare.value_or_default() == 1 || cfg.DlssNrDebugView.value_or_default() != 0 ||
             g_capture.isActive())
             return;
@@ -3622,7 +4248,15 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         p.MaskDepthInverted = g_nr.guideDepthInverted ? 1u : 0u;
         p.MaskDepthWidth = guideWidth;
         p.MaskDepthHeight = guideHeight;
-        DispatchPass(cmdList, p, g_nr.maskEdited, depthReadable, original, nullptr, nullptr, target, nullptr);
+        p.MotionFade = motionFade;
+        p.MotionFadeStart = std::max(cfg.DlssNrMotionFadeStart.value_or_default(), 0.0f);
+        p.MotionFadeEnd = std::max(cfg.DlssNrMotionFadeEnd.value_or_default(), p.MotionFadeStart + 0.5f);
+        p.MvScaleX = g_nr.guideMvScaleX;
+        p.MvScaleY = g_nr.guideMvScaleY;
+        p.GuideWidth = guideWidth;
+        p.GuideHeight = guideHeight;
+        DispatchPass(cmdList, p, g_nr.maskEdited, depthReadable, original, motionFade > 0.0f ? motionReadable : nullptr,
+                     nullptr, target, nullptr);
 
         Barrier(cmdList, original, read, originalState);
         Barrier(cmdList, g_nr.maskEdited, read, rest);
@@ -3683,7 +4317,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
                 Barrier(cmdList, g_async.composed, read, rest);
 
                 if (landed)
-                    regionMask(g_async.keep, rest, depthIn);
+                    regionMask(g_async.keep, rest, depthIn, motionIn);
             }
 
             AsyncRelease(cmdList);
@@ -3697,7 +4331,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             ID3D12Resource* keep = asyncOn ? g_async.keep : g_nr.hdrCopy;
 
             if (g_cache->RunCached(cmdList, device, target, keep, cacheInputs(depthIn, motionIn)))
-                regionMask(keep, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, depthIn);
+                regionMask(keep, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, depthIn, motionIn);
         }
 
         g_cache->EndFrame(cmdList);
@@ -3893,7 +4527,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         // The motion since the model's last run was just taken for it; this frame's is not chained again.
         if (cacheActive && g_async.keep != nullptr &&
             g_cache->RunCached(cmdList, device, target, g_async.keep, cacheIn, false))
-            regionMask(g_async.keep, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, depthIn);
+            regionMask(g_async.keep, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, depthIn, motionIn);
 
         if (cacheActive)
             g_cache->EndFrame(cmdList);
@@ -3956,11 +4590,21 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
     // main feature; until it is ready the frame simply runs the passes that are.
     const unsigned int passesWanted = EffPasses(cfg);
 
-    for (unsigned int p = passesWanted; p < 4; ++p)
+    for (unsigned int p = passesWanted; p < kMaxPasses; ++p)
     {
         if (p > 0 && g_nr.passFeature[p] != nullptr)
         {
             LOG_INFO("DLSS-NR: pass {} released", p + 1);
+            ParkNrFeature(g_nr.passFeature[p]);
+        }
+    }
+
+    // A pass whose style was changed goes, and is built again below with the new one.
+    for (unsigned int p = 1; p < passesWanted; ++p)
+    {
+        if (g_nr.passFeature[p] != nullptr && g_nr.passStyle[p] != EffPassStyle(cfg, p + 1))
+        {
+            LOG_INFO("DLSS-NR: pass {} style changed, rebuilt", p + 1);
             ParkNrFeature(g_nr.passFeature[p]);
         }
     }
@@ -3982,19 +4626,23 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
 
         if (snip.has_value())
         {
-            // The same tuning as the first pass, so a later pass refines the same look rather than
-            // starting another one (RenoDX's default: passes 2+ follow pass 1).
+            // The first pass's tuning, and the pass's own style: inherited by default, so a later pass refines
+            // the same look (RenoDX's default), or chosen per pass to stack looks (Natural + Default + Cinematic).
+            const uint32_t style = EffPassStyle(cfg, p + 1);
             g_nr.passFeature[p] =
                 g_nr.create(snip->wstring().c_str(), State::Instance().NVNGX_ApplicationDataPath.c_str(), device,
                             cmdList, g_nr.capabilityParams, workWidth, workHeight,
                             (int) cfg.DlssNrPreset.value_or_default(), cfg.DlssNrIntensity.value_or_default(),
-                            (int) EffStyle(cfg), cfg.DlssNrLocalStructure.value_or_default(),
+                            (int) style, cfg.DlssNrLocalStructure.value_or_default(),
                             cfg.DlssNrLocalTone.value_or_default(), cfg.DlssNrSkinStructure.value_or_default(),
                             cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, 1);
             g_nr.passReset[p] = true;
+            g_nr.passStyle[p] = style;
 
-            LOG_INFO("DLSS-NR: pass {} {} at {}x{}, first evaluated next frame", p + 1,
-                     g_nr.passFeature[p] != nullptr ? "built" : "FAILED to build", workWidth, workHeight);
+            static const char* names[] = { "Default", "Natural", "Cinematic" };
+            LOG_INFO("DLSS-NR: pass {} {} at {}x{} ({}), first evaluated next frame", p + 1,
+                     g_nr.passFeature[p] != nullptr ? "built" : "FAILED to build", workWidth, workHeight,
+                     names[std::min(style, 2u)]);
         }
 
         // One build per frame, and never evaluated on the frame it was built.
@@ -4008,6 +4656,9 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         if (g_nr.passIn == nullptr)
             passesReady = 1;
     }
+
+    TileProbeTick(cmdList, device, cfg, modelInput, depthIn, motionIn, desc.Format, workWidth, workHeight, guideWidth,
+                  guideHeight, g_nr.guideMvScaleX * mvToWork, g_nr.guideMvScaleY * mvToWork);
 
     int result = g_nr.evaluate(
         cmdList, g_nr.feature, g_nr.capabilityParams, modelInput, depthIn, motionIn, g_nr.output,
@@ -4033,7 +4684,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
             cmdList, g_nr.passFeature[p], g_nr.capabilityParams, g_nr.passIn, depthIn, motionIn, g_nr.output,
             workWidth, workHeight, guideWidth, guideHeight, g_nr.guideDepthInverted ? 1 : 0,
             (g_nr.reset || g_nr.passReset[p]) ? 1 : 0, cfg.DlssNrIntensity.value_or_default(),
-            (int) EffStyle(cfg), cfg.DlssNrLocalStructure.value_or_default(),
+            (int) g_nr.passStyle[p], cfg.DlssNrLocalStructure.value_or_default(),
             cfg.DlssNrLocalTone.value_or_default(), cfg.DlssNrSkinStructure.value_or_default(),
             cfg.DlssNrAutoMask.value_or_default() ? 1 : 0, g_nr.guideMvScaleX * mvToWork,
             g_nr.guideMvScaleY * mvToWork);
@@ -4234,7 +4885,7 @@ void DlssNr_Dx12::Dispatch(ID3D12GraphicsCommandList* cmdList, ID3D12Resource* c
         if (cacheActive)
             g_cache->CaptureRefresh(cmdList, device, target, g_nr.hdrCopy, cacheIn);
 
-        regionMask(g_nr.hdrCopy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, depthIn);
+        regionMask(g_nr.hdrCopy, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE, depthIn, motionIn);
 
         // On-demand capture works in this path too: the staging copy still holds the frame as the
         // upscaler produced it, and the edited frame is the output itself. The write happens a few
@@ -5089,7 +5740,7 @@ void StartBenchmark(bool includeOff, bool includeOtherPlacement, bool captures, 
     static const char* kStyleNames[] = { "Default", "Natural", "Cin&eacute;matique" };
     g_bench.settings = std::format(
         "Style {} &middot; {} passe(s) &middot; mod&egrave;le {:.0f}%{} &middot; {} &middot; cache {} &middot; point blanc {}",
-        kStyleNames[std::min(cfg.DlssNrStyle.value_or_default(), 2u)], std::clamp(cfg.DlssNrPasses.value_or_default(), 1u, 3u),
+        kStyleNames[std::min(cfg.DlssNrStyle.value_or_default(), 2u)], std::clamp(cfg.DlssNrPasses.value_or_default(), 1u, (unsigned int) kMaxPasses),
         cfg.DlssNrWorkingScale.value_or_default() * 100.0f,
         cfg.DlssNrJbuUpsample.value_or_default() ? " + agrandissement guid&eacute;" : "",
         cfg.DlssNrPreSr.value_or_default() ? "avant l'upscaler (pre-SR)" : "apr&egrave;s l'upscaler",
@@ -5143,6 +5794,19 @@ BenchmarkStatus GetBenchmarkStatus()
 }
 
 CompareMode GetCompareMode() { return (CompareMode) g_userCompare; }
+
+void RequestSettleReset()
+{
+    g_settleResetAt[0] = g_frames + 12;
+    g_settleResetAt[1] = g_frames + 60;
+}
+
+bool ConsumeUpscalerReset()
+{
+    const bool wanted = g_upscalerResetWanted;
+    g_upscalerResetWanted = false;
+    return wanted;
+}
 
 void SetCompareMode(CompareMode m)
 {
@@ -5787,6 +6451,8 @@ const char* FailureReason() { return g_nr.failed ? g_nr.reason : ""; }
 ExposureStatus GameExposureStatus()
 {
     ExposureStatus s {};
+    s.autoFollowing = Config::Instance()->DlssNrWhitePointSource.value_or_default() == 3 &&
+                      EffectiveWhitePointSource(*Config::Instance()) == 1;
     s.seenFrames = g_nr.exposureFrames;
     s.offeredNow = g_nr.exposureOfferedNow;
     s.everOffered = g_nr.exposureEverOffered;

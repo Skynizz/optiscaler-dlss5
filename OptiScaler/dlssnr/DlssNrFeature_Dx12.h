@@ -56,6 +56,16 @@ enum class CompareMode : int
 
 CompareMode GetCompareMode();
 void SetCompareMode(CompareMode mode);
+
+// A preset changes many things at once -- where the model runs, its size, the cache's switches -- and they land over
+// several frames (rebuilds, the first answer at the new size). A history that took a frame from the middle of that
+// can hold it: users saw a faint frozen picture over the game after the x8 preset until they clicked it again.
+// This flushes every temporal history once the switch has settled (12 and 60 frames on): the edit cache, the
+// model's own history, and the upscaler's (ConsumeUpscalerReset).
+void RequestSettleReset();
+
+// True once after a settle reset: the caller sets the upscaler's reset flag on this evaluation.
+bool ConsumeUpscalerReset();
 void CycleCompareMode();
 const char* CompareModeName(CompareMode mode);
 double SecondsSinceCompareSwitch();
@@ -151,6 +161,7 @@ struct ExposureStatus
     float exposure = 0.0f;               // last value read back, 0 if none
     float preExposure = 1.0f;
     bool unreliable = false;             // it swung too far to be an exposure, and is being ignored
+    bool autoFollowing = false;          // Automatic is following it (AutoFollowsGameExposure)
 };
 
 ExposureStatus GameExposureStatus();

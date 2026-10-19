@@ -212,6 +212,12 @@ struct alignas(256) DlssNrConstants
     uint32_t MaskDepthInverted;
     uint32_t MaskDepthWidth;
     uint32_t MaskDepthHeight;
+
+    // Steady in motion (mode 5 too): how much of the game's frame comes back where a pixel moves fast, between
+    // which speeds, in render pixels per frame (the motion vectors times MvScale, at GuideWidth x GuideHeight).
+    float MotionFade;
+    float MotionFadeStart;
+    float MotionFadeEnd;
 };
 
 class DlssNr_Common

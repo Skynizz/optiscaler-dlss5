@@ -44,6 +44,9 @@ cbuffer Params : register(b0)
     uint  gMaskDepthInverted;
     uint  gMaskDepthWidth; // the depth texture's valid region
     uint  gMaskDepthHeight;
+    float gMotionFade;     // steady in motion: how much of the game's frame comes back where a pixel moves fast
+    float gMotionFadeStart;// render pixels per frame where it starts
+    float gMotionFadeEnd;  // and where it is complete
 };
 
 // Bringing an impossible colour back into a possible one.
@@ -579,21 +582,47 @@ void CSMain(uint3 id : SV_DispatchThreadID)
     // The region mask: gSource the edited frame (a copy), gOriginal the untouched one, gModel the depth. The
     // weight is taken at the four depth texels around the pixel and blended, so the edge is not the depth
     // buffer's staircase when depth is at render resolution and the frame at display resolution.
+    //
+    // Steady in motion, in the same pass: where the pixel moves fast (its own motion vector, in render pixels per
+    // frame), the game's frame comes back too. The model's added detail does not follow thin moving geometry
+    // exactly -- grass tears on a fast turn -- and frame generation copies the tear into every frame it makes; at
+    // that speed the eye does not see the detail, it sees the tear.
     if (gMode == 5)
     {
-        const float2 p = uv * float2(gMaskDepthWidth, gMaskDepthHeight) - 0.5;
-        const int2 t0 = int2(floor(p));
-        const float2 f = p - floor(p);
-        const float n = lerp(lerp(MaskNear(t0), MaskNear(t0 + int2(1, 0)), f.x),
-                             lerp(MaskNear(t0 + int2(0, 1)), MaskNear(t0 + int2(1, 1)), f.x), f.y);
-        const float region = gMaskMode == 1 ? n : 1.0 - n;
+        float region = 0.0;
+
+        if (gMaskMode == 1 || gMaskMode == 2)
+        {
+            const float2 p = uv * float2(gMaskDepthWidth, gMaskDepthHeight) - 0.5;
+            const int2 t0 = int2(floor(p));
+            const float2 f = p - floor(p);
+            const float n = lerp(lerp(MaskNear(t0), MaskNear(t0 + int2(1, 0)), f.x),
+                                 lerp(MaskNear(t0 + int2(0, 1)), MaskNear(t0 + int2(1, 1)), f.x), f.y);
+            region = saturate((gMaskMode == 1 ? n : 1.0 - n) * gMaskStrength);
+        }
+
+        float moving = 0.0;
+
+        if (gMotionFade > 0.0)
+        {
+            const int2 mc = clamp(int2(uv * float2(gGuideWidth, gGuideHeight)), int2(0, 0),
+                                  int2((int) gGuideWidth, (int) gGuideHeight) - 1);
+            const float speed = length(gMotion.Load(int3(mc, 0)).xy * float2(gMvScaleX, gMvScaleY));
+            moving = saturate(gMotionFade) * smoothstep(gMotionFadeStart, max(gMotionFadeEnd, gMotionFadeStart + 0.5),
+                                                        speed);
+        }
+
+        const float back = 1.0 - (1.0 - region) * (1.0 - moving);
         const float4 edited = gSource.Load(int3(id.xy, 0));
         const float4 original = gOriginal.Load(int3(id.xy, 0));
-        float3 rgb = lerp(edited.rgb, original.rgb, saturate(region * gMaskStrength));
+        float3 rgb = lerp(edited.rgb, original.rgb, back);
 
-        // A multiply, so the tint reads the same on a linear or an encoded frame.
+        // A multiply, so the tint reads the same on a linear or an encoded frame: magenta the region, cyan motion.
         if (gMaskShow != 0)
+        {
             rgb *= lerp(float3(1.0, 1.0, 1.0), float3(1.0, 0.35, 1.0), region);
+            rgb *= lerp(float3(1.0, 1.0, 1.0), float3(0.35, 1.0, 1.0), moving);
+        }
 
         gTarget[id.xy] = float4(rgb, edited.a);
         return;

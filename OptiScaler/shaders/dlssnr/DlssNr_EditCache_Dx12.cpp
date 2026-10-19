@@ -662,11 +662,33 @@ bool DlssNrEditCache_Dx12::BeginFrame(const Config& cfg, ID3D12Device* device, u
 
     const char* why = nullptr;
 
+    // Steady in motion: past its end speed the edit is given back to the game's frame anyway, so the model's answer
+    // is barely seen -- it runs one frame in eight there, and at its usual cadence the moment the view slows. The
+    // speed is the frame's mean motion at this pass's size, each pixel counted up to 32 pixels (the counter's
+    // range): the mean never quite reaches 30, so it engages at 80% of the end speed and at most 24, and lets go
+    // a fifth lower, so it does not flicker on and off at the edge.
+    const float fastAt = std::clamp(cfg.DlssNrMotionFadeEnd.value_or_default() * 0.8f, 1.0f, 24.0f);
+    const bool fastFaded = cfg.DlssNrMotionFadeSkipModel.value_or_default() &&
+                           cfg.DlssNrMotionFade.value_or_default() >= 0.75f && _speed >= 0.0f &&
+                           _speed >= (_fastFaded ? fastAt * 0.8f : fastAt);
+    const auto pickInterval = [&]() {
+        const unsigned int n = bySpeed ? SpeedInterval(interval) : EffectiveInterval(interval, adaptive, threshold);
+        return fastFaded ? std::max(n, 8u) : n;
+    };
+
+    if (fastFaded != _fastFaded)
+    {
+        _fastFaded = fastFaded;
+        LOG_INFO("DLSS-NR edit cache: {} ({:.1f} px per frame)",
+                 fastFaded ? "fast turn, the model runs one frame in eight" : "the view slowed, the model's cadence is back",
+                 _speed);
+    }
+
     if (asyncBusy)
     {
         // CacheAsync: an answer is on its way, and nothing starts another run until it has landed. The cadence
         // is still followed, for the overlay and the speed regime.
-        _intervalNow = bySpeed ? SpeedInterval(interval) : EffectiveInterval(interval, adaptive, threshold);
+        _intervalNow = pickInterval();
     }
     else if (!_historyValid)
         why = "no history";
@@ -676,10 +698,12 @@ bool DlssNrEditCache_Dx12::BeginFrame(const Config& cfg, ID3D12Device* device, u
         why = "the game or the model reset";
     else if (_dumpWanted > 0 && !_dumpObserve)
         why = "measurement dump";
-    else if (_frame - _lastRefresh >=
-             (_intervalNow = bySpeed ? SpeedInterval(interval) : EffectiveInterval(interval, adaptive, threshold)))
-        why = _regime == 0 ? "interval (still: slower)" : _regime == 2 ? "interval (fast motion: faster)" : "interval";
-    else if (bySpeed && _frame - _lastRefresh >= _floorNow && _staleNow >= threshold)
+    else if (_frame - _lastRefresh >= (_intervalNow = pickInterval()))
+        why = fastFaded       ? "interval (fast turn, given back: slower)"
+              : _regime == 0 ? "interval (still: slower)"
+              : _regime == 2 ? "interval (fast motion: faster)"
+                             : "interval";
+    else if (bySpeed && !fastFaded && _frame - _lastRefresh >= _floorNow && _staleNow >= threshold)
         why = "too much of the edit rejected";
 
     // Keyframe crossfade step for this frame: the share of the remaining way to the model's latest answer,
