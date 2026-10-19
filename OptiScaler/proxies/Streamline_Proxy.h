@@ -401,7 +401,9 @@ class StreamlineProxy
         }
 
         _isD3D12Requested = true;
+        State::Instance().optiSlInitInProgress = true;
         auto initResult = StreamlineProxy::Init()(pref, sl::kSDKVersion);
+        State::Instance().optiSlInitInProgress = false;
 
         sl::AdapterInfo adapterInfo {};
         if (StreamlineProxy::IsFeatureSupported()(sl::kFeatureDLSS_G, adapterInfo) != sl::Result::eOk)
@@ -478,7 +480,9 @@ class StreamlineProxy
         pref.flags |= sl::PreferenceFlags::eUseManualHooking;
         pref.flags |= sl::PreferenceFlags::eUseFrameBasedResourceTagging;
 
+        State::Instance().optiSlInitInProgress = true;
         auto initResult = StreamlineProxy::Init()(pref, sl::kSDKVersion);
+        State::Instance().optiSlInitInProgress = false;
 
         if (initResult == sl::Result::eOk)
         {

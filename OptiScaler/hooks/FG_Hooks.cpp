@@ -1260,11 +1260,16 @@ HRESULT FGHooks::FGPresent(IDXGISwapChain* This, UINT SyncInterval, UINT Flags,
 
     if (willPresent && fgFeatureActive && state.activeFgOutput == FGOutput::DLSSG)
     {
+        // DLSS-G refuses to generate unless GetCurrentBackBufferIndex was called on the swapchain this frame
+        // (eDLSSGStatusFailGetCurrentBackBufferIndexNotCalled). Some games never call it -- Red Dead Redemption 2
+        // tracks the index itself -- and send their own Reflex markers, which skipped the call below: injected
+        // frame generation then failed every frame. A query, so asking it every frame costs nothing.
+        ((IDXGISwapChain4*) This)->GetCurrentBackBufferIndex();
+
         if ((!ReflexHooks::gameIsSendingMarkers() || !config->FGDLSSGUseGamesReflexMarkers.value_or_default()))
         {
             if (StreamlineProxy::PCLSetMarker() != nullptr)
             {
-                ((IDXGISwapChain4*) This)->GetCurrentBackBufferIndex();
                 const uint32_t frameId = (uint32_t) fg->FrameCount();
                 tokenResult = StreamlineProxy::GetNewFrameToken()(localToken, &frameId);
 

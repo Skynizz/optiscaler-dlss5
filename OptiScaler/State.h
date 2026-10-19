@@ -246,6 +246,12 @@ class State
 
     // optis dlls
     HMODULE optiSlInterposer = nullptr;
+
+    // Set while OptiScaler itself calls slInit for its injected DLSS-G. In a game that ships no Streamline the
+    // interposer loaded from the streamline folder is OptiScaler's own and gets hooked too, and the hook strips
+    // DLSS-G from what the GAME asks for -- which then stripped it from OptiScaler's own request ("Ignoring
+    // plugin 'sl.dlss_g' since it was not requested by the host", then "No DLSSG Support").
+    bool optiSlInitInProgress = false;
     HMODULE optiSlCommon = nullptr;
     HMODULE optiSlDLSSG = nullptr;
     HMODULE optiSlReflex = nullptr;
@@ -287,6 +293,14 @@ class State
     bool WAR_xefgRequestFGToggle = false;
 
     bool dlssgGameDMFGSupported = false;
+    bool dlssgGameNative = false; // the game sets DLSS-G options itself (it ships DLSS Frame Generation)
+
+    // What Streamline's frame pacing reports about the display (its "checkGsyncAndVsync" messages): -1 unknown.
+    int slGsyncOff = -1;         // 1: G-SYNC not in use for this game right now
+    int slVsyncOn = -1;          // V-Sync on
+    int slIndependentFlip = -1;  // 1: the game flips straight to the screen; 0: Windows composes it
+    int slGsyncSwitches = 0;     // how many times G-SYNC went from on to off
+    char slDrsVsync[32] = {};    // the NVIDIA driver profile's V-Sync mode for this game
     sl::DLSSGMode dlssgLastSetMode = sl::DLSSGMode::eOff;
     int dlssgDetectedInterpolationCount = 0;
 
